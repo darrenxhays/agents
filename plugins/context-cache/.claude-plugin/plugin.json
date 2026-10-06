@@ -1,0 +1,52 @@
+{
+  "name": "context-cache",
+  "version": "0.3.0",
+  "description": "Context window and prompt-cache band with auto keep-warm and one-click (or automatic) handoff to a fresh session",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "cacheTtl": {
+      "type": "string",
+      "title": "Prompt cache TTL",
+      "description": "How long the prompt cache lives after each request (5m or 1h)",
+      "default": "1h",
+      "options": [
+        "1h",
+        "5m"
+      ]
+    },
+    "autoKeepWarm": {
+      "type": "boolean",
+      "title": "Auto keep-warm, then compact or hand off",
+      "description": "While idle, refresh the cache before it expires, then run the idle action",
+      "default": true
+    },
+    "idleAction": {
+      "type": "string",
+      "title": "Idle action",
+      "description": "What to do while idle once refreshes run out or context passes the threshold: compact this session, or hand off to a fresh one",
+      "default": "compact",
+      "options": [
+        "compact",
+        "handoff"
+      ]
+    },
+    "keepWarmCount": {
+      "type": "number",
+      "title": "Keep-warm refreshes",
+      "description": "How many idle refreshes before running the idle action",
+      "default": 3
+    },
+    "handoffPercent": {
+      "type": "number",
+      "title": "Idle action threshold (% of context)",
+      "description": "At or above this context fill, skip refreshes and run the idle action at the first expiry point",
+      "default": 50
+    },
+    "leadSeconds": {
+      "type": "number",
+      "title": "Act this many seconds before expiry",
+      "description": "When to refresh or hand off, measured back from the cache expiring",
+      "default": 120
+    }
+  }
+}
