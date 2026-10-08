@@ -1,5 +1,8 @@
 {
   "name": "agents",
   "owner": { "name": "darrenxhays" },
-  "plugins": [{ "name": "context-cache", "source": "./plugins/context-cache" }]
+  "plugins": [
+    { "name": "context-cache", "source": "./plugins/context-cache" },
+    { "name": "darrenxhays", "source": "./" }
+  ]
 }

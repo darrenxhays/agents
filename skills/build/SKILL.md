@@ -1,6 +1,6 @@
 ---
 name: build
-description: This skill should be used when the user explicitly invokes "/build" to investigate and plan a feature in Claude Code, delegate implementation to Codex, review Codex's changes in Claude, send actionable comments back for one fix pass, and leave the result uncommitted for manual review. The argument is either text describing what to build, a path to a Markdown file containing what to build, or a link to a Jira ticket with the details.
+description: This skill should be used when the user explicitly invokes "/darrenxhays:build" to investigate and plan a feature in Claude Code, delegate implementation to Codex, review Codex's changes in Claude, send actionable comments back for one fix pass, and leave the result uncommitted for manual review. The argument is either text describing what to build, a path to a Markdown file containing what to build, or a link to a Jira ticket with the details.
 disable-model-invocation: true
 argument-hint: "<what to build | path/to/request.md | Jira ticket link>"
 allowed-tools:
@@ -48,7 +48,7 @@ Record the request source (inline text, file path, or ticket key/URL) so it can 
 - If `$ARGUMENTS` is empty, stop and ask the user what to build.
 - Confirm the current directory is inside the intended repository with `git rev-parse --show-toplevel`, `git branch --show-current`, `git status --short`, and a small set of top-level files.
 - Record the initial working-tree state, including staged, unstaged, and untracked paths. Preserve all pre-existing changes. If the requested feature would overlap ambiguous user changes and safe separation is not possible, stop before submitting work and ask the user how to proceed.
-- Confirm `codex` is on PATH using `command -v codex` before submitting work. If it is missing, stop and tell the user to install and authenticate it, then rerun `/build`:
+- Confirm `codex` is on PATH using `command -v codex` before submitting work. If it is missing, stop and tell the user to install and authenticate it, then rerun `/darrenxhays:build`:
   ```bash
   npm install -g @openai/codex   # or: brew install codex
   codex login

@@ -2,35 +2,30 @@
 
 Plugins and skills for Claude Code and Codex.
 
-## Skills
+## Skills (darrenxhays plugin)
 
-Clone the repo once, then link each skill into every agent that should use it. Each agent then reads the same files, so there's only one copy to update.
+All skills ship in one Claude Code plugin, so they're named `darrenxhays:<skill>`. Install, at a Claude Code prompt:
+
+```
+/plugin install darrenxhays --marketplace darrenxhays/agents
+```
+
+Turn on auto-update for the `agents` marketplace in `/plugin` to get every pushed change.
+
+**Codex:** if `~/.codex` exists, each Claude session links the Codex-compatible skills into `~/.codex/skills`, pointing at Claude's installed copy, so both agents share one copy. After uninstalling, remove the link: `rm ~/.codex/skills/pragmatic-engineer`. Codex without Claude: clone the repo and link the skill yourself:
 
 ```
 git clone https://github.com/darrenxhays/agents.git ~/agents
-mkdir -p ~/.claude/skills ~/.codex/skills
-```
-
-To update every installed skill in every agent at once: `git -C ~/agents pull`.
-
-If you clone somewhere other than `~/agents`, change the paths in the commands below to match.
-
-### pragmatic-engineer
-
-Used automatically for planning and coding tasks: understand the problem, then make the smallest correct change, reusing what already exists before writing anything new. Works in Claude Code and Codex.
-
-```
-ln -s ~/agents/skills/pragmatic-engineer ~/.claude/skills/pragmatic-engineer
 ln -s ~/agents/skills/pragmatic-engineer ~/.codex/skills/pragmatic-engineer
 ```
 
+### pragmatic-engineer
+
+Used automatically for planning and coding tasks: understand the problem, then make the smallest correct change, reusing what already exists before writing anything new. Claude Code and Codex.
+
 ### build
 
-`/build <request | path/to/request.md | Jira link>`: plan in Claude, implement with Codex, review, one fix pass, left uncommitted. Install it in Claude Code only, because it drives Codex from Claude. Requires the `codex` CLI.
-
-```
-ln -s ~/agents/skills/build ~/.claude/skills/build
-```
+`/darrenxhays:build <request | path/to/request.md | Jira link>`: plan in Claude, implement with Codex, review, one fix pass, left uncommitted. Claude Code only, since it drives Codex from Claude. Requires the `codex` CLI.
 
 ## Plugins
 

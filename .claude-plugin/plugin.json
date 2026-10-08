@@ -1,0 +1,9 @@
+{
+  "name": "darrenxhays",
+  "description": "darrenxhays skills: build and pragmatic-engineer, with pragmatic-engineer also linked into Codex",
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/link-codex-skills.sh\"" }] }
+    ]
+  }
+}
