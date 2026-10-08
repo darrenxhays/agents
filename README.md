@@ -25,3 +25,13 @@ ln -s ~/projects/agents/skills/build ~/.claude/skills/build
 ```
 
 Requires the `codex` CLI.
+
+## pragmatic-engineer (skill)
+
+Loaded automatically for planning and coding tasks: understand the problem, then make the smallest correct change, reusing what already exists before writing anything new.
+
+Install by linking it into your personal skills:
+
+```
+ln -s ~/projects/agents/skills/pragmatic-engineer ~/.claude/skills/pragmatic-engineer
+```
