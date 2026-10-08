@@ -12,11 +12,14 @@ All skills ship in one Claude Code plugin, so they're named `darrenxhays:<skill>
 
 Turn on auto-update for the `agents` marketplace in `/plugin` to get every pushed change.
 
-**Codex:** if `~/.codex` exists, each Claude session links the Codex-compatible skills into `~/.codex/skills`, pointing at Claude's installed copy, so both agents share one copy. After uninstalling, remove the link: `rm ~/.codex/skills/pragmatic-engineer`. Codex without Claude: clone the repo and link the skill yourself:
+Each Claude session tells the agent to use pragmatic-engineer for every planning and coding task. Your `CLAUDE.md` is not edited, so the rule goes away when the plugin is disabled or uninstalled.
+
+**Codex:** if `~/.codex` exists, each Claude session also links the Codex-compatible skills into `~/.codex/skills`, pointing at Claude's installed copy so both agents share one copy, and adds the same rule to `~/.codex/AGENTS.md` if it's missing. After uninstalling, remove both: `rm ~/.codex/skills/pragmatic-engineer` and the pragmatic-engineer line in `~/.codex/AGENTS.md`. Codex without Claude: clone the repo, link the skill and add the rule yourself:
 
 ```
 git clone https://github.com/darrenxhays/agents.git ~/agents
 ln -s ~/agents/skills/pragmatic-engineer ~/.codex/skills/pragmatic-engineer
+echo "For any planning or coding task, use the pragmatic-engineer skill." >> ~/.codex/AGENTS.md
 ```
 
 ### pragmatic-engineer
