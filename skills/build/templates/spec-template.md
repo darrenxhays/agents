@@ -1,9 +1,10 @@
 # Feature Spec: <feature title>
 
 ## User request
-- Source: <inline text | Markdown file `<path>` | Jira ticket `<KEY-123>` (`<url>`)>
+- Source: <inline text | Markdown file `<path>` | ticket `<id>` (`<url>`)>
+- Approved plan: `<zz/plan-<slug>.md>`
 
-<quote or paraphrase the requested feature; when the source is a Markdown file or Jira ticket, restate its requirements here in full>
+<quote or paraphrase the requested feature; when the source is a Markdown file or ticket, restate its requirements here in full>
 
 ## Executive summary
 <one paragraph: what should be built and why>

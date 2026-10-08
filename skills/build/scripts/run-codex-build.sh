@@ -37,8 +37,8 @@ if ! REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"; then
 fi
 REPO_ROOT="$(cd "$REPO_ROOT" && pwd -P)"
 
-# shared across every repo and session so specs and reviews never land in a repo
-ARTIFACTS_ROOT="$HOME/.claude/build"
+# zz/ is git-ignored through .git/info/exclude, so plans, specs, reviews and runs stay local
+ARTIFACTS_ROOT="$REPO_ROOT/zz"
 mkdir -p "$ARTIFACTS_ROOT/specs" "$ARTIFACTS_ROOT/reviews" "$ARTIFACTS_ROOT/runs"
 ARTIFACTS_ROOT="$(cd "$ARTIFACTS_ROOT" && pwd -P)"
 

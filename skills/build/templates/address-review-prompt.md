@@ -1,6 +1,6 @@
 You are an implementation agent running inside this repository after a Claude review pass.
 
-Address the Claude review comments below against the current working tree.
+Address the Claude review comments below against the current working tree. The build may have one spec or one per subtask; together they are the original spec.
 
 Operating rules:
 - Use the wrapper-provided `Review disposition` as authoritative. When it is `no-actionable`, do not make code changes; inspect enough to confirm and report that no follow-up implementation was needed.

@@ -3,31 +3,27 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-Usage: run-codex-address-review.sh <spec-path> <claude-review-path>
+Usage: run-codex-address-review.sh <claude-review-path> <spec-path>...
+
+Pass every spec of the build: one, or one per subtask.
 
 The Codex model and effort are read from the review's Review-fix model and
 Review-fix effort fields; the model must be in the Codex catalog (`codex debug models`).
 USAGE
 }
 
-if [[ $# -ne 2 ]]; then
+if [[ $# -lt 2 ]]; then
   usage
   exit 2
 fi
 
-SPEC_PATH="$1"
-REVIEW_PATH="$2"
-if [[ ! -f "$SPEC_PATH" ]]; then
-  echo "Spec file not found: $SPEC_PATH" >&2
-  exit 1
-fi
+REVIEW_PATH="$1"
+shift
 if [[ ! -f "$REVIEW_PATH" ]]; then
   echo "Claude review file not found: $REVIEW_PATH" >&2
   exit 1
 fi
 
-SPEC_DIR="$(cd "$(dirname "$SPEC_PATH")" && pwd -P)"
-SPEC_PATH="$SPEC_DIR/$(basename "$SPEC_PATH")"
 REVIEW_DIR="$(cd "$(dirname "$REVIEW_PATH")" && pwd -P)"
 REVIEW_PATH="$REVIEW_DIR/$(basename "$REVIEW_PATH")"
 
@@ -37,18 +33,26 @@ if ! REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"; then
 fi
 REPO_ROOT="$(cd "$REPO_ROOT" && pwd -P)"
 
-# shared across every repo and session so specs and reviews never land in a repo
-ARTIFACTS_ROOT="$HOME/.claude/build"
+# zz/ is git-ignored through .git/info/exclude, so plans, specs, reviews and runs stay local
+ARTIFACTS_ROOT="$REPO_ROOT/zz"
 mkdir -p "$ARTIFACTS_ROOT/specs" "$ARTIFACTS_ROOT/reviews" "$ARTIFACTS_ROOT/runs"
 ARTIFACTS_ROOT="$(cd "$ARTIFACTS_ROOT" && pwd -P)"
 
-case "$SPEC_PATH" in
-  "$ARTIFACTS_ROOT"/specs/*.md) ;;
-  *)
-    echo "Spec must be a Markdown file under $ARTIFACTS_ROOT/specs/" >&2
+SPEC_PATHS=()
+for spec in "$@"; do
+  if [[ ! -f "$spec" ]]; then
+    echo "Spec file not found: $spec" >&2
     exit 1
-    ;;
-esac
+  fi
+  spec="$(cd "$(dirname "$spec")" && pwd -P)/$(basename "$spec")"
+  case "$spec" in
+    "$ARTIFACTS_ROOT"/specs/*.md) SPEC_PATHS+=("$spec") ;;
+    *)
+      echo "Spec must be a Markdown file under $ARTIFACTS_ROOT/specs/" >&2
+      exit 1
+      ;;
+  esac
+done
 case "$REVIEW_PATH" in
   "$ARTIFACTS_ROOT"/reviews/*.md) ;;
   *)
@@ -117,9 +121,9 @@ fi
 cd "$REPO_ROOT"
 
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)-$$"
-SPEC_BASENAME="$(basename "$SPEC_PATH" .md)"
+REVIEW_BASENAME="$(basename "$REVIEW_PATH" .md)"
 OUTPUT_DIR="$ARTIFACTS_ROOT/runs"
-OUTPUT_PATH="$OUTPUT_DIR/${TIMESTAMP}-${SPEC_BASENAME}-address-review.md"
+OUTPUT_PATH="$OUTPUT_DIR/${TIMESTAMP}-${REVIEW_BASENAME}-address-review.md"
 mkdir -p "$OUTPUT_DIR"
 
 printf 'Running Codex model %s with %s reasoning effort.\n' "$MODEL" "$EFFORT"
@@ -127,9 +131,11 @@ printf 'Running Codex model %s with %s reasoning effort.\n' "$MODEL" "$EFFORT"
 {
   cat "$PROMPT_FILE"
   printf '\nReview disposition: %s\n\n' "$REVIEW_DISPOSITION"
-  printf '%s\n' '--- ORIGINAL SPEC START ---'
-  cat "$SPEC_PATH"
-  printf '\n--- ORIGINAL SPEC END ---\n\n'
+  for spec in "${SPEC_PATHS[@]}"; do
+    printf '%s\n' '--- ORIGINAL SPEC START ---'
+    cat "$spec"
+    printf '\n--- ORIGINAL SPEC END ---\n\n'
+  done
   printf '%s\n' '--- CLAUDE REVIEW COMMENTS START ---'
   cat "$REVIEW_PATH"
   printf '\n--- CLAUDE REVIEW COMMENTS END ---\n'

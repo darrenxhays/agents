@@ -28,7 +28,7 @@ Used automatically for planning and coding tasks: understand the problem, then m
 
 ### build
 
-`/darrenxhays:build <request | path/to/request.md | Jira link>`: plan in Claude, split the work into subtasks built in parallel, review, one fix pass, left uncommitted. Each subtask gets the latest model and the reasoning effort its complexity needs. Subtasks run on Codex when the `codex` CLI is installed, otherwise on Claude subagents. Claude Code only.
+`/darrenxhays:build <request | path/to/request.md | ticket link>`: ticket to PR. Takes a link from Jira, Azure DevOps, GitHub, or any board the session can reach. Claude creates a branch and writes a plan to `zz/` for you to review and approve, then splits the work into subtasks built in parallel, reviews them, runs one fix pass, and asks before committing, pushing, and opening a PR. Each subtask gets the latest model and the reasoning effort its complexity needs. Subtasks run on Codex when the `codex` CLI is installed, otherwise on Claude subagents. `zz/` is ignored through `.git/info/exclude` and never committed. Claude Code only.
 
 ## Plugins
 
