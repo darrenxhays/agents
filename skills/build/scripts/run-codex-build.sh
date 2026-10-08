@@ -3,14 +3,11 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-Usage: run-codex-build.sh <spec-path> <reasoning-effort>
+Usage: run-codex-build.sh <spec-path> <subtask-id>
 
-The Codex model is read from:
-  <skill-dir>/config/codex-model.txt
-
-Supported reasoning efforts: low, medium, high, xhigh, max
-
-This script intentionally accepts no runtime model override flags or environment-variable overrides. Edit the skill file above to change the Codex model.
+Builds one subtask (for example S1) of the spec with Codex. The subtask's Model and
+Effort are read from its section in the spec; the model must be in the Codex catalog
+(`codex debug models`). Run several at once for subtasks in the same wave.
 USAGE
 }
 
@@ -20,20 +17,16 @@ if [[ $# -ne 2 ]]; then
 fi
 
 SPEC_PATH="$1"
-EFFORT="$2"
+SUBTASK="$2"
 if [[ ! -f "$SPEC_PATH" ]]; then
   echo "Spec file not found: $SPEC_PATH" >&2
   exit 1
 fi
-
-case "$EFFORT" in
-  low|medium|high|xhigh|max) ;;
-  *)
-    echo "Unsupported reasoning effort: $EFFORT" >&2
-    usage
-    exit 2
-    ;;
-esac
+if [[ ! "$SUBTASK" =~ ^S[0-9]+$ ]]; then
+  echo "Subtask id must look like S1, S2, ...: $SUBTASK" >&2
+  usage
+  exit 2
+fi
 
 SPEC_DIR="$(cd "$(dirname "$SPEC_PATH")" && pwd -P)"
 SPEC_PATH="$SPEC_DIR/$(basename "$SPEC_PATH")"
@@ -46,7 +39,7 @@ REPO_ROOT="$(cd "$REPO_ROOT" && pwd -P)"
 
 # shared across every repo and session so specs and reviews never land in a repo
 ARTIFACTS_ROOT="$HOME/.claude/build"
-mkdir -p "$ARTIFACTS_ROOT/specs" "$ARTIFACTS_ROOT/reviews" "$ARTIFACTS_ROOT/codex-runs"
+mkdir -p "$ARTIFACTS_ROOT/specs" "$ARTIFACTS_ROOT/reviews" "$ARTIFACTS_ROOT/runs"
 ARTIFACTS_ROOT="$(cd "$ARTIFACTS_ROOT" && pwd -P)"
 
 case "$SPEC_PATH" in
@@ -57,13 +50,23 @@ case "$SPEC_PATH" in
     ;;
 esac
 
-SPEC_EFFORT="$(awk -F'`' '/^Reasoning effort: `(low|medium|high|xhigh|max)`$/ { print $2; exit }' "$SPEC_PATH")"
-if [[ -z "$SPEC_EFFORT" ]]; then
-  echo "Spec is missing a valid Reasoning effort field: $SPEC_PATH" >&2
+# Reads "- <field>: `value`" from the subtask's "### <id>: ..." section.
+subtask_field() {
+  awk -F'`' -v heading="### $SUBTASK:" -v prefix="- $1: \`" '
+    index($0, heading) == 1 { in_section = 1; next }
+    in_section && /^##/ { exit }
+    in_section && index($0, prefix) == 1 { print $2; exit }
+  ' "$SPEC_PATH"
+}
+
+if ! grep -q "^### $SUBTASK:" "$SPEC_PATH"; then
+  echo "Spec has no subtask section '### $SUBTASK:': $SPEC_PATH" >&2
   exit 1
 fi
-if [[ "$SPEC_EFFORT" != "$EFFORT" ]]; then
-  echo "Reasoning effort mismatch: spec says $SPEC_EFFORT but argument says $EFFORT" >&2
+MODEL="$(subtask_field Model)"
+EFFORT="$(subtask_field Effort)"
+if [[ -z "$MODEL" || "$MODEL" == *"<"* || -z "$EFFORT" || "$EFFORT" == *"<"* ]]; then
+  echo "Subtask $SUBTASK needs a filled-in Model and Effort in the spec: $SPEC_PATH" >&2
   exit 1
 fi
 
@@ -77,23 +80,16 @@ ERR
   exit 127
 fi
 
+if ! codex debug models 2>/dev/null | grep -qF "\"slug\":\"$MODEL\""; then
+  echo "Model $MODEL is not in the Codex catalog. Choose one from: codex debug models" >&2
+  exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
-MODEL_FILE="$SKILL_DIR/config/codex-model.txt"
-PROMPT_FILE="$SKILL_DIR/templates/codex-build-prompt.md"
-
-if [[ ! -s "$MODEL_FILE" ]]; then
-  echo "Codex model file is missing or empty: $MODEL_FILE" >&2
-  exit 1
-fi
+PROMPT_FILE="$SKILL_DIR/templates/build-prompt.md"
 if [[ ! -s "$PROMPT_FILE" ]]; then
   echo "Codex build prompt template is missing: $PROMPT_FILE" >&2
-  exit 1
-fi
-
-MODEL="$(awk '/^[[:space:]]*(#|$)/ { next } { gsub(/[[:space:]]/, "", $0); print; exit }' "$MODEL_FILE")"
-if [[ -z "$MODEL" ]]; then
-  echo "No Codex model configured in $MODEL_FILE" >&2
   exit 1
 fi
 
@@ -101,16 +97,14 @@ cd "$REPO_ROOT"
 
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)-$$"
 SPEC_BASENAME="$(basename "$SPEC_PATH" .md)"
-OUTPUT_DIR="$ARTIFACTS_ROOT/codex-runs"
-OUTPUT_PATH="$OUTPUT_DIR/${TIMESTAMP}-${SPEC_BASENAME}-build.md"
-mkdir -p "$OUTPUT_DIR"
+OUTPUT_PATH="$ARTIFACTS_ROOT/runs/${TIMESTAMP}-${SPEC_BASENAME}-${SUBTASK}-build.md"
 
-printf 'Running Codex model %s with %s reasoning effort.\n' "$MODEL" "$EFFORT"
+printf 'Running %s with Codex model %s at %s reasoning effort.\n' "$SUBTASK" "$MODEL" "$EFFORT"
 
 {
   cat "$PROMPT_FILE"
   cat "$SPEC_PATH"
-  printf '\n--- SPEC END ---\n'
+  printf '\n--- SPEC END ---\n\nYour subtask: %s\n' "$SUBTASK"
 } | codex exec --model "$MODEL" --config "model_reasoning_effort=\"$EFFORT\"" --sandbox workspace-write --output-last-message "$OUTPUT_PATH" -
 
 if [[ ! -s "$OUTPUT_PATH" ]]; then
@@ -118,4 +112,4 @@ if [[ ! -s "$OUTPUT_PATH" ]]; then
   exit 1
 fi
 
-printf 'Codex build final message saved to %s\n' "$OUTPUT_PATH"
+printf 'Codex %s final message saved to %s\n' "$SUBTASK" "$OUTPUT_PATH"

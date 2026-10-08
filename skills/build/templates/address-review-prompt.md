@@ -1,4 +1,4 @@
-You are Codex running inside this repository after a Claude review pass.
+You are an implementation agent running inside this repository after a Claude review pass.
 
 Address the Claude review comments below against the current working tree.
 

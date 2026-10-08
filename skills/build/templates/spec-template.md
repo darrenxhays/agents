@@ -53,12 +53,19 @@
 ## Risks and mitigations
 - <risk>: <mitigation>
 
-## Codex build instructions
-Build exactly the feature described above.
+## Implementation subtasks
+Each subtask is one implementer run: Codex, or a Claude subagent when Codex is not installed. Subtasks in the same wave run at the same time in this working tree and must own different files; a later wave starts only after the previous one finishes. Most changes are a single subtask.
 
-Reasoning effort: `<low|medium|high|xhigh|max>`
+### S1: <subtask title>
+- Wave: `1`
+- Owns: `<path>`, `<path>`
+- Model: `<latest-version model for the current mode>`
+- Effort: `<effort the model supports>`
+- Rationale: <one sentence tying the model and effort to the scope and risk of this subtask>
+- Build: <what this subtask implements and which acceptance criteria it covers>
 
-Effort rationale: <one sentence tied to the scope and risk of this implementation>
+## Build instructions
+Build exactly your subtask of the feature described above.
 
 Constraints:
 - Make the smallest complete change that satisfies the acceptance criteria.

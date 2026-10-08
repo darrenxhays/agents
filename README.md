@@ -28,7 +28,7 @@ Used automatically for planning and coding tasks: understand the problem, then m
 
 ### build
 
-`/darrenxhays:build <request | path/to/request.md | Jira link>`: plan in Claude, implement with Codex, review, one fix pass, left uncommitted. Claude Code only, since it drives Codex from Claude. Requires the `codex` CLI.
+`/darrenxhays:build <request | path/to/request.md | Jira link>`: plan in Claude, split the work into subtasks built in parallel, review, one fix pass, left uncommitted. Each subtask gets the latest model and the reasoning effort its complexity needs. Subtasks run on Codex when the `codex` CLI is installed, otherwise on Claude subagents. Claude Code only.
 
 ## Plugins
 

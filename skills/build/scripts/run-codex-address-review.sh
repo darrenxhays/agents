@@ -3,25 +3,20 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-Usage: run-codex-address-review.sh <spec-path> <claude-review-path> <reasoning-effort>
+Usage: run-codex-address-review.sh <spec-path> <claude-review-path>
 
-The Codex model is read from:
-  <skill-dir>/config/codex-model.txt
-
-Supported reasoning efforts: low, medium, high, xhigh, max
-
-This script intentionally accepts no runtime model override flags or environment-variable overrides. Edit the skill file above to change the Codex model.
+The Codex model and effort are read from the review's Review-fix model and
+Review-fix effort fields; the model must be in the Codex catalog (`codex debug models`).
 USAGE
 }
 
-if [[ $# -ne 3 ]]; then
+if [[ $# -ne 2 ]]; then
   usage
   exit 2
 fi
 
 SPEC_PATH="$1"
 REVIEW_PATH="$2"
-EFFORT="$3"
 if [[ ! -f "$SPEC_PATH" ]]; then
   echo "Spec file not found: $SPEC_PATH" >&2
   exit 1
@@ -30,15 +25,6 @@ if [[ ! -f "$REVIEW_PATH" ]]; then
   echo "Claude review file not found: $REVIEW_PATH" >&2
   exit 1
 fi
-
-case "$EFFORT" in
-  low|medium|high|xhigh|max) ;;
-  *)
-    echo "Unsupported reasoning effort: $EFFORT" >&2
-    usage
-    exit 2
-    ;;
-esac
 
 SPEC_DIR="$(cd "$(dirname "$SPEC_PATH")" && pwd -P)"
 SPEC_PATH="$SPEC_DIR/$(basename "$SPEC_PATH")"
@@ -53,7 +39,7 @@ REPO_ROOT="$(cd "$REPO_ROOT" && pwd -P)"
 
 # shared across every repo and session so specs and reviews never land in a repo
 ARTIFACTS_ROOT="$HOME/.claude/build"
-mkdir -p "$ARTIFACTS_ROOT/specs" "$ARTIFACTS_ROOT/reviews" "$ARTIFACTS_ROOT/codex-runs"
+mkdir -p "$ARTIFACTS_ROOT/specs" "$ARTIFACTS_ROOT/reviews" "$ARTIFACTS_ROOT/runs"
 ARTIFACTS_ROOT="$(cd "$ARTIFACTS_ROOT" && pwd -P)"
 
 case "$SPEC_PATH" in
@@ -71,13 +57,10 @@ case "$REVIEW_PATH" in
     ;;
 esac
 
-REVIEW_EFFORT="$(awk -F'`' '/^- Review-fix effort: `(low|medium|high|xhigh|max)`$/ { print $2; exit }' "$REVIEW_PATH")"
-if [[ -z "$REVIEW_EFFORT" ]]; then
-  echo "Review is missing a valid Review-fix effort field: $REVIEW_PATH" >&2
-  exit 1
-fi
-if [[ "$REVIEW_EFFORT" != "$EFFORT" ]]; then
-  echo "Reasoning effort mismatch: review says $REVIEW_EFFORT but argument says $EFFORT" >&2
+MODEL="$(awk -F'`' 'index($0, "- Review-fix model: `") == 1 { print $2; exit }' "$REVIEW_PATH")"
+EFFORT="$(awk -F'`' 'index($0, "- Review-fix effort: `") == 1 { print $2; exit }' "$REVIEW_PATH")"
+if [[ -z "$MODEL" || "$MODEL" == *"<"* || -z "$EFFORT" || "$EFFORT" == *"<"* ]]; then
+  echo "Review needs a filled-in Review-fix model and Review-fix effort: $REVIEW_PATH" >&2
   exit 1
 fi
 
@@ -87,7 +70,7 @@ if grep -Fq '<Replace this line' "$REVIEW_PATH" || grep -Fq '<file/path or area>
 fi
 
 REVIEW_DISPOSITION="$(awk '
-  $0 == "## Review comments for Codex" { in_section = 1; next }
+  $0 == "## Review comments" { in_section = 1; next }
   in_section && /^## / { in_section = 0 }
   in_section && $0 == "No actionable review comments." { sentinel++ }
   in_section && /^### / { headings++ }
@@ -117,23 +100,17 @@ ERR
   exit 127
 fi
 
+if ! codex debug models 2>/dev/null | grep -qF "\"slug\":\"$MODEL\""; then
+  echo "Model $MODEL is not in the Codex catalog. Choose one from: codex debug models" >&2
+  exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
-MODEL_FILE="$SKILL_DIR/config/codex-model.txt"
-PROMPT_FILE="$SKILL_DIR/templates/codex-address-review-prompt.md"
+PROMPT_FILE="$SKILL_DIR/templates/address-review-prompt.md"
 
-if [[ ! -s "$MODEL_FILE" ]]; then
-  echo "Codex model file is missing or empty: $MODEL_FILE" >&2
-  exit 1
-fi
 if [[ ! -s "$PROMPT_FILE" ]]; then
   echo "Codex address-review prompt template is missing: $PROMPT_FILE" >&2
-  exit 1
-fi
-
-MODEL="$(awk '/^[[:space:]]*(#|$)/ { next } { gsub(/[[:space:]]/, "", $0); print; exit }' "$MODEL_FILE")"
-if [[ -z "$MODEL" ]]; then
-  echo "No Codex model configured in $MODEL_FILE" >&2
   exit 1
 fi
 
@@ -141,7 +118,7 @@ cd "$REPO_ROOT"
 
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)-$$"
 SPEC_BASENAME="$(basename "$SPEC_PATH" .md)"
-OUTPUT_DIR="$ARTIFACTS_ROOT/codex-runs"
+OUTPUT_DIR="$ARTIFACTS_ROOT/runs"
 OUTPUT_PATH="$OUTPUT_DIR/${TIMESTAMP}-${SPEC_BASENAME}-address-review.md"
 mkdir -p "$OUTPUT_DIR"
 
