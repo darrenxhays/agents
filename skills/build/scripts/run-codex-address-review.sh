@@ -9,6 +9,9 @@ Pass every spec of the build: one, or one per subtask.
 
 The Codex model and effort are read from the review's Review-fix model and
 Review-fix effort fields; the model must be in the Codex catalog (`codex debug models`).
+
+BUILD_OUTPUT_DIR sets the output directory (default: zz). Relative paths are
+resolved from the repository root; absolute paths are used as given.
 USAGE
 }
 
@@ -33,8 +36,12 @@ if ! REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"; then
 fi
 REPO_ROOT="$(cd "$REPO_ROOT" && pwd -P)"
 
-# zz/ is git-ignored through .git/info/exclude, so plans, specs, reviews and runs stay local
-ARTIFACTS_ROOT="$REPO_ROOT/zz"
+# Preflight keeps this directory local and excludes it from Git when inside the repo.
+ARTIFACTS_ROOT="${BUILD_OUTPUT_DIR:-zz}"
+case "$ARTIFACTS_ROOT" in
+  /*) ;;
+  *) ARTIFACTS_ROOT="$REPO_ROOT/$ARTIFACTS_ROOT" ;;
+esac
 mkdir -p "$ARTIFACTS_ROOT/specs" "$ARTIFACTS_ROOT/reviews" "$ARTIFACTS_ROOT/runs"
 ARTIFACTS_ROOT="$(cd "$ARTIFACTS_ROOT" && pwd -P)"
 

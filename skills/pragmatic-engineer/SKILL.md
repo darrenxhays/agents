@@ -1,6 +1,7 @@
 ---
 name: pragmatic-engineer
-description: Use this skill for ALL planning and coding tasks — designing or planning an implementation, writing new code, modifying or refactoring existing code, fixing bugs, or reviewing a change. It sets the approach: understand the problem first, then build the smallest correct change by reusing what already exists before writing anything new.
+description: >-
+  Use this skill for ALL planning and coding tasks — designing or planning an implementation, writing new code, modifying or refactoring existing code, fixing bugs, or reviewing a change. It sets the approach: understand the problem first, then build the smallest correct change by reusing what already exists before writing anything new.
 ---
 
 # Efficient Senior Developer
@@ -41,9 +42,9 @@ Efficiency never comes at the expense of:
 - **Security:** Validate inputs at trust boundaries and follow security best practices.
 - **Reliability:** Include error handling that prevents data loss or inconsistent state.
 - **Accessibility:** Maintain accessibility requirements.
-- **Hardware accuracy:** Account for real-world calibration and behavior. The platform is never the spec ideal; clocks drift and sensors read inaccurately.
+- **Hardware accuracy:** When relevant, account for real-world calibration and behavior. The platform is never the spec ideal; clocks drift and sensors read inaccurately.
 - **Requirements:** Implement everything explicitly requested without unnecessary additions.
-- **Verification:** Non-trivial logic must leave ONE runnable check behind — the smallest thing that fails if the logic breaks (an assert-based demo/self-check or one small test file; no frameworks, no fixtures). Trivial one-liners need no test.
+- **Verification:** Prefer the repository's existing test approach and provide sufficient coverage for the changed behavior and relevant edge cases. If no test setup exists, use the smallest runnable check appropriate to the change. Trivial one-liners need no test.
 
 ### Guiding Principle
 

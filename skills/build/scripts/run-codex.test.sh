@@ -3,6 +3,8 @@
 set -euo pipefail
 scripts="$(cd "$(dirname "$0")" && pwd)"
 tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+unset BUILD_OUTPUT_DIR
 mkdir -p "$tmp/bin" "$tmp/repo/zz/specs" "$tmp/repo/zz/reviews"
 git -C "$tmp/repo" init -q
 fail() { echo "FAIL: $1"; exit 1; }
@@ -62,5 +64,26 @@ write_review medium 'No actionable review comments.'
 write_review low 'No actionable review comments.'
 bash "$scripts/run-codex-address-review.sh" "$review" "$spec" >/dev/null
 grep -qx 'Review disposition: no-actionable' "$tmp/prompt" || fail "no-actionable disposition"
+
+# An empty setting retains the default; overrides work from a repository subdirectory.
+BUILD_OUTPUT_DIR= bash "$scripts/run-codex-build.sh" "$spec" S1 >/dev/null
+BUILD_OUTPUT_DIR= bash "$scripts/run-codex-address-review.sh" "$review" "$spec" >/dev/null
+mkdir -p "$tmp/repo/src"
+cd "$tmp/repo/src"
+check_output_directory() {
+  local setting="$1" expected="$2"
+  mkdir -p "$expected/specs" "$expected/reviews"
+  cp "$spec" "$expected/specs/custom.md"
+  cp "$review" "$expected/reviews/custom.md"
+  BUILD_OUTPUT_DIR="$setting" bash "$scripts/run-codex-build.sh" "$expected/specs/custom.md" S1 >/dev/null
+  ls "$expected/runs/"*-custom-S1-build.md >/dev/null || fail "build output missing from $expected"
+  BUILD_OUTPUT_DIR="$setting" bash "$scripts/run-codex-address-review.sh" "$expected/reviews/custom.md" "$expected/specs/custom.md" >/dev/null
+  ls "$expected/runs/"*-custom-address-review.md >/dev/null || fail "review output missing from $expected"
+  ! BUILD_OUTPUT_DIR="$setting" bash "$scripts/run-codex-build.sh" "$spec" S1 2>/dev/null || fail "build accepted spec outside configured directory"
+  ! BUILD_OUTPUT_DIR="$setting" bash "$scripts/run-codex-address-review.sh" "$expected/reviews/custom.md" "$spec" 2>/dev/null || fail "review accepted spec outside configured directory"
+  ! BUILD_OUTPUT_DIR="$setting" bash "$scripts/run-codex-address-review.sh" "$review" "$expected/specs/custom.md" 2>/dev/null || fail "accepted review outside configured directory"
+}
+check_output_directory 'local output/nested/' "$tmp/repo/local output/nested"
+check_output_directory "$tmp/absolute output/" "$tmp/absolute output"
 
 echo ok

@@ -9,6 +9,7 @@ Operating rules:
 - Make the smallest complete changes that address Critical and Should fix comments.
 - Address Nice to have comments only when they are low-risk and clearly within scope.
 - Reuse existing repository conventions.
+- For code comments, follow the codebase's existing conventions, omit specific ticket numbers and pull request references, and keep inline comments as concise as possible on one line unless the explanation needs more than one line. Project- or organization-wide comment guidelines take precedence over these defaults.
 - Run the most relevant validation commands available after the follow-up changes.
 - Do not commit, push, create branches, open pull requests, rebase, reset, clean, stash, rewrite git history, expose secrets, or make unrelated changes.
 - Leave all changes uncommitted in the working tree for the user's manual review.

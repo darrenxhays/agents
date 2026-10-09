@@ -28,7 +28,9 @@ Used automatically for planning and coding tasks: understand the problem, then m
 
 ### build
 
-`/darrenxhays:build <request | path/to/request.md | ticket link>`: ticket to PR. Takes a link from Jira, Azure DevOps, GitHub, or any board the session can reach. Claude creates a branch and writes a plan to `zz/` for you to review and approve, then splits the work into subtasks built in parallel, reviews them, runs one fix pass, and asks before committing, pushing, and opening a PR. Each subtask gets the latest model and the reasoning effort its complexity needs. Subtasks run on Codex when the `codex` CLI is installed, otherwise on Claude subagents. `zz/` is ignored through `.git/info/exclude` and never committed. Claude Code only.
+`/darrenxhays:build <request | path/to/request.md | ticket link>`: ticket to PR. Takes a link from Jira, Azure DevOps, GitHub, or any board the session can reach. Claude creates a branch and writes a plan to the output directory (`zz/` by default) for you to review and approve, then splits the work into subtasks built in parallel, reviews them, runs one fix pass, and asks before committing, pushing, and opening a PR. Each subtask gets the latest model and the reasoning effort its complexity needs. Subtasks run on Codex when the `codex` CLI is installed, otherwise on Claude subagents. Output files stay local and are never committed; output directories inside the repository are ignored through `.git/info/exclude`. Claude Code only.
+
+Set `BUILD_OUTPUT_DIR` before starting Claude to change the output directory, for example `BUILD_OUTPUT_DIR=.build-output claude`. You can also specify an output directory in your build request. Relative paths resolve from the repository root; absolute paths are supported. Choose a dedicated directory for plans, specs, reviews, and run reports. The same setting applies to both Codex helper scripts.
 
 ## Plugins
 

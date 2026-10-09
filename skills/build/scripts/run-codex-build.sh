@@ -8,6 +8,9 @@ Usage: run-codex-build.sh <spec-path> <subtask-id>
 Builds one subtask (for example S1) of the spec with Codex. The subtask's Model and
 Effort are read from its section in the spec; the model must be in the Codex catalog
 (`codex debug models`). Run several at once for subtasks in the same wave.
+
+BUILD_OUTPUT_DIR sets the output directory (default: zz). Relative paths are
+resolved from the repository root; absolute paths are used as given.
 USAGE
 }
 
@@ -37,8 +40,12 @@ if ! REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"; then
 fi
 REPO_ROOT="$(cd "$REPO_ROOT" && pwd -P)"
 
-# zz/ is git-ignored through .git/info/exclude, so plans, specs, reviews and runs stay local
-ARTIFACTS_ROOT="$REPO_ROOT/zz"
+# Preflight keeps this directory local and excludes it from Git when inside the repo.
+ARTIFACTS_ROOT="${BUILD_OUTPUT_DIR:-zz}"
+case "$ARTIFACTS_ROOT" in
+  /*) ;;
+  *) ARTIFACTS_ROOT="$REPO_ROOT/$ARTIFACTS_ROOT" ;;
+esac
 mkdir -p "$ARTIFACTS_ROOT/specs" "$ARTIFACTS_ROOT/reviews" "$ARTIFACTS_ROOT/runs"
 ARTIFACTS_ROOT="$(cd "$ARTIFACTS_ROOT" && pwd -P)"
 

@@ -2,7 +2,7 @@
 
 ## User request
 - Source: <inline text | Markdown file `<path>` | ticket `<id>` (`<url>`)>
-- Approved plan: `<zz/plan-<slug>.md>`
+- Approved plan: `<plan path in the configured output directory>`
 
 <quote or paraphrase the requested feature; when the source is a Markdown file or ticket, restate its requirements here in full>
 

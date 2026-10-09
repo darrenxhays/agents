@@ -8,6 +8,7 @@ Operating rules:
 - Treat the spec as authoritative, but verify it against the repository before editing.
 - Make the smallest complete change that satisfies the acceptance criteria.
 - Prefer existing repository conventions over new architecture.
+- For code comments, follow the codebase's existing conventions, omit specific ticket numbers and pull request references, and keep inline comments as concise as possible on one line unless the explanation needs more than one line. Project- or organization-wide comment guidelines take precedence over these defaults.
 - Add or update tests where the codebase has relevant test coverage.
 - Run only validation scoped to your subtask's files, and do not run formatters or code generators across the repository. Other subtasks may be mid-edit, so repo-wide checks can fail for reasons outside your work; Claude runs full validation after every subtask finishes.
 - Do not commit, push, create branches, open pull requests, rebase, reset, clean, stash, rewrite git history, expose secrets, or make unrelated changes.
