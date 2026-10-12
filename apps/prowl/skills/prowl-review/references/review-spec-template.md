@@ -19,7 +19,7 @@ Fill every field. The reviewer sees only this document, the reviewer-instruction
 **Your PR** (repo, number, title, head SHA, posting mode):
 - <owner/repo>#<n> — <title> — `<headRefOid>` — formal/comment
 
-**Depth expectation:** <e.g. "trace every query in the repository layer end-to-end for tenant key application"; "line-by-line on the handler and the migration; skim the DTOs">
+**Depth expectation:** <e.g. "trace every read and write in the changed path end-to-end for the access check"; "line-by-line on the new function and the data change; skim the generated code">
 
 ## 4. Sibling PRs
 
@@ -40,7 +40,7 @@ Each came from the orchestrator's mapping pass. **Report an outcome for every on
 
 ## 7. Batch-specific questions
 
-<Concrete questions about this PR's place in the batch, e.g. "Does the FE form's `startDate` serialize to the ISO format the API's validator expects?", "What happens if #4206 deploys before #1117's migration has run?">
+<Concrete questions about this PR's place in the batch, e.g. "Does the `startDate` this PR writes use the date format the sibling PR parses?", "What happens if this PR is released before the sibling PR's data change has run?">
 
 ## 8. Output
 

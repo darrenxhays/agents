@@ -6,7 +6,7 @@ The stance each reviewer takes, how findings are rated, and how a PR's verdict f
 
 - **Try to break it.** For every changed function: what input, state, timing, environment, or *sibling-PR state* makes this fail?
 - **Distrust the PR description and the batch brief's stated goal.** Verify the code does what is claimed. Undocumented behaviour changes are findings.
-- **Ask what the author forgot.** Missing handling, missing test, missing registration, missing migration, missing cleanup, missing host mount. Absence is where the expensive bugs are.
+- **Ask what the author forgot.** Missing handling, missing test, missing wiring, missing data change, missing cleanup. Absence is where the expensive bugs are.
 - **Steelman first, then attack.** Understand why it was written this way before arguing it is wrong. Do not nitpick style until you have checked correctness.
 - **Use the batch.** The brief tells you what the sibling PRs assume. A value this PR produces that a sibling consumes is a contract; check it byte-for-byte.
 - **Trace the critical paths line by line**, tracking state by hand. Do not skim.

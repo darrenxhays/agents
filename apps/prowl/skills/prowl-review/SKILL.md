@@ -1,6 +1,6 @@
 ---
 name: prowl-review
-description: Reviews a SET of related GitHub pull requests as one body of work, review-only — no fix loop, no code changes, no pushes. Given any number of PR links/numbers (any mix of repos), the orchestrator inspects every PR to build a batch brief (the goal of the work, how the PRs depend on and fit together), writes one review specification per PR (naming the axes that apply to it: batch coherence/integration, correctness, security, data/migrations, concurrency, tests, performance, operations, frontend, conventions…), and fans each spec out to its own reviewer subagent. Reviewers report findings back and post nothing. Every finding is then independently verified (verifier subagents, or the orchestrator for trivially checkable ones); refuted or mis-scoped findings go back to the originating reviewer for revision. Only verified findings are posted, as one batched review per PR with inline comments, from the user's own gh identity. Use when asked to "review these PRs together", "batch review", "review this set/stack of PRs", "review the PRs for this feature/slice/work item", "cross-PR review", or when several related PR links are pasted for review without asking for fixes. Do NOT use when a fix-and-re-review loop is wanted (`adversarial-pr-review`), for PRs Claude created this session (`pr-review-loop`), or for reading/responding to existing PR comments (`pr-review`). Requires the `gh` CLI and subagent (Agent) support.
+description: Reviews a SET of related GitHub pull requests as one body of work, review-only — no fix loop, no code changes, no pushes. Given any number of PR links/numbers (any mix of repos), the orchestrator inspects every PR to build a batch brief (the goal of the work, how the PRs depend on and fit together), writes one review specification per PR (naming the axes that apply to it: batch coherence/integration, correctness, security, data/migrations, concurrency, tests, performance, operations, user interface, conventions…), and fans each spec out to its own reviewer subagent. Reviewers report findings back and post nothing. Every finding is then independently verified (verifier subagents, or the orchestrator for trivially checkable ones); refuted or mis-scoped findings go back to the originating reviewer for revision. Only verified findings are posted, as one batched review per PR with inline comments, from the user's own gh identity. Use when asked to "review these PRs together", "batch review", "review this set/stack of PRs", "review the PRs for this feature/slice/work item", "cross-PR review", or when several related PR links are pasted for review without asking for fixes. Do NOT use when a fix-and-re-review loop is wanted (`adversarial-pr-review`), for PRs Claude created this session (`pr-review-loop`), or for reading/responding to existing PR comments (`pr-review`). Requires the `gh` CLI and subagent (Agent) support.
 ---
 
 # PR-Owl Review
@@ -32,7 +32,7 @@ A batch run is long. Context may be summarized part-way through, so keep your wo
 
 ## Step 1 — Parse and verify the PR list
 
-Accept, mixed freely: bare numbers (`#4206`, resolved against the current directory's repo via `gh repo view --json nameWithOwner -q .nameWithOwner`), qualified refs (`owner/repo#123`), and full PR URLs. PRs across multiple repos in one batch are the normal case.
+Accept, mixed freely: bare numbers (`#42`, resolved against the current directory's repo via `gh repo view --json nameWithOwner -q .nameWithOwner`), qualified refs (`owner/repo#123`), and full PR URLs. PRs across multiple repos in one batch are the normal case.
 
 For each PR:
 
@@ -52,17 +52,17 @@ gh pr view <number> --repo <owner/repo> --json number,title,body,state,url,autho
 
 This is your one reading pass. The goal is a **batch brief** that a reviewer who has never seen these PRs can read in two minutes and then review its PR with full awareness of the whole.
 
-Gather, per PR: title, description, linked work items/issues (fetch them if an issue-tracker tool is available — the stated goal usually lives there, not in the PR body), commit messages, `gh pr diff --stat`, and the file list. Then read the diffs for **shape**: which layers each PR touches, what public surfaces it adds or changes (endpoints, events, schemas, DTOs, config keys, feature toggles, registry entries, routes), what it consumes from a sibling PR.
+Gather, per PR: title, description, linked work items/issues (fetch them if an issue-tracker tool is available — the stated goal usually lives there, not in the PR body), commit messages, `gh pr diff --stat`, and the file list. Then read the diffs for **shape**: which parts of the system each PR touches, what shared surfaces it adds or changes (functions, APIs, commands, messages, data formats, schemas, config keys, feature flags, registrations), what it consumes from a sibling PR.
 
-**Budget.** If the batch's combined diff is under roughly 1,500 changed lines, read the diffs yourself (`gh pr diff`). Above that, dispatch one **mapping subagent per PR** (general-purpose, read-only, working-copy rules below) to return a structured per-PR map — layers touched, public surfaces produced/consumed, migrations, toggles, tests added, notable risks — and build the brief from those maps. Either way, the brief is *your* synthesis.
+**Budget.** If the batch's combined diff is under roughly 1,500 changed lines, read the diffs yourself (`gh pr diff`). Above that, dispatch one **mapping subagent per PR** (general-purpose, read-only, working-copy rules below) to return a structured per-PR map — parts of the system touched, shared surfaces produced/consumed, data changes, flags, tests added, notable risks — and build the brief from those maps. Either way, the brief is *your* synthesis.
 
 Write `batch-brief.md` with:
 
 1. **Goal of the work** — what the set is meant to deliver, in the author's terms, with links to the work item(s).
-2. **PR roster** — one line per PR: repo, number, title, role in the batch, layers touched, size, state, posting mode.
+2. **PR roster** — one line per PR: repo, number, title, role in the batch, parts of the system touched, size, state, posting mode.
 3. **Dependency graph** — which PR produces what and which consumes it; required merge/deploy order; what breaks (or silently no-ops) if one merges without the other; feature toggles that gate the set.
 4. **Shared surfaces** — contracts, files, names that appear in more than one PR (the highest-value targets for the coherence axis).
-5. **Completeness questions** — what the goal implies should exist and you could not find (a registered UI with no host mount, an endpoint with no handler registration, a migration with no rollback, a consumer with no producer). These become hypotheses in the specs.
+5. **Completeness questions** — what the goal implies should exist and you could not find (something new that nothing wires in or calls, an output with no consumer or a consumer with no producer, a data change with no way back, a setting that is never supplied). These become hypotheses in the specs.
 6. **Hypotheses** — anything that looked wrong while mapping. Each goes into a spec; none is a finding yet.
 
 **Comments already on the PRs.** For each open PR, fetch what other reviewers (people, Copilot, other bots) have already said, so the verified findings can be checked against it in Step 6:
