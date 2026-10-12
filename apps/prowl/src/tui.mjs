@@ -24,10 +24,15 @@ const FIELDS = [
   { key: 'jira.email', label: 'Jira email', type: 'text', when: JIRA, help: 'The email you sign in to Atlassian with.', valid: v => /^[^\s@"\\]+@[^\s@"\\]+$/.test(v) || 'must be an email address' },
   { key: 'jira.token', label: 'Jira API token', type: 'secret', when: JIRA, help: 'Create one at id.atlassian.com > Security > API tokens. Kept in your OS credential store, never in the config file.' },
   'boards',
-  { key: 'tags.trigger', label: 'Trigger tag', type: 'text', help: 'Tickets carrying this tag (a Jira label), or a near-miss spelling of it, get reviewed.' },
-  { key: 'tags.inProgress', label: 'In-progress tag', type: 'text', help: 'Set when a review starts. ADO: colour it yellow in board settings > Cards > Tag colors. Jira: spaces become dashes (In-Review).' },
-  { key: 'tags.done', label: 'Done tag', type: 'text', help: 'Set when a review finishes. Re-add the trigger tag to ask for a re-review.' },
-  { key: 'tagMatchMaxTypos', label: 'Tag typo tolerance', type: 'int', min: 0, max: 3, help: 'Typos (wrong, missing, extra or swapped letters) still treated as the trigger tag. Case, spaces and punctuation are always ignored. 0 = exact.' },
+  // Jira calls tags labels: `jira` replaces the label and help shown when it is the task board.
+  { key: 'tags.trigger', label: 'Trigger tag', type: 'text', help: 'Tickets carrying this tag, or a near-miss spelling of it, get reviewed.',
+    jira: { label: 'Trigger label', help: 'Issues carrying this label, or a near-miss spelling of it, get reviewed.' } },
+  { key: 'tags.inProgress', label: 'In-progress tag', type: 'text', help: 'Set when a review starts. Colour it yellow in board settings > Cards > Tag colors.',
+    jira: { label: 'In-progress label', help: 'Set when a review starts. Spaces become dashes (In-Review).' } },
+  { key: 'tags.done', label: 'Done tag', type: 'text', help: 'Set when a review finishes. Re-add the trigger tag to ask for a re-review.',
+    jira: { label: 'Done label', help: 'Set when a review finishes. Spaces become dashes. Re-add the trigger label to ask for a re-review.' } },
+  { key: 'tagMatchMaxTypos', label: 'Tag typo tolerance', type: 'int', min: 0, max: 3, help: 'Typos (wrong, missing, extra or swapped letters) still treated as the trigger tag. Case, spaces and punctuation are always ignored. 0 = exact.',
+    jira: { label: 'Label typo tolerance', help: 'Typos (wrong, missing, extra or swapped letters) still treated as the trigger label. Case, spaces and punctuation are always ignored. 0 = exact.' } },
   { key: 'githubOwner', label: 'GitHub org', type: 'text', help: 'Open PRs whose title or description mentions the ticket (AB#123 or PROJ-123) are searched for here. Your own PRs are always skipped.' },
   { key: 'pollSeconds', label: 'Poll every (seconds)', type: 'int', min: 30, max: 86400, help: 'How often the boards are checked. r polls now.' },
   { key: 'maxConcurrentReviews', label: 'Max parallel reviews', type: 'int', min: 1, max: 10, help: "Extra tickets stay tagged until a slot frees, so a teammate's poller can take them." },
@@ -214,7 +219,7 @@ export function startTui(app, actions) {
 
   function configRows() {
     const [one, add] = BOARD_HELP[app.cfg.taskBoard];
-    return FIELDS.filter(f => !f.when || f.when(app.cfg)).flatMap(f => (f !== 'boards' ? [f] : [
+    return FIELDS.filter(f => !f.when || f.when(app.cfg)).flatMap(f => (f !== 'boards' ? [JIRA(app.cfg) && f.jira ? { ...f, ...f.jira } : f] : [
       ...app.boards().map((b, i) => ({ board: i, label: `Board ${i + 1}`, help: `${one} enter edits · d deletes.` })),
       { addBoard: true, label: '+ Add board', help: add },
     ]));
@@ -244,7 +249,7 @@ export function startTui(app, actions) {
     }
     rows.push([], ui.edit?.error ? [[ST.red, `  ${ui.edit.error}`]] : [[ST.grey, `  ${fields[sel].help}`]]);
     const variants = Object.entries(app.tagVariants).map(([p, v]) => `${p}: ${v.join(', ') || 'none yet'}`).join('  ·  ');
-    if (variants) rows.push([[ST.grey, '  Tags treated as the trigger: '], ['', variants]]);
+    if (variants) rows.push([[ST.grey, `  ${JIRA(app.cfg) ? 'Labels' : 'Tags'} treated as the trigger: `], ['', variants]]);
     return rows;
   }
 
