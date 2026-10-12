@@ -184,10 +184,10 @@ export async function setup(argv) {
   saveConfig(cfg);
   if (results[1]) await firstBoard(cfg);
 
-  step('Review folder');
+  step('Projects Directory');
   const projects = path.join(os.homedir(), 'projects');
   const def = cfg.workDir !== process.cwd() || !fs.existsSync(projects) ? cfg.workDir : projects;
-  cfg.workDir = path.resolve(await ask('Folder reviews run in (its CLAUDE.md is loaded)', def, { valid: v => fs.existsSync(v) || 'folder not found' }));
+  cfg.workDir = path.resolve(await ask('Folder reviews run in (its CLAUDE.md is loaded; missing PR repos are cloned here)', def, { valid: v => fs.existsSync(v) || 'folder not found' }));
   saveConfig(cfg);
 
   console.log(results.every(Boolean)

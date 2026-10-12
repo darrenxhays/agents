@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { run } from './proc.mjs';
 import { mentions } from './match.mjs';
 
@@ -24,4 +26,16 @@ export async function reviewedSince(pr, login, since) {
     const [who, at] = line.split('\t');
     return who?.toLowerCase() === login.toLowerCase() && Date.parse(at) >= since;
   });
+}
+
+/** Clones each PR's repo into `dir` unless a folder of that name is already there. Resolves with the repos cloned. */
+export async function cloneMissing(prs, dir) {
+  const cloned = [];
+  for (const repo of new Set(prs.map(p => p.repo))) {
+    const target = path.join(dir, repo.split('/')[1]);
+    if (fs.existsSync(target)) continue;
+    await run('gh', ['repo', 'clone', repo, target]);
+    cloned.push(repo);
+  }
+  return cloned;
 }

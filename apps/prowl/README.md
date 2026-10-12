@@ -45,7 +45,7 @@ prowl --dry-run   # first time: only logs what it would review
 prowl
 ```
 
-On Windows, use Windows Terminal. Reviews run in the **Review folder** from setup (your projects folder), so its `CLAUDE.md` is loaded.
+On Windows, use Windows Terminal. Reviews run in the **Projects Directory** from setup (your projects folder), so its `CLAUDE.md` is loaded. A PR's repo that isn't cloned there yet (no folder with the repo's name) is cloned into it first.
 
 ## What it does
 
@@ -94,7 +94,7 @@ Settings live in `~/.prowl/config.json`. The Config view (`3`) edits the same fi
 | `githubOwner` | | GitHub org searched for PRs (asked by `prowl --setup`) |
 | `pollSeconds` | `300` | Poll interval |
 | `maxConcurrentReviews` | `2` | Extra tickets stay tagged until a slot frees, so a teammate can take them |
-| `workDir` | your projects folder | Where reviews run; its `CLAUDE.md` is loaded |
+| `workDir` | your projects folder | **Projects Directory**: where reviews run; its `CLAUDE.md` is loaded, and PR repos not cloned there are cloned first |
 | `claude.model` / `effort` / `permissionMode` | `claude-opus-5-5` / `xhigh` / `auto` | Review sessions. Avoid `bypassPermissions`: reviews read text written by PR authors |
 | `dryRun` | `false` | Log what would be reviewed without touching tags or starting reviews |
 | `autoUpdate` | `true` | Install a newer Prowl release before launching |

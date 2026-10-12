@@ -36,7 +36,7 @@ const FIELDS = [
   { key: 'githubOwner', label: 'GitHub org', type: 'text', help: 'Open PRs whose title or description mentions the ticket (AB#123 or PROJ-123) are searched for here. Your own PRs are always skipped.' },
   { key: 'pollSeconds', label: 'Poll every (seconds)', type: 'int', min: 30, max: 86400, help: 'How often the boards are checked. r polls now.' },
   { key: 'maxConcurrentReviews', label: 'Max parallel reviews', type: 'int', min: 1, max: 10, help: "Extra tickets stay tagged until a slot frees, so a teammate's poller can take them." },
-  { key: 'workDir', label: 'Review folder', type: 'text', help: 'Reviews run here and load its CLAUDE.md, e.g. your projects root.', valid: v => isDir(v) || 'folder not found' },
+  { key: 'workDir', label: 'Projects Directory', type: 'text', help: 'Reviews run here and load its CLAUDE.md, e.g. your projects root. A PR repo not cloned here is cloned before its review.', valid: v => isDir(v) || 'folder not found' },
   { key: 'claude.model', label: 'Model', type: 'text', help: 'Model for review sessions.' },
   { key: 'claude.effort', label: 'Effort', type: 'enum', values: ['low', 'medium', 'high', 'xhigh', 'max'], help: 'Reasoning effort for review sessions. enter cycles.' },
   { key: 'claude.permissionMode', label: 'Permission mode', type: 'enum', values: ['auto', 'bypassPermissions'], help: 'auto lets a safety classifier block risky actions. bypassPermissions lets reviews run anything: not recommended, reviews read text written by PR authors.' },

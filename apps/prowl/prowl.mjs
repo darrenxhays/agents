@@ -159,6 +159,12 @@ async function consider(tracker, ticket) {
   }
   hoot(`Starting reviews for ${ticket.title}, marking as '${cfg.tags.inProgress}'`);
   const prior = state.runs.filter(r => r.ticket === ticket.key && r.status === 'done').sort((a, b) => b.endedAt - a.endedAt)[0];
+  try {
+    const cloned = await github.cloneMissing(prs, cfg.workDir);
+    if (cloned.length) log('info', `${ticket.key}: cloned ${cloned.join(', ')} into ${cfg.workDir}`);
+  } catch (e) {
+    log('warn', `${ticket.key}: ${e.message}; reviewing from GitHub without a local clone`);
+  }
   let run;
   try {
     run = rv.startReview(cfg, PLUGIN_DIR, { tracker: cfg.taskBoard, ticket, prs, prior });
