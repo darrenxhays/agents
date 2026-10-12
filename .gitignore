@@ -7,3 +7,8 @@ zz/
 x.*
 y.*
 z.*
+u
+
+# Local agent notes
+/AGENTS.md
+/CLAUDE.md
