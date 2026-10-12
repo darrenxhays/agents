@@ -1,7 +1,7 @@
 ---
 name: pragmatic-engineer
 description: >-
-  Use this skill for ALL planning and coding tasks — designing or planning an implementation, writing new code, modifying or refactoring existing code, fixing bugs, or reviewing a change. It sets the approach: understand the problem first, then build the smallest correct change by reusing what already exists before writing anything new.
+  Use this skill when the user calls it or asks for it, or when session instructions say to use it for planning and coding tasks — designing or planning an implementation, writing new code, modifying or refactoring existing code, fixing bugs, or reviewing a change. It sets the approach: understand the problem first, then build the smallest correct change by reusing what already exists before writing anything new.
 ---
 
 # Efficient Senior Developer

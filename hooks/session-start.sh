@@ -2,11 +2,14 @@
 # Runs at each Claude session start.
 # Codex: link this plugin's Codex-compatible skills into ~/.codex/skills, so Codex
 # reads the same copy Claude has (re-run each session because plugin updates move
-# the install path; build is left out: it drives Codex from Claude), and make sure
-# ~/.codex/AGENTS.md tells Codex when to use pragmatic-engineer.
+# the install path; build is left out: it drives Codex from Claude), and add or
+# remove the ~/.codex/AGENTS.md rule telling Codex when to use pragmatic-engineer.
 # Claude: inject the same rule into the session instead of editing CLAUDE.md, so
 # it goes away when the plugin is disabled or uninstalled.
+# The plugin's auto_use option (/plugin configure darrenxhays) turns the rule off;
+# the skills stay linked and callable. Unset means on.
 rule="For any planning or coding task, use the pragmatic-engineer skill."
+[ "$CLAUDE_PLUGIN_OPTION_AUTO_USE" = false ] && off=1 || off=
 
 if [ -d "$HOME/.codex" ]; then
   mkdir -p "$HOME/.codex/skills"
@@ -19,13 +22,21 @@ if [ -d "$HOME/.codex" ]; then
   done
 
   agents="$HOME/.codex/AGENTS.md"
-  if ! grep -qxF "$rule" "$agents" 2>/dev/null; then
+  if [ -n "$off" ]; then
+    if grep -qxF "$rule" "$agents" 2>/dev/null; then
+      # Rewrite in place (not mv) so a symlinked AGENTS.md stays a symlink.
+      kept=$(grep -vxF "$rule" "$agents")
+      if [ -n "$kept" ]; then printf '%s\n' "$kept" > "$agents"; else : > "$agents"; fi
+    fi
+  elif ! grep -qxF "$rule" "$agents" 2>/dev/null; then
     # Start on a new line if the file doesn't end with one.
     [ -s "$agents" ] && [ -n "$(tail -c1 "$agents")" ] && echo >> "$agents"
     echo "$rule" >> "$agents"
   fi
 fi
 
-printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' \
-  "For any planning or coding task, use the darrenxhays:pragmatic-engineer skill."
+if [ -z "$off" ]; then
+  printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' \
+    "For any planning or coding task, use the darrenxhays:pragmatic-engineer skill."
+fi
 exit 0

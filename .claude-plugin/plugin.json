@@ -1,6 +1,14 @@
 {
   "name": "darrenxhays",
   "description": "darrenxhays skills: build and pragmatic-engineer, with pragmatic-engineer also linked into Codex and used for every planning and coding task",
+  "userConfig": {
+    "auto_use": {
+      "type": "boolean",
+      "title": "Use pragmatic-engineer automatically",
+      "description": "Tell every Claude session and ~/.codex/AGENTS.md to use pragmatic-engineer for planning and coding. Off: call it yourself with /darrenxhays:pragmatic-engineer. Takes effect in new sessions.",
+      "default": true
+    }
+  },
   "hooks": {
     "SessionStart": [
       { "hooks": [{ "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh\"" }] }

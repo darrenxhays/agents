@@ -14,6 +14,8 @@ Turn on auto-update for the `agents` marketplace in `/plugin` to get every pushe
 
 Each Claude session tells the agent to use pragmatic-engineer for every planning and coding task. Your `CLAUDE.md` is not edited, so the rule goes away when the plugin is disabled or uninstalled.
 
+To stop that, run `/plugin configure darrenxhays` (or open the plugin in `/plugin`) and turn off **Use pragmatic-engineer automatically**; turn it back on the same way. It takes effect from the next session. While off, the rule is no longer added to Claude sessions or `~/.codex/AGENTS.md`, and you can still call `/darrenxhays:pragmatic-engineer` (or `$pragmatic-engineer` in Codex) when you want it.
+
 **Codex:** if `~/.codex` exists, each Claude session also links the Codex-compatible skills into `~/.codex/skills`, pointing at Claude's installed copy so both agents share one copy, and adds the same rule to `~/.codex/AGENTS.md` if it's missing. After uninstalling, remove both: `rm ~/.codex/skills/pragmatic-engineer` and the pragmatic-engineer line in `~/.codex/AGENTS.md`. Codex without Claude: clone the repo, link the skill and add the rule yourself:
 
 ```
@@ -24,7 +26,7 @@ echo "For any planning or coding task, use the pragmatic-engineer skill." >> ~/.
 
 ### pragmatic-engineer
 
-Used automatically for planning and coding tasks: understand the problem, then make the smallest correct change, reusing what already exists before writing anything new. Claude Code and Codex.
+Used automatically for planning and coding tasks (unless turned off in the plugin's settings): understand the problem, then make the smallest correct change, reusing what already exists before writing anything new. Claude Code and Codex.
 
 ### build
 

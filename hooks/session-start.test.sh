@@ -5,7 +5,8 @@ hook="$(cd "$(dirname "$0")" && pwd)/session-start.sh"
 root="$(cd "$(dirname "$0")/.." && pwd)"
 rule="For any planning or coding task, use the pragmatic-engineer skill."
 fail() { echo "FAIL: $1"; exit 1; }
-run() { HOME="$1" CLAUDE_PLUGIN_ROOT="$root" sh "$hook"; }
+# Optional second argument: the auto_use plugin option (unset = never configured).
+run() { HOME="$1" CLAUDE_PLUGIN_ROOT="$root" CLAUDE_PLUGIN_OPTION_AUTO_USE="$2" sh "$hook"; }
 
 # Fresh Codex install: link created, rule written once, Claude context printed.
 h=$(mktemp -d); mkdir "$h/.codex"
@@ -25,6 +26,21 @@ run "$h" >/dev/null
 h=$(mktemp -d); mkdir -p "$h/.codex/skills/pragmatic-engineer"
 run "$h" >/dev/null
 [ -d "$h/.codex/skills/pragmatic-engineer" ] && [ ! -L "$h/.codex/skills/pragmatic-engineer" ] || fail "replaced real dir"
+
+# Off: rule removed from AGENTS.md (other lines kept), skill still linked, no Claude context.
+h=$(mktemp -d); mkdir "$h/.codex"; printf 'Be terse.\n%s\nUse tabs.\n' "$rule" > "$h/.codex/AGENTS.md"
+[ -z "$(run "$h" false)" ] || fail "context printed when off"
+[ "$(cat "$h/.codex/AGENTS.md")" = "$(printf 'Be terse.\nUse tabs.')" ] || fail "rule not removed"
+[ -L "$h/.codex/skills/pragmatic-engineer" ] || fail "link removed when off"
+
+# Off when AGENTS.md is only the rule leaves an empty file.
+h=$(mktemp -d); mkdir "$h/.codex"; echo "$rule" > "$h/.codex/AGENTS.md"
+run "$h" false >/dev/null
+[ ! -s "$h/.codex/AGENTS.md" ] || fail "rule-only file not emptied"
+
+# On again: rule restored, Claude context printed.
+run "$h" true | grep -q additionalContext || fail "context when on"
+[ "$(cat "$h/.codex/AGENTS.md")" = "$rule" ] || fail "rule not restored"
 
 # No Codex: nothing created, Claude context still printed.
 h=$(mktemp -d)
