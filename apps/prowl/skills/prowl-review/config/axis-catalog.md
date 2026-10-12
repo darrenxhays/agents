@@ -1,6 +1,6 @@
 # PR-Owl Review — Axis Catalog
 
-The orchestrator picks the axes for each PR's review spec from this catalog (SKILL.md Step 3). Each entry gives: what the axis covers, **when to include it** (triggers), and the checklist the PR's reviewer works through. Reviewers read only the sections named in their spec; the orchestrator reads the whole file. Add, remove or edit axes and checklists to change what reviewers look for; an axis marked ALWAYS INCLUDED goes into every PR's spec. To keep your version across updates, copy this file to `~/.prowl/config/axis-catalog.md` (or `$PROWL_HOME/config/`) and edit that copy instead.
+The orchestrator picks the axes for each PR's review spec from this catalog (SKILL.md Step 3). Each entry gives: what the axis covers, **when to include it** (triggers), and the checklist the PR's reviewer works through. Reviewers read only the sections named in their spec; the orchestrator reads the whole file. Add, remove or edit axes and checklists to change what reviewers look for; an axis marked ALWAYS INCLUDED goes into every PR's spec. Prowl keeps your copy of this file in `~/.prowl/config/` (or `$PROWL_HOME/config/`): edit that one. Updates never overwrite a copy you've edited.
 
 ---
 

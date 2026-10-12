@@ -1,7 +1,8 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { CONFIG_PATH } from './config.mjs';
-import { createMascot } from './mascot.mjs';
+import { CONFIG_DIR, CONFIG_PATH } from './config.mjs';
+import { createMascot, wrap } from './mascot.mjs';
 import { openExternal } from './proc.mjs';
 
 const ST = {
@@ -17,7 +18,13 @@ const isDir = p => { try { return fs.statSync(p).isDirectory(); } catch { return
 const https = v => /^https:\/\/\S+$/.test(v) || 'must be an https:// URL';
 const ADO = c => c.taskBoard === 'ado';
 const JIRA = c => c.taskBoard === 'jira';
+const opens = 'enter opens it. Updates never overwrite your edits.';
 const FIELDS = [
+  // The user's config files: enter opens one in its default app.
+  { file: CONFIG_PATH, label: 'Settings file', help: `Every setting on this page, as JSON. ${opens}` },
+  { file: path.join(CONFIG_DIR, 'review.md'), label: 'Review rules', help: `Reviewer stance, severity definitions, and the verdict each severity gives. Applies from the next review. ${opens}` },
+  { file: path.join(CONFIG_DIR, 'axis-catalog.md'), label: 'Review checklists', help: `What reviewers check: the review axes and their checklists. Applies from the next review. ${opens}` },
+  { file: path.join(CONFIG_DIR, 'output.md'), label: 'Output templates', help: `How everything posted on GitHub looks: banner, review body, comments, replies, approvals-off comment. Applies from the next review. ${opens}` },
   { key: 'taskBoard', label: 'Task board', type: 'enum', values: ['ado', 'jira'], names: { ado: 'Azure DevOps', jira: 'Jira' }, help: 'Where tickets are watched: Azure DevOps or Jira Cloud. enter switches. Each keeps its own boards.' },
   { key: 'ado.org', label: 'Azure DevOps org', type: 'text', when: ADO, help: 'Organization URL, e.g. https://dev.azure.com/your-org. Signed in with az login.', valid: https },
   { key: 'jira.site', label: 'Jira site', type: 'text', when: JIRA, help: 'Your Jira Cloud URL, e.g. https://yourcompany.atlassian.net.', valid: v => https(v) === true ? true : 'must be an https:// URL, e.g. https://yourcompany.atlassian.net' },
@@ -40,6 +47,7 @@ const FIELDS = [
   { key: 'claude.model', label: 'Model', type: 'text', help: 'Model for review sessions.' },
   { key: 'claude.effort', label: 'Effort', type: 'enum', values: ['low', 'medium', 'high', 'xhigh', 'max'], help: 'Reasoning effort for review sessions. enter cycles.' },
   { key: 'claude.permissionMode', label: 'Permission mode', type: 'enum', values: ['auto', 'bypassPermissions'], help: 'auto lets a safety classifier block risky actions. bypassPermissions lets reviews run anything: not recommended, reviews read text written by PR authors.' },
+  { key: 'approvals', label: 'Approve PRs', type: 'bool', help: 'on: a PR with no blocking findings gets a GitHub approval. off: Prowl comments that it found no blocking issues, and a human approves (text in Output templates).' },
   { key: 'dryRun', label: 'Dry run', type: 'bool', help: 'Log what would be reviewed without changing tags or starting reviews.' },
   { key: 'autoUpdate', label: 'Auto-update', type: 'bool', help: 'Install a newer Prowl release before launching. It waits while reviews from an earlier launch are still running.' },
 ];
@@ -109,7 +117,7 @@ function* keys(data) {
 export function startTui(app, actions) {
   const out = process.stdout;
   const owl = createMascot();
-  const ui = { tab: 0, sel: [0, 0, 0, 0], edit: null, confirm: null, flash: '', flashUntil: 0 };
+  const ui = { tab: 0, sel: [0, 0, 0, 0], edit: null, confirm: null, flash: '', flashUntil: 0, notes: app.notes ? { scroll: 0 } : null };
   const flash = text => { ui.flash = text; ui.flashUntil = Date.now() + 4000; };
   const clampSel = (tab, n) => (ui.sel[tab] = Math.max(0, Math.min(ui.sel[tab], n - 1)));
 
@@ -244,7 +252,7 @@ export function startTui(app, actions) {
       const v = e && e.secret ? '•'.repeat(e.value.length) : e?.value;
       const value = e
         ? [[ST.yellow, v.slice(0, e.cursor)], [ST.cursor, v[e.cursor] || ' '], [ST.yellow, v.slice(e.cursor + 1)]]
-        : [['', shown(f)]];
+        : f.file ? [[ST.link, f.file, pathToFileURL(f.file).href]] : [['', shown(f)]];
       rows.push([cursor(i === sel), [f.addBoard ? ST.green : ST.grey, f.label.padEnd(24)], ...value]);
     }
     rows.push([], ui.edit?.error ? [[ST.red, `  ${ui.edit.error}`]] : [[ST.grey, `  ${fields[sel].help}`]]);
@@ -253,9 +261,24 @@ export function startTui(app, actions) {
     return rows;
   }
 
+  /** The Update Notes, shown over the views on the first launch after an update until a key closes them. */
+  function notesView(W, H) {
+    const n = app.notes;
+    const rows = [[[ST.title, ' Update Notes '], [ST.grey, ` · Prowl ${n.version}`]]];
+    const bullet = text => wrap(clean(text), W - 6, Infinity).map((l, i) => [[ST.yellow, i ? '    ' : '  • '], ['', l]]);
+    for (const v of n.versions) rows.push([], [[ST.bold, `  ${v.version}`]], ...v.items.flatMap(bullet));
+    if (n.files.length) {
+      rows.push([], [[ST.bold, '  Your config']]);
+      for (const f of n.files) rows.push(...bullet(f.text), [['', '    '], [ST.link, f.path, pathToFileURL(f.path).href]]);
+    }
+    ui.notes.scroll = Math.max(0, Math.min(ui.notes.scroll, rows.length - H));
+    return rows.slice(ui.notes.scroll);
+  }
+
   const logView = (W, H) => app.log.slice(-H).map(l => [[ST.grey, `${time(l.t)} `], [LEVEL[l.level], `${l.level.padEnd(5)} `], ['', l.msg]]);
 
   function footer(W) {
+    if (ui.notes) return [[ST.grey, ' ↑↓ scroll · any other key closes the Update Notes']];
     if (ui.confirm) return [[ST.title, ` ${ui.confirm.text} `], [ST.grey, ' y yes · n no']];
     if (ui.edit) return [[ST.grey, ' enter save · esc cancel · ←→ move']];
     if (Date.now() < ui.flashUntil) return [[ST.green, ` ${ui.flash}`]];
@@ -273,7 +296,7 @@ export function startTui(app, actions) {
     }
     rows.push(tabBar(), rule(W));
     const bodyH = H - rows.length - 1;
-    const body = [runningView, historyView, configView, logView][ui.tab](W, bodyH).slice(0, bodyH);
+    const body = (ui.notes ? notesView : [runningView, historyView, configView, logView][ui.tab])(W, bodyH).slice(0, bodyH);
     while (body.length < bodyH) body.push([]);
     rows.push(...body, footer(W));
     out.write(`\x1b[?2026h\x1b[H${rows.map(r => draw(r, W)).join('\r\n')}\x1b[?2026l`);
@@ -308,6 +331,7 @@ export function startTui(app, actions) {
     const f = configRows()[ui.sel[2]];
     const c = app.cfg;
     if (k === 'a') return editBoard(null);
+    if (f.file) return k === 'enter' ? openExternal(f.file) : undefined;
     if (k === 'd' && f.board != null) {
       const boards = app.boards();
       ui.confirm = { text: `Remove board ${app.tracker().boardLabel(boards[f.board])}?`, yes: () => { boards.splice(f.board, 1); saved('Board removed.'); } };
@@ -360,6 +384,11 @@ export function startTui(app, actions) {
 
   function onKey(k) {
     if (k === 'ctrl-c') return actions.quit();
+    if (ui.notes) {
+      if (k === 'up' || k === 'down') ui.notes.scroll += k === 'up' ? -1 : 1;
+      else ui.notes = null;
+      return undefined;
+    }
     if (ui.confirm) {
       const c = ui.confirm;
       if (['y', 'n', 'esc'].includes(k)) { ui.confirm = null; if (k === 'y') c.yes(); }

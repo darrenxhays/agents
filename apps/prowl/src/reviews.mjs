@@ -1,12 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
-import { HOME, writeJson } from './config.mjs';
+import { CONFIG_DIR, HOME, writeJson } from './config.mjs';
 import { frontMatter } from './match.mjs';
 import { spawnCli, isAlive, killTree, processStart } from './proc.mjs';
 
 export const REPORTS_DIR = path.join(HOME, 'reports');
-const CONFIG_DIR = path.join(HOME, 'config'); // the user's overrides of prowl-review's config files
 const LOGS_DIR = path.join(HOME, 'logs');
 const STATE_PATH = path.join(HOME, 'state.json');
 const exited = new Set(); // pids of reviews started by this process that have exited
@@ -63,7 +62,7 @@ export function startReview(cfg, pluginDir, { tracker, ticket, prs, prior }) {
   if (prior) {
     try { priorReport = fs.readFileSync(prior.reportPath, 'utf8'); } catch { priorReport = '(the previous report file is missing)'; }
   }
-  fs.writeFileSync(run.promptPath, buildPrompt({ ...run, prior, priorReport }));
+  fs.writeFileSync(run.promptPath, buildPrompt({ ...run, prior, priorReport, approvals: cfg.approvals }));
 
   const stdin = fs.openSync(run.promptPath, 'r');
   const log = fs.openSync(run.logPath, 'a');
@@ -166,7 +165,7 @@ export function finalize(run) {
 }
 
 /** The prompt (the agent's brief): the PR list for prowl-review, the ticket, the re-review brief and the report spec. */
-export function buildPrompt({ ticket, title, ticketUrl, prs, reviewNo, reportPath, prior, priorReport }) {
+export function buildPrompt({ ticket, title, ticketUrl, prs, reviewNo, reportPath, prior, priorReport, approvals = true }) {
   const lines = [
     `/prowl:prowl-review ${prs.map(p => p.url).join(' ')}`,
     '',
@@ -176,6 +175,7 @@ export function buildPrompt({ ticket, title, ticketUrl, prs, reviewNo, reportPat
     `- This is review ${reviewNo} of this ticket${prior ? ', a RE-REVIEW' : ''}.`,
     '- It started automatically because the ticket was tagged for review. Nobody is watching this session: never stop to ask a question; make the reasonable call and note it in the report.',
   ];
+  if (!approvals) lines.push("- Approvals off (Prowl's Approve PRs setting): never post an APPROVE review; see approvals-off mode in the skill.");
   if (prior) lines.push('', ...reReviewBrief(prior, priorReport));
   lines.push('', ...reportSpec(ticket, reviewNo, reportPath, Boolean(prior)));
   return `${lines.join('\n')}\n`;
@@ -187,7 +187,7 @@ const reReviewBrief = (prior, report) => [
   `The previous review (review ${prior.reviewNo}, finished ${new Date(prior.endedAt).toISOString().slice(0, 16).replace('T', ' ')} UTC) produced the report below. The ticket has been tagged for review again, so the authors believe they have addressed it. On top of the normal prowl-review steps:`,
   '',
   '1. Add every finding from the previous report to the ledger as a prior finding. Re-verify each one against the current head of its PR and classify it as Fixed (cite the commit), Still open, or No longer applicable (code removed, PR merged or closed). These go through verifiers like any other finding.',
-  '2. Do not post duplicates of prior findings. Reply on the existing comment thread instead, starting with the comment prefix from the signature config: "<prefix>Verified fixed in <sha>" and then resolve the thread (`gh api graphql`, resolveReviewThread), or "<prefix>Still open as of <sha>: <one line why>". The Step 8 re-run guard treats still-open prior findings as already posted.',
+  '2. Do not post duplicates of prior findings. Reply on the existing comment thread instead, with the *Verified fixed* reply from the output config and then resolve the thread (`gh api graphql`, resolveReviewThread), or with its *Still open* reply. The Step 8 re-run guard treats still-open prior findings as already posted.',
   '3. Post new inline comments only for findings that are new since the previous review.',
   "4. Each PR's verdict counts still-open prior findings as well as new ones.",
   '',

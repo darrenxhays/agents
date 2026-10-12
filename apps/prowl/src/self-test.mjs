@@ -8,7 +8,7 @@ import path from 'node:path';
 import { alive, buildPrompt, finalize } from './reviews.mjs';
 import { processStart } from './proc.mjs';
 import { createMascot, wrap } from './mascot.mjs';
-import { newer } from './update.mjs';
+import { changelog, newer, syncConfigFiles } from './update.mjs';
 
 const T = 'Ready for Review';
 for (const t of ['Ready for Review', 'ready for review', 'Ready-For-Review', 'READY  FOR REVIEW', 'ReadyForReview', 'Ready for Reveiw', 'Redy for Review', 'Ready fro Reviw']) {
@@ -55,6 +55,7 @@ const first = buildPrompt(base);
 assert.ok(first.startsWith('/prowl:prowl-review https://github.com/o/a/pull/1 https://github.com/o/b/pull/2\n'));
 assert.ok(first.includes('/r/AB42.md') && first.includes('Ticket: AB#42 "Thing"') && first.includes('ticket: AB#42') && !first.includes('re-review'));
 const again = buildPrompt({ ...base, reviewNo: 2, prior: { reviewNo: 1, endedAt: 0 }, priorReport: 'F-01 [HIGH] old finding' });
+assert.ok(!first.includes('Approvals off') && buildPrompt({ ...base, approvals: false }).includes('Approvals off'));
 assert.ok(again.includes('This is a re-review') && again.includes('F-01 [HIGH] old finding') && again.includes('What was fixed: every prior finding'));
 
 // A session that ends cleanly but never wrote its report did not review anything: it must fail, not tag Reviewed.
@@ -71,6 +72,42 @@ finalize(good);
 assert.equal(good.status, 'done');
 assert.deepEqual(good.summary, { verdict: 'APPROVE', high: 0 });
 fs.rmSync(dir, { recursive: true });
+
+assert.deepEqual(changelog('# Notes\nintro\n\n## 2.3.0 (today)\n- One\n  wraps\n- Two\n\n## 2.2.0\n- Old\n'),
+  [{ version: '2.3.0', items: ['One wraps', 'Two'] }, { version: '2.2.0', items: ['Old'] }]);
+
+// The user's config files: seeded, upgraded only when unedited, and an old signature.md moved into output.md.
+const cfgTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'prowl-test-'));
+const [defs, mine] = [path.join(cfgTmp, 'defaults'), path.join(cfgTmp, 'mine')];
+fs.mkdirSync(defs);
+const put = (dir, name, text) => fs.writeFileSync(path.join(dir, name), text);
+const get = (dir, name) => fs.readFileSync(path.join(dir, name), 'utf8');
+put(defs, 'review.md', 'r1');
+put(defs, 'output.md', '# Output\n\n## Review banner\n\nbanner\n\n## Comment prefix\n\nprefix $&\n\n## Inline comment\n\ninline\n');
+const synced = {};
+assert.deepEqual(syncConfigFiles(defs, mine, synced, false), [], 'a fresh install is seeded quietly');
+assert.equal(get(mine, 'review.md'), 'r1');
+put(defs, 'review.md', 'r2');
+put(defs, 'axis-catalog.md', 'a1');
+let notes = syncConfigFiles(defs, mine, synced, true);
+assert.equal(get(mine, 'review.md'), 'r2', 'an unedited copy moves to the new default');
+assert.equal(get(mine, 'axis-catalog.md'), 'a1', 'a new config file is copied in');
+assert.deepEqual(notes.map(n => n.text), ['axis-catalog.md added to your config folder', "review.md updated to the new default (you hadn't edited it)"]);
+put(mine, 'review.md', 'my rules');
+put(defs, 'review.md', 'r3');
+notes = syncConfigFiles(defs, mine, synced, true);
+assert.equal(get(mine, 'review.md'), 'my rules', 'an edited copy is never overwritten');
+assert.equal(notes.length, 1);
+assert.match(notes[0].text, /default review\.md changed/);
+assert.equal(notes[0].path, path.join(defs, 'review.md'));
+assert.deepEqual(syncConfigFiles(defs, mine, synced, true), [], 'each change is announced once');
+fs.rmSync(path.join(mine, 'output.md'));
+put(mine, 'signature.md', '# Signature\n\n## Review banner\n\nmy banner\n\n## Comment prefix\n\nmy prefix\n');
+notes = syncConfigFiles(defs, mine, synced, true);
+assert.equal(get(mine, 'output.md'), '# Output\n\n## Review banner\n\nmy banner\n\n## Comment prefix\n\nmy prefix\n\n## Inline comment\n\ninline\n');
+assert.ok(fs.existsSync(path.join(mine, 'signature.md.old')) && !fs.existsSync(path.join(mine, 'signature.md')));
+assert.deepEqual(notes.map(n => n.path), [path.join(mine, 'output.md')], 'the migration is announced, not as an edited copy');
+fs.rmSync(cfgTmp, { recursive: true });
 
 // A pid saved by an earlier launch is the review only if its process started with the review (not a reused pid).
 const born = Date.now() - process.uptime() * 1000;

@@ -4,6 +4,7 @@ import path from 'node:path';
 
 export const HOME = process.env.PROWL_HOME || path.join(os.homedir(), '.prowl');
 export const CONFIG_PATH = path.join(HOME, 'config.json');
+export const CONFIG_DIR = path.join(HOME, 'config'); // the user's copies of prowl-review's config files
 
 // Every setting and its default. CONFIG_PATH overrides these; the Config view (3) edits that file.
 const DEFAULTS = {
@@ -24,6 +25,7 @@ const DEFAULTS = {
   maxConcurrentReviews: 2,
   workDir: process.cwd(),
   claude: { model: 'claude-opus-5-5', effort: 'xhigh', permissionMode: 'auto' },
+  approvals: true, // approve PRs with no blocking findings; off: comment that there are none and leave approving to a human
   dryRun: false,
   autoUpdate: true, // install a newer released version before launching
 };
@@ -50,6 +52,15 @@ export function loadConfig() {
   const cfg = merge(structuredClone(DEFAULTS), saved);
   if (old || !fs.existsSync(CONFIG_PATH)) saveConfig(cfg);
   return cfg;
+}
+
+/** Settings with a default that the saved config file doesn't have yet (added by an update), as dotted keys. */
+export function newSettings() {
+  let saved;
+  try { saved = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); } catch { return []; }
+  const missing = (def, have, at) => Object.entries(def).flatMap(([k, v]) => (!(k in have) ? [at + k]
+    : isObj(v) && isObj(have[k]) ? missing(v, have[k], `${at}${k}.`) : []));
+  return missing(DEFAULTS, saved, '');
 }
 
 export const saveConfig = cfg => writeJson(CONFIG_PATH, cfg);

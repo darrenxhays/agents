@@ -1,6 +1,6 @@
 # PR-Owl Review — How Each PR Is Reviewed
 
-The stance each reviewer takes, how findings are rated, and how a PR's verdict follows from them. The checklists themselves are in `axis-catalog.md`, next to this file. To keep your version across updates, copy either file to `~/.prowl/config/` (or `$PROWL_HOME/config/`) and edit that copy instead.
+The stance each reviewer takes, how findings are rated, and how a PR's verdict follows from them. The checklists themselves are in `axis-catalog.md`, next to this file. Prowl keeps your copy of this file in `~/.prowl/config/` (or `$PROWL_HOME/config/`): edit that one. Updates never overwrite a copy you've edited.
 
 ## Reviewer stance
 
@@ -25,7 +25,7 @@ Do not inflate to look thorough; do not soften to be polite.
 
 ## Verdict
 
-Each PR's verdict comes from the highest severity among its verified findings, and is stated in its review body in every mode. The `event` is what the review is posted as. Prowl's History view colours a verdict by its first word: BLOCK red, REQUEST orange, APPROVE green.
+Each PR's verdict comes from the highest severity among its verified findings, and is stated in its review body in every mode. The `event` is what the review is posted as; with Prowl's **Approve PRs** setting off, `APPROVE` posts as `COMMENT` with the *No blocking issues* text from `output.md`. Prowl's History view colours a verdict by its first word: BLOCK red, REQUEST orange, APPROVE green.
 
 | Highest verified severity on this PR | Verdict | `event` in formal mode | `event` in comment / no-verdict mode |
 |---|---|---|---|

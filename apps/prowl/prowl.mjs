@@ -61,6 +61,7 @@ const app = {
     if (now && !now.until) now.until = Date.now() + (now.mood === 'error' ? 10_000 : 6_000);
     return now || null;
   },
+  notes: null, // the Update Notes for this launch: see update.updateNotes
   dryRun: () => app.cfg.dryRun || args.has('--dry-run'),
   running: () => app.state.runs.filter(r => r.status === 'running' || r.status === 'stopping'),
   finished: () => app.state.runs.filter(r => r.status !== 'running' && r.status !== 'stopping').sort((a, b) => b.endedAt - a.endedAt),
@@ -286,7 +287,14 @@ if (app.cfg.autoUpdate && !process.env.PROWL_UPDATED) {
 fs.writeFileSync(LOCK, String(process.pid));
 process.on('exit', () => { try { if (Number(fs.readFileSync(LOCK, 'utf8')) === process.pid) fs.unlinkSync(LOCK); } catch { /* gone */ } });
 
+try {
+  app.notes = update.updateNotes(PLUGIN_DIR); // shown once, on the first launch after an update
+} catch (e) {
+  log('warn', `Couldn't bring your config files in ${path.join(HOME, 'config')} up to date: ${e.message}`);
+}
+
 if (ONCE) {
+  if (app.notes) console.log(`${update.notesText(app.notes)}\n`);
   for (const run of app.running()) {
     rv.readActivity(run);
     if (run._result || !rv.alive(run)) await finish(run);

@@ -28,7 +28,7 @@ A batch run is long. Context may be summarized part-way through, so keep your wo
 
 `<SKILL_DIR>` below means the absolute "Base directory for this skill" path shown when this skill loaded (it differs per install: personal skill, plugin, `--plugin-dir`); use that absolute path in every subagent prompt. **Never pass a literal `~` or a relative path to a subagent** — subagent file tools do not expand it, the instructions file silently fails to load, and the subagent falls back to a shallow ad-hoc review.
 
-**Config.** Three files set how PRs are reviewed and how posts are signed: `review.md` (reviewer stance, severity, verdict), `axis-catalog.md` (the checklists) and `signature.md` (the review banner and comment prefix). Each ships in `<SKILL_DIR>/config/`; a user overrides one by putting a file of the same name in `<PROWL_HOME>/config/`, where `<PROWL_HOME>` is the output of `echo "${PROWL_HOME:-$HOME/.prowl}"`. `<CONFIG>/<file>` below means the override when it exists, otherwise the default. Resolve all three to absolute paths now, list them in `config-paths.md` in the run folder, read `review.md` and `signature.md`, and pass the absolute paths to subagents.
+**Config.** Three files set how PRs are reviewed and what posts look like: `review.md` (reviewer stance, severity, verdict), `axis-catalog.md` (the checklists) and `output.md` (the templates for everything posted: banner, review body, inline comments, replies, the approvals-off comment). Each ships in `<SKILL_DIR>/config/`; Prowl keeps the user's copy of each in `<PROWL_HOME>/config/`, where `<PROWL_HOME>` is the output of `echo "${PROWL_HOME:-$HOME/.prowl}"`. `<CONFIG>/<file>` below means the user's copy when it exists, otherwise the default. Resolve all three to absolute paths now, list them in `config-paths.md` in the run folder, read `review.md` and `output.md`, and pass the absolute paths to subagents.
 
 ## Step 1 — Parse and verify the PR list
 
@@ -46,7 +46,7 @@ gh pr view <number> --repo <owner/repo> --json number,title,body,state,url,autho
 
 **Posting mode per PR.** Everything posts from the default `gh` identity; never set or override `GH_TOKEN`. GitHub rejects `APPROVE`/`REQUEST_CHANGES` on a PR authored by the authenticated user, so resolve the login once (`gh api user -q .login`) and set each PR to `formal` (author is someone else — verdict lands as a real review event) or `comment` (author is the user — verdict stated in the body of a `COMMENT` review). Tell the user which PRs are in comment mode.
 
-**Flags.** If the invocation says *comments only*, *no verdict*, or *don't request changes*, set **no-verdict mode**: every PR posts as a `COMMENT` event with the assessment in the body. If it says *don't post*, *report only*, or *dry run*, set **dry-run mode**: run everything through Step 7 and produce the synthesis, but skip Step 8. Echo the active mode back to the user in one line.
+**Flags.** If the invocation says *comments only*, *no verdict*, or *don't request changes*, set **no-verdict mode**: every PR posts as a `COMMENT` event with the assessment in the body. If it says *don't post*, *report only*, or *dry run*, set **dry-run mode**: run everything through Step 7 and produce the synthesis, but skip Step 8. If it says *approvals off*, set **approvals-off mode**: no PR is approved (Step 8, *Verdict*); blocking verdicts post as usual. Echo the active mode back to the user in one line.
 
 ## Step 2 — Build the batch brief (inspect the PRs)
 
@@ -147,26 +147,26 @@ Skip in dry-run mode. Otherwise post **one review per open PR** containing all i
 **Already raised by someone else.** Never post a second comment for a problem another reviewer already pointed out. For each verified finding whose ledger entry has *Already raised*:
 
 - **The earlier comment is open and gives the problem its due** (not resolved, not outdated, not understated) → don't post it. List it in the review body under *Already raised by others*: severity, title, and the link to the earlier comment. It still counts toward this PR's verdict.
-- **The earlier thread is resolved or outdated but the problem is still in the code at head, or the earlier comment understates it** → reply on that thread instead of starting a new one: `gh api repos/{o}/{r}/pulls/{n}/comments/<first comment databaseId>/replies -f body=<text>`. The text is the comment prefix from `<CONFIG>/signature.md`, then `**[SEVERITY]** Still present at <short head sha>: <title>`, then the failure scenario, the current `file:line` if it moved, the verifier's confirmation, and the marker. If the thread was resolved, reopen it: `gh api graphql -f query='mutation($id:ID!){unresolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' -f id=<thread id>`; if GitHub refuses, the reply still stands, so note the refusal in `posted.md`. Post these replies before the review, and list them under *Already raised by others* with the link to the reply.
-- **It was raised only in a review summary or a conversation comment** (no thread to reply on) → treat it like the first case when it gives the problem its due; otherwise post the finding as normal, ending the suggested fix with `Also raised by @<author>: <link>`.
+- **The earlier thread is resolved or outdated but the problem is still in the code at head, or the earlier comment understates it** → reply on that thread instead of starting a new one: `gh api repos/{o}/{r}/pulls/{n}/comments/<first comment databaseId>/replies -f body=<text>`. The text is the *Reply: still present* template from `<CONFIG>/output.md`, then the marker. If the thread was resolved, reopen it: `gh api graphql -f query='mutation($id:ID!){unresolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' -f id=<thread id>`; if GitHub refuses, the reply still stands, so note the refusal in `posted.md`. Post these replies before the review, and list them under *Already raised by others* with the link to the reply.
+- **It was raised only in a review summary or a conversation comment** (no thread to reply on) → treat it like the first case when it gives the problem its due; otherwise post the finding as normal, ending the suggested fix with the *Also raised by* line from `<CONFIG>/output.md`.
 
 Record each one in `posted.md` as *already raised by @<author>* with the earlier link, plus the reply link when you replied.
 
 **Anchoring.** A finding anchors inline only if the verifier confirmed its line is in the PR's diff (`in-diff: yes` with the correct line). Everything else — unchanged code, cross-file interactions, missing tests, operational concerns, merged-PR context — goes in the review body under *Findings not anchored to the diff*, each with `file:line` in the text. **Cross-PR findings post once, on the fix-owner PR**, naming and linking the counterpart PR in the comment text.
 
-**Verdict.** Each PR's verdict and review `event` come from the *Verdict* table in `<CONFIG>/review.md`, applied to its verified findings. State the verdict in the body in every mode.
+**Verdict.** Each PR's verdict and review `event` come from the *Verdict* table in `<CONFIG>/review.md`, applied to its verified findings. State the verdict in the body in every mode. In approvals-off mode, a PR whose `event` would be `APPROVE` posts as `COMMENT` instead, with the *No blocking issues* template from `<CONFIG>/output.md` between the review banner and the review body; inline comments (nits included) post as usual.
 
-**Signature.** Sign as `<CONFIG>/signature.md` says: every review body starts with its review banner, verdict and batch id filled in (in `review.json`, escape its quotes as `\"` and its line breaks as `\n`), and every inline comment and every reply on an existing thread starts with its comment prefix. The hidden `<!-- prowl-review … -->` marker is not part of the signature: always add it, whatever the signature says, because the re-run guard depends on it.
+**Output.** Write every post from its template in `<CONFIG>/output.md`: every review body is its review banner (verdict and batch id filled in) followed by the *Review body* template, every inline comment follows the *Inline comment* template, and every inline comment and every reply on an existing thread starts with its comment prefix. In `review.json`, escape quotes as `\"` and line breaks as `\n`. The hidden `<!-- prowl-review … -->` marker is not part of any template: always add it at the end of each comment and reply, whatever the templates say, because the re-run guard depends on it.
 
 Build `review.json` per PR and post with `gh api repos/{o}/{r}/pulls/{n}/reviews --input review.json`:
 
 ```json
 {
-  "body": "<review banner>\n**Batch:** <one line per sibling PR: link — role>\n**Goal of the work (as verified):** …\n**This PR's role / merge-order notes:** …\n**Summary:** <paragraph>\n\n### Cross-PR findings involving this PR\n…\n### Findings not anchored to the diff\n…\n### Already raised by others\n…\n### Coverage\nAxes reviewed: … — checked and found clean: …",
+  "body": "<review banner>\n<review body>",
   "event": "<per the verdict table>",
   "comments": [
     {"path": "<file>", "line": <line>, "side": "RIGHT",
-     "body": "<comment prefix>**[SEVERITY]** <title>\n\n**Problem:** …\n**Failure scenario:** …\n**Suggested fix:** …\n\n_Verified: <one clause from the verifier>_ · axis: <axis>\n<!-- prowl-review <batch-id> <F-id> -->"}
+     "body": "<inline comment>\n<!-- prowl-review <batch-id> <F-id> -->"}
   ]
 }
 ```
