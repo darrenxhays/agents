@@ -28,7 +28,7 @@ A batch run is long. Context may be summarized part-way through, so keep your wo
 
 `<SKILL_DIR>` below means the absolute "Base directory for this skill" path shown when this skill loaded (it differs per install: personal skill, plugin, `--plugin-dir`); use that absolute path in every subagent prompt. **Never pass a literal `~` or a relative path to a subagent** — subagent file tools do not expand it, the instructions file silently fails to load, and the subagent falls back to a shallow ad-hoc review.
 
-**Config.** Three files set how PRs are reviewed and what posts look like: `review.md` (reviewer stance, severity, verdict), `axis-catalog.md` (the checklists) and `output.md` (the templates for everything posted: banner, review body, inline comments, replies, the approvals-off comment). Each ships in `<SKILL_DIR>/config/`; Prowl keeps the user's copy of each in `<PROWL_HOME>/config/`, where `<PROWL_HOME>` is the output of `echo "${PROWL_HOME:-$HOME/.prowl}"`. `<CONFIG>/<file>` below means the user's copy when it exists, otherwise the default. Resolve all three to absolute paths now, list them in `config-paths.md` in the run folder, read `review.md` and `output.md`, and pass the absolute paths to subagents.
+**Config.** Three files set how PRs are reviewed and what posts look like: `review.md` (reviewer stance, severity, verdict), `review-axis-catalog.md` (the checklists) and `output.md` (the templates for everything posted: banner, review body, inline comments, replies, the approvals-off comment). Each ships in `<SKILL_DIR>/config/`; Prowl keeps the user's copy of each in `<PROWL_HOME>/config/`, where `<PROWL_HOME>` is the output of `echo "${PROWL_HOME:-$HOME/.prowl}"`. `<CONFIG>/<file>` below means the user's copy when it exists, otherwise the default. Resolve all three to absolute paths now, list them in `config-paths.md` in the run folder, read `review.md` and `output.md`, and pass the absolute paths to subagents.
 
 ## Step 1 — Parse and verify the PR list
 
@@ -80,7 +80,7 @@ Write them to `existing-comments.md`, per PR: each thread with its `id`, its fir
 
 ## Step 3 — Write one review specification per PR
 
-Every open PR gets one spec and one reviewer. Merged and closed PRs get none: they are context in the brief, and the reviewers of the open PRs read them where they share a surface. Read `<CONFIG>/axis-catalog.md`, then for each open PR:
+Every open PR gets one spec and one reviewer. Merged and closed PRs get none: they are context in the brief, and the reviewers of the open PRs read them where they share a surface. Read `<CONFIG>/review-axis-catalog.md`, then for each open PR:
 
 - **Name the axes that apply to it.** Always include the axes the catalog marks as always included (by default **A. Batch Coherence & Integration**, scoped to this PR's side of each shared surface and dependency edge in the brief; the reviewer reads the other side in the sibling PR). Add every other axis whose triggers this PR touches (each catalog entry lists them). Skip axes with nothing to review; do not pad.
 - **Set the depth.** A large PR still gets one reviewer, so say which files to trace line by line and which to skim.
@@ -93,7 +93,7 @@ Fill `<SKILL_DIR>/references/review-spec-template.md` once per open PR and save 
 
 **Launch all reviewers in a single message** so they run concurrently. Use a general-purpose subagent (read-only work; do not grant edit intent in the prompt). Each reviewer prompt must contain:
 
-1. The instruction to read `<SKILL_DIR>/references/reviewer-instructions.md` **in full, first**, then `<CONFIG>/review.md` in full, then the sections of `<CONFIG>/axis-catalog.md` named in the spec (all as absolute paths).
+1. The instruction to read `<SKILL_DIR>/references/reviewer-instructions.md` **in full, first**, then `<CONFIG>/review.md` in full, then the sections of `<CONFIG>/review-axis-catalog.md` named in the spec (all as absolute paths).
 2. The complete review spec, inline.
 3. The requirement to return the structured report defined in reviewer-instructions.md **as its final message**, verbatim structure — you file it unchanged in `reports/<repo>-<n>.md`.
 4. The three prohibitions, restated: **post nothing on the PR; change no code; never run `git checkout`/`git switch` or any mutating git command in the user's clone** (read via `gh pr diff`, `gh api`, `gh pr view`; if local inspection is unavoidable, use an isolated `git worktree add <tmpdir> <sha>` or temp shallow clone and remove it after).

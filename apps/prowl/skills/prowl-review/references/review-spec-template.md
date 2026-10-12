@@ -1,6 +1,6 @@
 # Review Specification — <owner/repo>#<n> (<batch-id>)
 
-Fill every field. The reviewer sees only this document, the reviewer-instructions file, the review config, the axis-catalog sections named below, and the PRs themselves. Anything you leave out, it does not know. Save the filled copy to `specs/<repo>-<n>.md` and paste it inline in the reviewer prompt.
+Fill every field. The reviewer sees only this document, the reviewer-instructions file, the review config, the review-axis-catalog sections named below, and the PRs themselves. Anything you leave out, it does not know. Save the filled copy to `specs/<repo>-<n>.md` and paste it inline in the reviewer prompt.
 
 ---
 
@@ -12,7 +12,7 @@ Fill every field. The reviewer sees only this document, the reviewer-instruction
 
 **Axes:** <catalog letters and names that apply to this PR; always "A. Batch Coherence & Integration", e.g. "A, B, C, E, J">
 **Review config:** `<absolute path of review.md>`
-**Catalog sections to read:** `<absolute path of axis-catalog.md>` → sections <letters>
+**Catalog sections to read:** `<absolute path of review-axis-catalog.md>` → sections <letters>
 
 ## 3. Scope
 

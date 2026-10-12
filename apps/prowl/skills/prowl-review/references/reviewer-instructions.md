@@ -13,7 +13,7 @@ Three things you never do:
 1. This file, in full.
 2. The review spec the orchestrator gave you, in full — especially *Axes*, *Sibling PRs*, and *Hypotheses*.
 3. The review config (`review.md`) at the absolute path the orchestrator gave you: your stance and the severity definitions.
-4. The sections of the axis catalog (`axis-catalog.md`) named in the spec. They are your checklist.
+4. The sections of the axis catalog (`review-axis-catalog.md`) named in the spec. They are your checklist.
 5. Any convention files the spec lists.
 
 ## Fetching the code

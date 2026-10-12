@@ -2,6 +2,9 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.3.1
+- axis-catalog.md is now review-axis-catalog.md. Your copy in ~/.prowl/config/ was renamed for you, edits included.
+
 ## 2.3.0
 - Update Notes: after an update, Prowl shows what changed (this screen) the first time it starts.
 - Approve PRs setting (Config, 3): turn it off and Prowl stops approving PRs. When it finds nothing blocking it comments that the PR has its stamp of approval and is waiting on a human reviewer's approval. Blocking findings still request changes.

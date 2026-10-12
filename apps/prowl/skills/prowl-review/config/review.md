@@ -1,6 +1,6 @@
 # PR-Owl Review — How Each PR Is Reviewed
 
-The stance each reviewer takes, how findings are rated, and how a PR's verdict follows from them. The checklists themselves are in `axis-catalog.md`, next to this file. Prowl keeps your copy of this file in `~/.prowl/config/` (or `$PROWL_HOME/config/`): edit that one. Updates never overwrite a copy you've edited.
+The stance each reviewer takes, how findings are rated, and how a PR's verdict follows from them. The checklists themselves are in `review-axis-catalog.md`, next to this file. Prowl keeps your copy of this file in `~/.prowl/config/` (or `$PROWL_HOME/config/`): edit that one. Updates never overwrite a copy you've edited.
 
 ## Reviewer stance
 

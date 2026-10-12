@@ -39,6 +39,8 @@ export function installUpdate() {
 
 const SEEN_PATH = path.join(HOME, 'seen.json'); // the version last launched, and the defaults the user's config files match
 const hash = s => crypto.createHash('sha256').update(s).digest('hex');
+// Config files renamed by a release: the user's copy, edited or not, moves to the new name.
+const RENAMED = { 'axis-catalog.md': 'review-axis-catalog.md' };
 const read = file => { try { return fs.readFileSync(file, 'utf8'); } catch { return null; } };
 
 /** CHANGELOG.md's entries, [{ version, items }]: a `## x.y.z` heading, then `- ` items (an item may wrap onto more lines). */
@@ -62,7 +64,7 @@ function section(text, heading) {
 
 /**
  * Keeps the user's copies of the review config (userDir) in step with the shipped defaults (defaultDir): copies in any
- * that are missing, moves a pre-2.3 signature.md into output.md, and replaces a copy the user never edited when its
+ * that are missing, moves a pre-2.3 signature.md into output.md, moves renamed files to their new names, and replaces a copy the user never edited when its
  * default changes. An edited copy is never touched. `synced` maps each file to the hash of the default it was last
  * synced with, and is updated in place. `announce` notes files new to the folder (not on a fresh install).
  * Returns what changed: [{ text, path }].
@@ -84,6 +86,14 @@ export function syncConfigFiles(defaultDir, userDir, synced, announce) {
     fs.renameSync(signature, `${signature}.old`);
     synced['output.md'] = hash(def);
     notes.push({ text: 'Your signature.md is now part of output.md, which templates everything Prowl posts. The old file is kept as signature.md.old.', path: output });
+  }
+  for (const [from, to] of Object.entries(RENAMED)) {
+    const [old, now] = [path.join(userDir, from), path.join(userDir, to)];
+    if (!fs.existsSync(old) || fs.existsSync(now)) continue;
+    fs.renameSync(old, now);
+    if (from in synced) synced[to] = synced[from];
+    delete synced[from];
+    notes.push({ text: `${from} is now ${to}`, path: now });
   }
   for (const name of fs.readdirSync(defaultDir).filter(f => f.endsWith('.md')).sort()) {
     const def = read(path.join(defaultDir, name));
