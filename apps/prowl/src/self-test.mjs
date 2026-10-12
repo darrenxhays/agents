@@ -56,6 +56,10 @@ assert.ok(first.startsWith('/prowl:prowl-review https://github.com/o/a/pull/1 ht
 assert.ok(first.includes('/r/AB42.md') && first.includes('Ticket: AB#42 "Thing"') && first.includes('ticket: AB#42') && !first.includes('re-review'));
 const again = buildPrompt({ ...base, reviewNo: 2, prior: { reviewNo: 1, endedAt: 0 }, priorReport: 'F-01 [HIGH] old finding' });
 assert.ok(!first.includes('Approvals off') && buildPrompt({ ...base, approvals: false }).includes('Approvals off'));
+const ctx = buildPrompt({ ...base, prs: base.prs.slice(1), contextPrs: base.prs.slice(0, 1) });
+assert.ok(ctx.startsWith('/prowl:prowl-review https://github.com/o/b/pull/2 https://github.com/o/a/pull/1\n'), 'approved PRs go to the skill as context');
+assert.ok(ctx.includes('## Already approved: context only\n\n') && ctx.includes('- https://github.com/o/a/pull/1') && !first.includes('Already approved'));
+assert.ok(first.includes('approved: <each PR'));
 assert.ok(again.includes('This is a re-review') && again.includes('F-01 [HIGH] old finding') && again.includes('What was fixed: every prior finding'));
 
 // A session that ends cleanly but never wrote its report did not review anything: it must fail, not tag Reviewed.
@@ -71,6 +75,12 @@ fs.writeFileSync(good.reportPath, '---\nverdict: APPROVE\nhigh: 0\n---\n# Report
 finalize(good);
 assert.equal(good.status, 'done');
 assert.deepEqual(good.summary, { verdict: 'APPROVE', high: 0 });
+// The PRs a review approved, and at which commit, are kept so the next re-review can leave them out.
+const pa = 'https://github.com/o/a/pull/1';
+const withApprovals = { status: 'running', reportPath: good.reportPath, _result: clean, prs: [{ url: pa }], approved: { 'https://github.com/o/c/pull/3': 'c0ffee' } };
+fs.writeFileSync(good.reportPath, `---\nverdict: APPROVE\napproved: ${pa}@abc123 https://github.com/o/zz/pull/9@def junk\n---\n`);
+finalize(withApprovals);
+assert.deepEqual(withApprovals.approved, { 'https://github.com/o/c/pull/3': 'c0ffee', [pa]: 'abc123' }, 'carried + this review, nothing else');
 fs.rmSync(dir, { recursive: true });
 
 assert.deepEqual(changelog('# Notes\nintro\n\n## 2.3.0 (today)\n- One\n  wraps\n- Two\n\n## 2.2.0\n- Old\n'),

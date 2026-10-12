@@ -42,6 +42,7 @@ gh pr view <number> --repo <owner/repo> --json number,title,body,state,url,autho
 
 - **Report unresolvable entries explicitly.** Never silently drop one — a missing row in the final table reads as "reviewed and clean".
 - **No PR list found → ask the user for one.** Never guess at open PRs.
+- **Already approved** (the invocation lists the PR as approved earlier and unchanged since) → treat it exactly like a PR whose state is not OPEN, below. It gets no spec or reviewer, and nothing is posted on it.
 - **State not OPEN** (merged/closed) → keep the PR **as context** for the batch brief (its code has landed and the others depend on it) but mark it `no-post`: it gets no review comments. Findings against it are reported in the final synthesis under "Findings on merged/closed PRs (not posted)".
 
 **Posting mode per PR.** Everything posts from the default `gh` identity; never set or override `GH_TOKEN`. GitHub rejects `APPROVE`/`REQUEST_CHANGES` on a PR authored by the authenticated user, so resolve the login once (`gh api user -q .login`) and set each PR to `formal` (author is someone else — verdict lands as a real review event) or `comment` (author is the user — verdict stated in the body of a `COMMENT` review). Tell the user which PRs are in comment mode.
@@ -186,7 +187,7 @@ Produce, in this order:
    | PR | Title | Role | Verdict | Critical | High | Medium | Low | Nit | Review | Status |
    |----|-------|------|---------|----------|------|--------|-----|-----|--------|--------|
 
-   Counts are verified findings only. `Review` is the posted review URL, *already posted*, *dry run*, or *no-post (merged)*. `Status` is one of *Posted* / *Dry run* / *No-post (merged/closed)* / *Failed to post: <reason>*.
+   Counts are verified findings only. `Review` is the posted review URL, *already posted*, *dry run*, or *no-post (merged)*. `Status` is one of *Posted* / *Dry run* / *No-post (merged/closed)* / *No-post (already approved)* / *Failed to post: <reason>*.
 
 3. **Cross-PR findings** — the coherence/integration findings, each with the PRs involved, fix-owner, and verifier's one-line confirmation. Include *ADDRESSED-IN* notes here (a reviewer's concern that another PR already handles). Omit the section only if the coherence axis returned nothing and say so explicitly.
 

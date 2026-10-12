@@ -47,13 +47,15 @@ export function alive(run) {
  * Starts a detached headless Claude Code session running prowl-review on the PRs. It outlives this
  * process; output goes to a log file this app tails, so a restart picks running reviews back up.
  */
-export function startReview(cfg, pluginDir, { tracker, ticket, prs, prior }) {
+export function startReview(cfg, pluginDir, { tracker, ticket, prs, approvedPrs = [], prior }) {
   const reviewNo = (prior?.reviewNo || 0) + 1;
   const id = `${ticket.key.replace(/[^A-Za-z0-9-]/g, '')}-${new Date().toISOString().slice(0, 16).replace(/[-:]/g, '')}-r${reviewNo}`;
   for (const dir of [REPORTS_DIR, LOGS_DIR, CONFIG_DIR]) fs.mkdirSync(dir, { recursive: true });
   const run = {
     id, tracker, ticket: ticket.key, ticketUrl: ticket.url, ref: ticket.ref, title: ticket.title, prs, reviewNo, priorId: prior?.id || null,
-    startedAt: Date.now(), status: 'running', pid: null, pendingTag: null, reviewedPrs: [],
+    startedAt: Date.now(), status: 'running', pid: null, pendingTag: null, reviewedPrs: [], contextPrs: approvedPrs,
+    // PR URL -> the head commit Prowl approved it at; the skipped PRs carry over, and finalize() adds this review's.
+    approved: Object.fromEntries(approvedPrs.map(p => [p.url, prior.approved[p.url]])),
     reportPath: path.join(REPORTS_DIR, `${id}.md`),
     logPath: path.join(LOGS_DIR, `${id}.ndjson`),
     promptPath: path.join(LOGS_DIR, `${id}.prompt.md`),
@@ -152,6 +154,10 @@ export function finalize(run) {
   } else if (ok && fs.existsSync(run.reportPath)) {
     run.status = 'done';
     run.summary = frontMatter(fs.readFileSync(run.reportPath, 'utf8'));
+    for (const item of String(run.summary?.approved || '').split(/\s+/)) {
+      const [url, sha] = [item.slice(0, item.lastIndexOf('@')), item.slice(item.lastIndexOf('@') + 1)];
+      if (sha && run.prs.some(p => p.url === url)) (run.approved ??= {})[url] = sha;
+    }
   } else {
     // A clean exit without the report is a failure too: the session can end "successfully" before prowl-review
     // has posted anything (e.g. its background reviewers were stopped).
@@ -165,9 +171,9 @@ export function finalize(run) {
 }
 
 /** The prompt (the agent's brief): the PR list for prowl-review, the ticket, the re-review brief and the report spec. */
-export function buildPrompt({ ticket, title, ticketUrl, prs, reviewNo, reportPath, prior, priorReport, approvals = true }) {
+export function buildPrompt({ ticket, title, ticketUrl, prs, contextPrs = [], reviewNo, reportPath, prior, priorReport, approvals = true }) {
   const lines = [
-    `/prowl:prowl-review ${prs.map(p => p.url).join(' ')}`,
+    `/prowl:prowl-review ${[...prs, ...contextPrs].map(p => p.url).join(' ')}`,
     '',
     '## Context from Prowl, the review poller',
     '',
@@ -176,6 +182,11 @@ export function buildPrompt({ ticket, title, ticketUrl, prs, reviewNo, reportPat
     '- It started automatically because the ticket was tagged for review. Nobody is watching this session: never stop to ask a question; make the reasonable call and note it in the report.',
   ];
   if (!approvals) lines.push("- Approvals off (Prowl's Approve PRs setting): never post an APPROVE review; see approvals-off mode in the skill.");
+  if (contextPrs.length) {
+    lines.push('', '## Already approved: context only', '',
+      'Prowl approved these PRs in an earlier review and they have no new commits since. They are already approved (see Step 1): read them for the batch brief and the cross-PR contracts, but give them no spec or reviewer, post nothing on them, and leave their earlier findings and comment threads alone.',
+      '', ...contextPrs.map(p => `- ${p.url}`));
+  }
   if (prior) lines.push('', ...reReviewBrief(prior, priorReport));
   lines.push('', ...reportSpec(ticket, reviewNo, reportPath, Boolean(prior)));
   return `${lines.join('\n')}\n`;
@@ -214,6 +225,7 @@ const reportSpec = (id, n, file, again) => [
   'nit: <n>',
   `fixed: <prior findings verified fixed${again ? '' : '; 0 on a first review'}>`,
   `stillOpen: <prior findings still open${again ? '' : '; 0 on a first review'}>`,
+  'approved: <each PR this review approved, as <PR URL>@<head sha reviewed>, space-separated on this one line: the PRs whose review event was APPROVE, or would have been with approvals off. Leave it blank if none>',
   '---',
   '',
   'Then these sections:',

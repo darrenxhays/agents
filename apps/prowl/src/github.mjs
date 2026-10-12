@@ -19,6 +19,11 @@ export async function openPrs(owner, key) {
     .map(p => ({ url: p.url, title: p.title, number: p.number, repo: p.repository.nameWithOwner, author: p.author?.login || '' }));
 }
 
+/** The commit at the head of the PR now. */
+export async function headSha(pr) {
+  return (await run('gh', ['api', `repos/${pr.repo}/pulls/${pr.number}`, '--jq', '.head.sha'])).trim();
+}
+
 /** True once `login` has submitted a review on the PR at or after `since` (ms). */
 export async function reviewedSince(pr, login, since) {
   const out = await run('gh', ['api', `repos/${pr.repo}/pulls/${pr.number}/reviews`, '--paginate', '--jq', '.[] | [.user.login, .submitted_at] | @tsv']);

@@ -151,15 +151,28 @@ async function consider(tracker, ticket) {
     // Skip the whole ticket, not just your PRs: prowl-review reviews a ticket's PRs as one set.
     return log('info', `${ticket.key}: skipped, ${mine.map(p => `${p.repo}#${p.number}`).join(', ')} ${mine.length > 1 ? 'are' : 'is'} yours; leaving it for a teammate`, key);
   }
-  if (app.dryRun()) return log('info', `${ticket.key}: would review ${prs.map(p => p.url).join(' ')}`, key);
+  const prior = state.runs.filter(r => r.ticket === ticket.key && r.status === 'done').sort((a, b) => b.endedAt - a.endedAt)[0];
+  // A re-review leaves out the PRs the last review approved that have no new commits since; they stay as context.
+  const approved = [];
+  for (const pr of prior?.approved ? prs : []) {
+    const sha = prior.approved[pr.url];
+    if (sha && sha === await github.headSha(pr).catch(() => '')) approved.push(pr);
+  }
+  const toReview = prs.filter(p => !approved.includes(p));
+  const skipped = approved.length ? ` (already approved, unchanged: ${approved.map(p => `${p.repo}#${p.number}`).join(', ')})` : '';
+  if (app.dryRun()) return log('info', `${ticket.key}: would review ${toReview.map(p => p.url).join(' ') || 'nothing'}${skipped}`, key);
 
   try {
-    await tracker.claim(cfg, ticket, t => isTrigger(t) || ours(t), cfg.tags.inProgress);
+    // Nothing to re-review: straight to done, in one write a teammate's poller can't race.
+    await tracker.claim(cfg, ticket, t => isTrigger(t) || ours(t), toReview.length ? cfg.tags.inProgress : cfg.tags.done);
   } catch (e) {
     return log('warn', `${ticket.key}: not claimed (changed or claimed by someone else): ${e.message}`, key);
   }
+  if (!toReview.length) {
+    hoot(`Every PR for ${ticket.title} is already approved, marking as '${cfg.tags.done}'`, 'cheer');
+    return log('ok', `${ticket.key}: every PR is already approved and unchanged since; nothing to re-review`);
+  }
   hoot(`Starting reviews for ${ticket.title}, marking as '${cfg.tags.inProgress}'`);
-  const prior = state.runs.filter(r => r.ticket === ticket.key && r.status === 'done').sort((a, b) => b.endedAt - a.endedAt)[0];
   try {
     const cloned = await github.cloneMissing(prs, cfg.workDir);
     if (cloned.length) log('info', `${ticket.key}: cloned ${cloned.join(', ')} into ${cfg.workDir}`);
@@ -168,7 +181,7 @@ async function consider(tracker, ticket) {
   }
   let run;
   try {
-    run = rv.startReview(cfg, PLUGIN_DIR, { tracker: cfg.taskBoard, ticket, prs, prior });
+    run = rv.startReview(cfg, PLUGIN_DIR, { tracker: cfg.taskBoard, ticket, prs: toReview, approvedPrs: approved, prior });
   } catch (e) {
     log('error', `${ticket.key}: could not start the review: ${e.message}`);
     return applyTag({ tracker: cfg.taskBoard, ticket: ticket.key, ref: ticket.ref, id: `claim-${ticket.key}`, pendingTag: cfg.tags.trigger });
@@ -176,8 +189,8 @@ async function consider(tracker, ticket) {
   state.runs.push(run);
   rv.saveState(state);
   lastByKey.delete(key);
-  hoot(prs.length > 1 ? `Starting a batch review of ${prs.length} PRs` : `Starting a review of ${prs[0].title}`);
-  return log('ok', `${ticket.key}: ${prior ? `re-review #${run.reviewNo}` : 'review'} started on ${prs.length} PR${prs.length > 1 ? 's' : ''}`);
+  hoot(toReview.length > 1 ? `Starting a batch review of ${toReview.length} PRs` : `Starting a review of ${toReview[0].title}`);
+  return log('ok', `${ticket.key}: ${prior ? `re-review #${run.reviewNo}` : 'review'} started on ${toReview.length} PR${toReview.length > 1 ? 's' : ''}${skipped}`);
 }
 
 /** Announces each PR whose review has been posted since the run started (checked about once a minute). */
