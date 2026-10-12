@@ -14,8 +14,11 @@ allowed-tools:
   - mcp__plugin_atlassian_atlassian__getJiraIssueRemoteIssueLinks
   - mcp__plugin_atlassian_atlassian__getAccessibleAtlassianResources
   - mcp__plugin_atlassian_atlassian__search
+  - mcp__plugin_atlassian_atlassian__getTransitionsForJiraIssue
+  - mcp__plugin_atlassian_atlassian__transitionJiraIssue
   - Bash(gh issue view:*)
   - Bash(az boards work-item show:*)
+  - Bash(az boards work-item update:*)
   - Bash(command -v codex)
   - Bash(codex debug models)
   - Bash(git status:*)
@@ -121,7 +124,7 @@ Give the user the plan path, a few bullets summarizing the approach, and each op
 
 The user may ask questions or request changes. Answer questions, update the plan file for each change, and summarize what changed. Repeat until the user explicitly approves the plan; do not treat silence, a question, or a change request as approval, and do not start step 5 before approval. If an answer settles an open question, record the decision in the plan.
 
-Checklist item 2 is done.
+Checklist item 2 is done. Move the ticket to in progress (see "Moving the ticket").
 
 ## 5. Split the work and choose models
 Divide the approved plan into subtasks and choose a model and reasoning effort for each.
@@ -230,8 +233,23 @@ Then ask in one sentence whether to commit, push, and open a PR, and tell them t
 - Push the branch with upstream tracking.
 - Open the PR on the repository's host: `gh pr create` for GitHub, `az repos pr create` for Azure DevOps, or the host's own CLI or MCP tool. Use the repository's PR template if it has one, and link the ticket.
 - Give the user the PR URL. Checklist item 5 is done.
+- Move the ticket to in review (see "Moving the ticket").
 
 Post a comment on the ticket only if the user asks.
+
+## Moving the ticket
+When the request came from a Jira or Azure DevOps ticket, keep its column in step with the build. Skip this for every other source.
+
+- **Plan approved (step 4):** move it to the board's in-progress status.
+- **PR opened (step 10):** move it to the board's review status, such as `In Review` or `Code Review`. If the workflow has no review status, leave it where it is.
+
+Only move a ticket forward. Re-read its current status first, and leave it alone if it is already in the target status or past it (in review, done, closed, resolved, removed). Never move a ticket to done or closed; merging the PR does that.
+
+Pick the target from the statuses the ticket's own workflow allows, never a hardcoded name:
+- **Jira:** list the transitions with `mcp__plugin_atlassian_atlassian__getTransitionsForJiraIssue` and apply one with `mcp__plugin_atlassian_atlassian__transitionJiraIssue` (get the cloud id from `mcp__plugin_atlassian_atlassian__getAccessibleAtlassianResources` if needed). In progress is the transition whose target status category is In Progress (`indeterminate`), preferring one named `In Progress`; review is the in-progress-category status whose name says review.
+- **Azure DevOps:** use an Azure DevOps MCP tool if one is connected. Otherwise list the work item type's states with `az devops invoke --area wit --resource workItemTypeStates --route-parameters project=<project> type=<type> --org https://dev.azure.com/<org> --api-version 7.1` and set one with `az boards work-item update --id <id> --state "<state>" --org https://dev.azure.com/<org>`. In progress is the state in the `InProgress` category (for example `Active`, `Committed`, or `Doing`); review is an `InProgress` or `Resolved` state whose name says review.
+
+If no status clearly fits, more than one does, or the move fails, leave the ticket where it is, tell the user why in one sentence, and carry on with the build. Tell the user each move you make: the ticket id, old status, and new status.
 
 ## Writing what you post
 PR descriptions, PR comments, and ticket comments give readers what they need to review the change or make a decision, not a wall of text:
