@@ -2,6 +2,9 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.4.1
+- Setup (prowl --setup) now lists the GitHub orgs you belong to, plus your own account. Pick one by its number, or type a name. Jira can't list your sites with an API token, so setup still asks you to type the site, and now points you to start.atlassian.com, which lists them.
+
 ## 2.4.0
 - Re-reviews skip PRs that Prowl already approved, as long as they have no new commits since. They are still read as context for the ticket's other PRs, but nothing is posted on them. If every PR is approved and unchanged, the ticket goes straight to Reviewed.
 

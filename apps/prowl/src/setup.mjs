@@ -79,7 +79,11 @@ async function github(cfg) {
   const login = (await works('gh', ['api', 'user', '--jq', '.login']))?.trim();
   if (!login) { bad('not signed in to GitHub: run gh auth login'); return false; }
   ok(`signed in as ${login}. Reviews post from this account; your own PRs are never reviewed.`);
-  cfg.githubOwner = await ask('GitHub org whose PRs get reviewed', cfg.githubOwner);
+  const orgs = (await works('gh', ['api', 'user/orgs', '--paginate', '--jq', '.[].login']))?.split('\n').filter(Boolean) || [];
+  const owners = [...orgs, login];
+  owners.forEach((o, i) => console.log(`    ${i + 1} = ${o}${o === login ? ' (your own repos)' : ''}`));
+  const pick = await ask('GitHub org whose PRs get reviewed: its number, or type a name', cfg.githubOwner || (orgs.length === 1 ? '1' : ''));
+  cfg.githubOwner = owners[Number(pick) - 1] || pick;
   return true;
 }
 
@@ -104,6 +108,7 @@ async function azureDevOps(cfg) {
 async function jiraCloud(cfg) {
   step('Jira Cloud');
   const jira = await import('./jira.mjs');
+  console.log(`  Your Jira site is the address you open Jira at. ${B('https://start.atlassian.com')} lists your sites.`);
   cfg.jira.site = (await ask('Jira site', cfg.jira.site || 'https://yourcompany.atlassian.net', {
     valid: v => (/^https:\/\/\S+$/.test(v) && !v.includes('yourcompany')) || 'your Jira URL, e.g. https://acme.atlassian.net',
   })).replace(/\/+$/, '');
