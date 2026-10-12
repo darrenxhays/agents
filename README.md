@@ -1,6 +1,26 @@
 # agents
 
-Plugins and skills for Claude Code and Codex.
+Plugins, skills and apps for Claude Code and Codex.
+
+## Apps
+
+### Prowl
+
+A terminal app that watches your Azure DevOps or Jira boards for tickets tagged **Ready for Review** and has Claude Code review their open GitHub PRs as one set, posting verified findings from your GitHub account. It updates itself on launch. See the [Prowl README](apps/prowl/README.md) for setup, configuration and the review config.
+
+Install or update, in a terminal:
+
+```sh
+# macOS / Linux
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/darrenxhays/agents/main/apps/prowl/install.sh)"
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/darrenxhays/agents/main/apps/prowl/install.ps1 | iex
+```
+
+The installer adds whatever Prowl needs (Node.js, Git, the GitHub CLI, Claude Code, and the Azure CLI for Azure DevOps), then signs you in and asks for your first board. Prowl's review skill is used only by the app: it isn't a marketplace plugin and isn't added to your Claude Code skills.
 
 ## Skills (darrenxhays plugin)
 
