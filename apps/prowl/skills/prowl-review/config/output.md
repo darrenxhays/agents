@@ -30,19 +30,34 @@ Every inline comment, and every reply on an existing thread, starts with this te
 One review per PR. Its body is the review banner, then this:
 
 ```markdown
-**Batch:** <one line per sibling PR: link — role>
+**Batch:**
+<one line per sibling PR: link — role>
+
 **Goal of the work (as verified):** <goal>
+
 **This PR's role / merge-order notes:** <role and merge order>
+
 **Summary:** <paragraph>
 
 ### Cross-PR findings involving this PR
-<findings>
+
+<findings, with a blank line between each>
+
 ### Findings not anchored to the diff
-<findings, each with file:line>
+
+<findings, each with file:line, with a blank line between each>
+
 ### Already raised by others
+
 <severity, title and link to the earlier comment, one per line>
+
 ### Coverage
-Axes reviewed: <axes> — checked and found clean: <axes>
+
+**Axes reviewed:**
+<one line per axis, by its full name without the catalog letter, as "- Correctness & Logic">
+
+**Checked and found clean:**
+<one line per axis, the same way>
 ```
 
 ## No blocking issues (approvals off)

@@ -2,6 +2,9 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.4.2
+- Review bodies are easier to read: blank lines now separate the batch, goal, role, summary and each finding, and Coverage lists each axis on its own line by name (for example "Correctness & Logic") instead of by letter. This is a change to the default output.md: if you edited your copy in ~/.prowl/config/, it stays as it is, so copy the new *Review body* template from the default to pick this up.
+
 ## 2.4.1
 - Setup (prowl --setup) now lists the GitHub orgs you belong to, plus your own account. Pick one by its number, or type a name. Jira can't list your sites with an API token, so setup still asks you to type the site, and now points you to start.atlassian.com, which lists them.
 
