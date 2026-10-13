@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { CONFIG_DIR, CONFIG_PATH } from './config.mjs';
 import { createMascot, wrap } from './mascot.mjs';
 import { openExternal } from './proc.mjs';
+import { awaitingHuman } from './reviews.mjs';
 
 const ST = {
   reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m', title: '\x1b[1;38;5;220m', yellow: '\x1b[38;5;220m',
@@ -47,7 +48,7 @@ const FIELDS = [
   { key: 'claude.model', label: 'Model', type: 'text', help: 'Model for review sessions.' },
   { key: 'claude.effort', label: 'Effort', type: 'enum', values: ['low', 'medium', 'high', 'xhigh', 'max'], help: 'Reasoning effort for review sessions. enter cycles.' },
   { key: 'claude.permissionMode', label: 'Permission mode', type: 'enum', values: ['auto', 'bypassPermissions'], help: 'auto lets a safety classifier block risky actions. bypassPermissions lets reviews run anything: not recommended, reviews read text written by PR authors.' },
-  { key: 'approvals', label: 'Approve PRs', type: 'bool', help: 'on: a PR with no blocking findings gets a GitHub approval. off: Prowl comments that it found no blocking issues, and a human approves (text in Output templates).' },
+  { key: 'approvals', label: 'Approve PRs', type: 'bool', help: 'on: a PR with no blocking findings gets a GitHub approval. off: Prowl comments that it found no blocking issues, and a human approves (text in Output templates); History flags those PRs with ⚑ until someone approves them.' },
   { key: 'dryRun', label: 'Dry run', type: 'bool', help: 'Log what would be reviewed without changing tags or starting reviews.' },
   { key: 'autoUpdate', label: 'Auto-update', type: 'bool', help: 'Install a newer Prowl release before launching. It waits while reviews from an earlier launch are still running.' },
 ];
@@ -184,15 +185,23 @@ export function startTui(app, actions) {
     return [v.startsWith('BLOCK') ? ST.red : v.startsWith('REQUEST') ? ST.orange : v.startsWith('APPROVE') ? ST.green : ST.grey, v];
   }
 
+  // PRs given Prowl's stamp with Approve PRs off, flagged on the ticket's latest review until it is reviewed again.
+  const waiting = r => (app.finished().find(x => x.ticket === r.ticket && x.status === 'done') === r ? awaitingHuman(r, app.cfg.approvals) : []);
+  // The review's PRs, plus earlier-approved ones it carried over that still await a human.
+  const prsOf = r => [...r.prs, ...(r.contextPrs || []).filter(p => waiting(r).includes(p.url))];
+
   function details(r) {
     const label = t => [ST.grey, `  ${t.padEnd(8)}`];
+    const flagged = waiting(r);
+    const prs = prsOf(r);
     const rows = [];
     rows.push(r.status === 'done'
       ? [label('Report'), [ST.link, r.reportPath, pathToFileURL(r.reportPath).href]]
       : [label('Report'), [ST.grey, '(none)']]);
     rows.push([label('Ticket'), [ST.link, r.ticketUrl, r.ticketUrl]]);
-    r.prs.slice(0, 4).forEach((p, i) => rows.push([label(i ? '' : 'PRs'), [ST.link, p.url, p.url], [ST.grey, `  ${p.title}`]]));
-    if (r.prs.length > 4) rows.push([label(''), [ST.grey, `+${r.prs.length - 4} more (o opens all)`]]);
+    prs.slice(0, 4).forEach((p, i) => rows.push([label(i ? '' : 'PRs'), [ST.link, p.url, p.url],
+      ...(flagged.includes(p.url) ? [[ST.yellow, '  ⚑ needs your approval']] : []), [ST.grey, `  ${p.title}`]]));
+    if (prs.length > 4) rows.push([label(''), [ST.grey, `+${prs.length - 4} more (o opens all)`]]);
     const how = r.status === 'failed' ? [ST.red, `failed: ${r.error}`]
       : r.status === 'stopped' ? [ST.grey, 'stopped by you']
         : [ST.green, `done in ${dur(r.endedAt - r.startedAt)}${r.costUsd != null ? ` · $${r.costUsd.toFixed(2)}` : ''}`];
@@ -214,6 +223,7 @@ export function startTui(app, actions) {
       const head = [
         cursor(i === sel), [ST.grey, `${stamp(r.endedAt)}  `], [ST.bold, r.ticket.padEnd(11)], [vs, vt.padEnd(18)], ...counts,
         [ST.grey, `${r.reviewNo > 1 ? `· fixed ${s.fixed ?? '?'} · re-review #${r.reviewNo}` : ''}  `],
+        ...(waiting(r).length ? [[ST.yellow, `⚑ ${plural(waiting(r).length, 'PR')} to approve  `]] : []),
       ];
       return [...head, ['', trunc(r.title, W - width(head))]];
     });
@@ -411,7 +421,7 @@ export function startTui(app, actions) {
     if (ui.tab === 2) return configKey(k);
     const r = (ui.tab === 0 ? app.running() : ui.tab === 1 ? app.finished() : [])[ui.sel[ui.tab]];
     if (!r) return undefined;
-    if (k === 'o') r.prs.forEach(p => openExternal(p.url));
+    if (k === 'o') prsOf(r).forEach(p => openExternal(p.url));
     else if (k === 'a') openExternal(r.ticketUrl);
     else if (k === 'enter' && ui.tab === 1 && r.status === 'done') openExternal(r.reportPath);
     else if (k === 's' && ui.tab === 0 && r.status === 'running') {

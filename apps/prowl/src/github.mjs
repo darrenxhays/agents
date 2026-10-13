@@ -24,6 +24,15 @@ export async function headSha(pr) {
   return (await run('gh', ['api', `repos/${pr.repo}/pulls/${pr.number}`, '--jq', '.head.sha'])).trim();
 }
 
+/**
+ * True once the PR needs no approval from you: someone approved the commit Prowl stamped or the head now, or it
+ * was merged or closed. Prowl itself never approves with Approve PRs off, so any approval is a human's.
+ */
+export async function humanApproved(url, sha) {
+  const pr = JSON.parse(await run('gh', ['pr', 'view', url, '--json', 'state,headRefOid,reviews']));
+  return pr.state !== 'OPEN' || pr.reviews.some(r => r.state === 'APPROVED' && [sha, pr.headRefOid].includes(r.commit?.oid));
+}
+
 /** True once `login` has submitted a review on the PR at or after `since` (ms). */
 export async function reviewedSince(pr, login, since) {
   const out = await run('gh', ['api', `repos/${pr.repo}/pulls/${pr.number}/reviews`, '--paginate', '--jq', '.[] | [.user.login, .submitted_at] | @tsv']);

@@ -43,6 +43,9 @@ export function alive(run) {
   return run._ours;
 }
 
+/** URLs of a review's approved PRs still waiting on a human. Reviews from before 2.5.0 didn't record it: `approvals` is the setting now. */
+export const awaitingHuman = (run, approvals) => run?.awaitingHuman ?? (approvals ? [] : Object.keys(run?.approved || {}));
+
 /**
  * Starts a detached headless Claude Code session running prowl-review on the PRs. It outlives this
  * process; output goes to a log file this app tails, so a restart picks running reviews back up.
@@ -56,6 +59,8 @@ export function startReview(cfg, pluginDir, { tracker, ticket, prs, approvedPrs 
     startedAt: Date.now(), status: 'running', pid: null, pendingTag: null, reviewedPrs: [], contextPrs: approvedPrs,
     // PR URL -> the head commit Prowl approved it at; the skipped PRs carry over, and finalize() adds this review's.
     approved: Object.fromEntries(approvedPrs.map(p => [p.url, prior.approved[p.url]])),
+    // The approved PRs that only got Prowl's stamp (Approve PRs off) and still need a human's approval.
+    approvals: cfg.approvals, awaitingHuman: approvedPrs.map(p => p.url).filter(u => awaitingHuman(prior, cfg.approvals).includes(u)),
     reportPath: path.join(REPORTS_DIR, `${id}.md`),
     logPath: path.join(LOGS_DIR, `${id}.ndjson`),
     promptPath: path.join(LOGS_DIR, `${id}.prompt.md`),
@@ -156,7 +161,9 @@ export function finalize(run) {
     run.summary = frontMatter(fs.readFileSync(run.reportPath, 'utf8'));
     for (const item of String(run.summary?.approved || '').split(/\s+/)) {
       const [url, sha] = [item.slice(0, item.lastIndexOf('@')), item.slice(item.lastIndexOf('@') + 1)];
-      if (sha && run.prs.some(p => p.url === url)) (run.approved ??= {})[url] = sha;
+      if (!sha || !run.prs.some(p => p.url === url)) continue;
+      (run.approved ??= {})[url] = sha;
+      if (run.approvals === false) (run.awaitingHuman ??= []).push(url);
     }
   } else {
     // A clean exit without the report is a failure too: the session can end "successfully" before prowl-review

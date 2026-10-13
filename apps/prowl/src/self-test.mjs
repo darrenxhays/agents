@@ -5,7 +5,7 @@ import { claimEntry, label } from './jira.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { alive, buildPrompt, finalize } from './reviews.mjs';
+import { alive, awaitingHuman, buildPrompt, finalize } from './reviews.mjs';
 import { processStart } from './proc.mjs';
 import { createMascot, wrap } from './mascot.mjs';
 import { changelog, newer, syncConfigFiles } from './update.mjs';
@@ -81,6 +81,13 @@ const withApprovals = { status: 'running', reportPath: good.reportPath, _result:
 fs.writeFileSync(good.reportPath, `---\nverdict: APPROVE\napproved: ${pa}@abc123 https://github.com/o/zz/pull/9@def junk\n---\n`);
 finalize(withApprovals);
 assert.deepEqual(withApprovals.approved, { 'https://github.com/o/c/pull/3': 'c0ffee', [pa]: 'abc123' }, 'carried + this review, nothing else');
+assert.equal(withApprovals.awaitingHuman, undefined, 'approvals on: Prowl approved them itself');
+// With Approve PRs off, the PRs given Prowl's stamp still need a human's approval; carried ones keep their flag.
+const stampOnly = { ...withApprovals, status: 'running', approvals: false, approved: {}, awaitingHuman: ['https://github.com/o/c/pull/3'] };
+finalize(stampOnly);
+assert.deepEqual(awaitingHuman(stampOnly, true), ['https://github.com/o/c/pull/3', pa]);
+assert.deepEqual(awaitingHuman({ approved: { [pa]: 'abc' } }, false), [pa], 'older reviews follow the current setting');
+assert.deepEqual(awaitingHuman({ approved: { [pa]: 'abc' } }, true), []);
 fs.rmSync(dir, { recursive: true });
 
 assert.deepEqual(changelog('# Notes\nintro\n\n## 2.3.0 (today)\n- One\n  wraps\n- Two\n\n## 2.2.0\n- Old\n'),

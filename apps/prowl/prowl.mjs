@@ -125,6 +125,7 @@ async function poll() {
         log('error', `${where}: ${e.message}`, `board:${where}`);
       }
     }
+    await checkHumanApprovals();
   } catch (e) {
     app.lastError = e.message;
     log('error', e.message, 'poll');
@@ -191,6 +192,25 @@ async function consider(tracker, ticket) {
   lastByKey.delete(key);
   hoot(toReview.length > 1 ? `Starting a batch review of ${toReview.length} PRs` : `Starting a review of ${toReview[0].title}`);
   return log('ok', `${ticket.key}: ${prior ? `re-review #${run.reviewNo}` : 'review'} started on ${toReview.length} PR${toReview.length > 1 ? 's' : ''}${skipped}`);
+}
+
+/** Clears History's ⚑ flag on each PR a human has approved since Prowl gave it its stamp (Approve PRs off). */
+async function checkHumanApprovals() {
+  const latest = new Map(); // the flag shows on each ticket's latest review only
+  for (const r of app.finished()) if (r.status === 'done' && !latest.has(r.ticket)) latest.set(r.ticket, r);
+  for (const run of latest.values()) {
+    for (const url of rv.awaitingHuman(run, app.cfg.approvals)) {
+      try {
+        if (!(await github.humanApproved(url, run.approved[url]))) continue;
+      } catch (e) {
+        log('warn', `${run.ticket}: couldn't check ${url} for a human approval (${e.message})`, `human:${url}`);
+        continue;
+      }
+      run.awaitingHuman = rv.awaitingHuman(run, app.cfg.approvals).filter(u => u !== url);
+      rv.saveState(app.state);
+      log('ok', `${run.ticket}: ${url} is approved (or merged or closed); its flag is cleared`);
+    }
+  }
 }
 
 /** Announces each PR whose review has been posted since the run started (checked about once a minute). */

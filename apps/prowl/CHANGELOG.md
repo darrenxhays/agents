@@ -2,6 +2,9 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.5.0
+- With Approve PRs off, History now flags the PRs that got Prowl's stamp of approval but still need yours: "⚑ n PRs to approve" on the ticket's row, and "⚑ needs your approval" next to each PR below it. o opens them. A flag clears on the next poll after someone approves the PR on GitHub (at the commit Prowl reviewed, or at the PR's latest commit), or once it is merged or closed. Reviews from before this update are flagged by the current Approve PRs setting.
+
 ## 2.4.2
 - Review bodies are easier to read: blank lines now separate the batch, goal, role, summary and each finding, and Coverage lists each axis on its own line by name (for example "Correctness & Logic") instead of by letter. This is a change to the default output.md: if you edited your copy in ~/.prowl/config/, it stays as it is, so copy the new *Review body* template from the default to pick this up.
 
