@@ -77,7 +77,8 @@ For each:
     ```
   - Problem: what is wrong
   - Failure scenario: concrete trigger
-  - Suggested fix: brief
+  - Suggested fix: what to change and where, concrete enough for someone (or a coding agent) to apply without asking, including any callers, sibling code or data that must change with it
+  - How to check the fix: the test to add or run, or the steps that show it's fixed
 
 ### Out-of-scope observations
 - <PR#> <file>:<line> — <one line: what looked wrong>. Not investigated.

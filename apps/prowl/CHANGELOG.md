@@ -2,6 +2,11 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.6.0
+- Reviews are shorter. The review comment is now the PR-Owl banner with the verdict, a one-line summary, and one line per finding. The full write-up (quoted code, problem, failure scenario, a concrete fix and how to check it, for each finding) is a markdown file collapsed at the bottom of the review: expand it and copy it into your coding agent to fix the PR.
+- Inline comments read like a teammate's: a sentence or two on what goes wrong, then the fix. Severity, failure scenarios and verifier notes have moved to the details file. Replies on earlier threads are shortened the same way.
+- This is a change to the default output.md. If you edited your copy in ~/.prowl/config/, it stays as it is: copy the new *Review body*, *Details file*, *Inline comment* and *Reply: still present* templates from the default to pick this up. Until you do, Prowl still adds the details file, using the default's template.
+
 ## 2.5.0
 - With Approve PRs off, History now flags the PRs that got Prowl's stamp of approval but still need yours: "⚑ n PRs to approve" on the ticket's row, and "⚑ needs your approval" next to each PR below it. o opens them. A flag clears on the next poll after someone approves the PR on GitHub (at the commit Prowl reviewed, or at the PR's latest commit), or once it is merged or closed. Reviews from before this update are flagged by the current Approve PRs setting.
 

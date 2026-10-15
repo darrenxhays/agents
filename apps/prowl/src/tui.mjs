@@ -25,7 +25,7 @@ const FIELDS = [
   { file: CONFIG_PATH, label: 'Settings file', help: `Every setting on this page, as JSON. ${opens}` },
   { file: path.join(CONFIG_DIR, 'review.md'), label: 'Review rules', help: `Reviewer stance, severity definitions, and the verdict each severity gives. Applies from the next review. ${opens}` },
   { file: path.join(CONFIG_DIR, 'review-axis-catalog.md'), label: 'Review checklists', help: `What reviewers check: the review axes and their checklists. Applies from the next review. ${opens}` },
-  { file: path.join(CONFIG_DIR, 'output.md'), label: 'Output templates', help: `How everything posted on GitHub looks: banner, review body, comments, replies, approvals-off comment. Applies from the next review. ${opens}` },
+  { file: path.join(CONFIG_DIR, 'output.md'), label: 'Output templates', help: `How everything posted on GitHub looks: banner, review body, details file, comments, replies, approvals-off comment. Applies from the next review. ${opens}` },
   { key: 'taskBoard', label: 'Task board', type: 'enum', values: ['ado', 'jira'], names: { ado: 'Azure DevOps', jira: 'Jira' }, help: 'Where tickets are watched: Azure DevOps or Jira Cloud. enter switches. Each keeps its own boards.' },
   { key: 'ado.org', label: 'Azure DevOps org', type: 'text', when: ADO, help: 'Organization URL, e.g. https://dev.azure.com/your-org. Signed in with az login.', valid: https },
   { key: 'jira.site', label: 'Jira site', type: 'text', when: JIRA, help: 'Your Jira Cloud URL, e.g. https://yourcompany.atlassian.net.', valid: v => https(v) === true ? true : 'must be an https:// URL, e.g. https://yourcompany.atlassian.net' },

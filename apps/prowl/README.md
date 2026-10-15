@@ -112,7 +112,7 @@ How each PR is reviewed and what Prowl posts are set by three files. Prowl keeps
 |---|---|
 | `review.md` | The reviewer's stance, the severity definitions, and the verdict rules (highest severity → verdict → APPROVE / REQUEST_CHANGES / COMMENT) |
 | `review-axis-catalog.md` | What reviewers check: the review axes and their checklists. An axis marked ALWAYS INCLUDED is in every PR's review |
-| `output.md` | Templates for everything posted on GitHub: the review banner, comment prefix, review body, inline comments, replies on existing threads, and the *No blocking issues* comment used when `approvals` is off |
+| `output.md` | Templates for everything posted on GitHub: the review banner, comment prefix, the short review body, the details file collapsed at its bottom (the full write-up of every finding, for a coding agent to fix from), inline comments, replies on existing threads, and the *No blocking issues* comment used when `approvals` is off |
 
 Edit your copy. Changes apply from the next review. The defaults ship in [`skills/prowl-review/config/`](skills/prowl-review/config/), and on each launch Prowl compares them with your copies:
 

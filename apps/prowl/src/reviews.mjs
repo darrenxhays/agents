@@ -207,7 +207,7 @@ const reReviewBrief = (prior, report) => [
   '1. Add every finding from the previous report to the ledger as a prior finding. Re-verify each one against the current head of its PR and classify it as Fixed (cite the commit), Still open, or No longer applicable (code removed, PR merged or closed). These go through verifiers like any other finding.',
   '2. Do not post duplicates of prior findings. Reply on the existing comment thread instead, with the *Verified fixed* reply from the output config and then resolve the thread (`gh api graphql`, resolveReviewThread), or with its *Still open* reply. The Step 8 re-run guard treats still-open prior findings as already posted.',
   '3. Post new inline comments only for findings that are new since the previous review.',
-  "4. Each PR's verdict counts still-open prior findings as well as new ones.",
+  "4. Each PR's verdict counts still-open prior findings as well as new ones, and its review body's summary and details file list them too.",
   '',
   '<previous-report>',
   report.trim(),
