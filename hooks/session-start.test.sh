@@ -5,8 +5,9 @@ hook="$(cd "$(dirname "$0")" && pwd)/session-start.sh"
 root="$(cd "$(dirname "$0")/.." && pwd)"
 rule="For any planning or coding task, use the pragmatic-engineer skill."
 fail() { echo "FAIL: $1"; exit 1; }
-# Optional second argument: the auto_use plugin option (unset = never configured).
-run() { HOME="$1" CLAUDE_PLUGIN_ROOT="$root" CLAUDE_PLUGIN_OPTION_AUTO_USE="$2" sh "$hook"; }
+# Optional second argument: the auto_use plugin option (unset = never configured);
+# third: the project's PRAGMATIC_ENGINEER_AUTO_USE override.
+run() { HOME="$1" CLAUDE_PLUGIN_ROOT="$root" CLAUDE_PLUGIN_OPTION_AUTO_USE="$2" PRAGMATIC_ENGINEER_AUTO_USE="$3" sh "$hook"; }
 
 # Fresh Codex install: link created, rule written once, Claude context printed.
 h=$(mktemp -d); mkdir "$h/.codex"
@@ -41,6 +42,16 @@ run "$h" false >/dev/null
 # On again: rule restored, Claude context printed.
 run "$h" true | grep -q additionalContext || fail "context when on"
 [ "$(cat "$h/.codex/AGENTS.md")" = "$rule" ] || fail "rule not restored"
+
+# Off globally, on in this project: Claude context printed, Codex rule still removed.
+h=$(mktemp -d); mkdir "$h/.codex"; echo "$rule" > "$h/.codex/AGENTS.md"
+run "$h" false true | grep -q additionalContext || fail "context when on in project"
+[ ! -s "$h/.codex/AGENTS.md" ] || fail "project override reached AGENTS.md"
+
+# On globally, off in this project: no Claude context, Codex rule kept.
+h=$(mktemp -d); mkdir "$h/.codex"
+[ -z "$(run "$h" true false)" ] || fail "context printed when off in project"
+[ "$(cat "$h/.codex/AGENTS.md")" = "$rule" ] || fail "project override removed AGENTS.md rule"
 
 # No Codex: nothing created, Claude context still printed.
 h=$(mktemp -d)

@@ -36,6 +36,8 @@ Each Claude session tells the agent to use pragmatic-engineer for every planning
 
 To stop that, run `/plugin configure darrenxhays` (or open the plugin in `/plugin`) and turn off **Use pragmatic-engineer automatically**; turn it back on the same way. It takes effect from the next session. While off, the rule is no longer added to Claude sessions or `~/.codex/AGENTS.md`, and you can still call `/darrenxhays:pragmatic-engineer` (or `$pragmatic-engineer` in Codex) when you want it.
 
+To override it in one project, for example off everywhere but on in a few repositories, set **This project** in helm's CONFIG panel, or add `"env": { "PRAGMATIC_ENGINEER_AUTO_USE": "true" }` (or `"false"`) to that project's `.claude/settings.local.json` yourself (`.claude/settings.json` to share it with the team). It also takes effect from the next session. The override applies to Claude sessions only: `~/.codex/AGENTS.md` is shared by every project, so it follows the global switch.
+
 **Codex:** if `~/.codex` exists, each Claude session also links the Codex-compatible skills into `~/.codex/skills`, pointing at Claude's installed copy so both agents share one copy, and adds the same rule to `~/.codex/AGENTS.md` if it's missing. After uninstalling, remove both: `rm ~/.codex/skills/pragmatic-engineer` and the pragmatic-engineer line in `~/.codex/AGENTS.md`. Codex without Claude: clone the repo, link the skill and add the rule yourself:
 
 ```
@@ -63,7 +65,7 @@ A band above the prompt:
 - **Context and cache:** a context-usage bar with a prompt-cache countdown, COMPACT, HANDOFF, USAGE and CONFIG, and an idle keep-warm that refreshes the cache, then compacts or hands off to a fresh session.
 - **Next steps:** when Claude finishes a task it suggests 2-5 next steps as numbered buttons in a card in the conversation. Click one to run it, type its number in the prompt (with a note if you like), or tick several to run them together. `/next-steps` shows the last ones again, `/next-steps suggest` asks for new ones, `/next-steps on|off` turns them on or off.
 
-CONFIG opens helm's options below the buttons to change in place. All of them, including hiding the context band itself, are also under `/plugin configure helm`.
+CONFIG opens helm's options below the buttons to change in place. All of them, including hiding the context band itself, are also under `/plugin configure helm`. With the darrenxhays plugin installed, CONFIG also has **Use pragmatic-engineer automatically**: a switch for all projects, and **This project** (default, on or off) to override it here (see [Skills](#skills-darrenxhays-plugin)).
 
 Install, at a Claude Code prompt (no clone needed):
 

@@ -16,7 +16,7 @@ import {
   writeHandoff,
 } from './cache'
 import type { Cell } from './cache'
-import { setNumber, setOption, toggleConfig } from './options'
+import { PROJECT_AUTO_USE, setNumber, setOption, toggleConfig } from './options'
 import type { Settings } from './settings'
 
 // The values the band draws from. cache.ts and next-steps.tsx write them; a
@@ -198,12 +198,14 @@ const SECTIONS = [
     fields: ['cacheTtl', 'autoKeepWarm', 'keepWarmCount', 'leadSeconds', 'idleAction', 'handoffPercent'],
   },
   { title: 'Next steps', fields: ['nextSteps', 'clickAction', 'autoFallback'] },
+  // The darrenxhays plugin's switch, and this project's override of it.
+  { title: 'Use pragmatic-engineer automatically', fields: ['auto_use', 'autoUseHere'] },
 ]
 
 const fieldOf = (row: OptionRow) => row.key.slice(row.key.lastIndexOf('.') + 1)
 
-// The CONFIG panel: helm's /config rows under a heading for each part, each
-// with its label and its control. A change reloads helm with the new value.
+// The CONFIG panel: helm's /config rows (and pragmatic-engineer's, see
+// options.ts) under a heading for each part, each with its label and its control. A change reloads helm with the new value.
 async function drawOptions($: EngineInterface, e: Band, width: number) {
   const ui = $.ui.resolve(e)
   const { Box, Button, Text } = ui
@@ -224,7 +226,8 @@ async function drawOptions($: EngineInterface, e: Band, width: number) {
       )
     }
     if (fields === undefined) {
-      return <Text dimColor>{`${String(row.value)} (set in /config)`}</Text>
+      const where = row.key === PROJECT_AUTO_USE ? 'in the terminal' : 'in /config'
+      return <Text dimColor>{`${String(row.value)} (set ${where})`}</Text>
     }
     const { Input, Select } = fields
     if (row.kind === 'choice' && row.choices !== undefined && row.choices.length > 0) {

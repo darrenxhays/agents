@@ -8,8 +8,17 @@
 # it goes away when the plugin is disabled or uninstalled.
 # The plugin's auto_use option (/plugin configure darrenxhays) turns the rule off;
 # the skills stay linked and callable. Unset means on.
+# PRAGMATIC_ENGINEER_AUTO_USE (true or false, from a project's settings env, as
+# helm's CONFIG panel writes it to .claude/settings.local.json) overrides that
+# option for Claude sessions in that project. ~/.codex/AGENTS.md is shared by
+# every project, so it follows the option alone.
 rule="For any planning or coding task, use the pragmatic-engineer skill."
 [ "$CLAUDE_PLUGIN_OPTION_AUTO_USE" = false ] && off=1 || off=
+case "$PRAGMATIC_ENGINEER_AUTO_USE" in
+  true) here_off= ;;
+  false) here_off=1 ;;
+  *) here_off=$off ;;
+esac
 
 if [ -d "$HOME/.codex" ]; then
   mkdir -p "$HOME/.codex/skills"
@@ -35,7 +44,7 @@ if [ -d "$HOME/.codex" ]; then
   fi
 fi
 
-if [ -z "$off" ]; then
+if [ -z "$here_off" ]; then
   printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' \
     "For any planning or coding task, use the darrenxhays:pragmatic-engineer skill."
 fi

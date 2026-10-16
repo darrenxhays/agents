@@ -212,6 +212,71 @@ test('CONFIG opens the helm options below the buttons and changes them in place'
   await ui.unmount()
 })
 
+test('CONFIG shows the pragmatic-engineer switch and writes this project override to settings.local.json', { options: FIVE_MIN }, async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  world(on)
+  const sets: { key: string; value: unknown }[] = []
+  const files: Partial<Record<string, string>> = {
+    '/proj/.claude/settings.local.json': JSON.stringify({ permissions: { allow: ['Bash(ls)'] }, env: { FOO: '1' } }),
+  }
+  on('config.list', () => ({
+    value: [
+      {
+        key: 'darrenxhays@agents.auto_use',
+        label: 'Use pragmatic-engineer automatically',
+        kind: 'boolean',
+        value: false,
+        provider: { plugin: 'darrenxhays', tier: 'user' as const },
+        isLocked: false,
+      },
+    ],
+  }))
+  on('config.set', (_$, e) => {
+    sets.push({ key: e.key, value: e.value })
+    return { value: e.value }
+  })
+  on('session.root', () => ({ value: '/proj' }))
+  on('fs.exists', (_$, e) => ({ value: e.path in files }))
+  on('fs.read', (_$, e) => ({ value: files[e.path] ?? '' }))
+  on('fs.write', (_$, e) => {
+    files[e.path] = e.text
+    return { value: undefined }
+  })
+  const local = () => JSON.parse(files['/proj/.claude/settings.local.json'] ?? '')
+  await $.session.start(START)
+  await respond($)
+
+  const ui = await $.ui.mount(BAND)
+  await ui.press({ key: 'config' })
+  expect(await ui.find({ text: 'USE PRAGMATIC-ENGINEER AUTOMATICALLY' })).toBeDefined()
+  const labels = (await ui.findAll({ type: 'Text', text: /^ {2}\S/ })).map(found => found.text.trim())
+  expect(labels).toEqual(['All projects', 'This project'])
+
+  await ui.press({ key: 'opt-auto_use' })
+  expect(sets).toEqual([{ key: 'darrenxhays@agents.auto_use', value: true }])
+
+  await ui.select({ key: 'opt-autoUseHere', value: 'on' })
+  expect(local()).toEqual({ permissions: { allow: ['Bash(ls)'] }, env: { FOO: '1', PRAGMATIC_ENGINEER_AUTO_USE: 'true' } })
+  await ui.select({ key: 'opt-autoUseHere', value: 'off' })
+  expect(local().env.PRAGMATIC_ENGINEER_AUTO_USE).toBe('false')
+  await ui.select({ key: 'opt-autoUseHere', value: 'default' })
+  expect(local()).toEqual({ permissions: { allow: ['Bash(ls)'] }, env: { FOO: '1' } })
+
+  // Reopened, the panel reads the file again.
+  await ui.select({ key: 'opt-autoUseHere', value: 'on' })
+  await ui.press({ key: 'config' })
+  await ui.press({ key: 'config' })
+  expect((await ui.find({ key: 'opt-autoUseHere' }))?.props.value).toBe('on')
+
+  // A settings.local.json that isn't JSON is left alone.
+  files['/proj/.claude/settings.local.json'] = '{ broken'
+  await ui.press({ key: 'config' })
+  await ui.press({ key: 'config' })
+  expect(await ui.find({ text: /unreadable \(locked\)/ })).toBeDefined()
+  expect(files['/proj/.claude/settings.local.json']).toBe('{ broken')
+  await ui.unmount()
+})
+
 test('picking a step resets the keep-warm budget, as a typed prompt does', { options: { ...FIVE_MIN, keepWarmCount: 1 } }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on)
