@@ -1,6 +1,9 @@
 {
   "name": "helm",
   "version": "0.1.0",
+  "author": {
+    "name": "darrenxhays"
+  },
   "description": "A band above the prompt with context fill, a prompt-cache countdown with idle keep-warm, compact, handoff and its settings, and numbered next steps Claude suggests when it finishes a task",
   "types": "./types/index.d.ts",
   "userConfig": {
