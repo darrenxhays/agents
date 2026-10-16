@@ -127,6 +127,31 @@ test('the four buttons stay put, and next steps stay out of the band', { options
   await ui.unmount()
 })
 
+test('COMPACT and HANDOFF are greyed out, not pressable, until they can run', { options: FIVE_MIN }, async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  world(on)
+  await $.session.start(START)
+
+  const before = await $.ui.mount(BAND)
+  expect(await before.find({ key: 'compact' })).toBeUndefined()
+  expect(await before.find({ key: 'handoff' })).toBeUndefined()
+  expect(await before.find({ type: 'Text', text: /\[ +COMPACT +\]/ })).toBeDefined()
+  expect(await before.find({ type: 'Text', text: /\[ +HANDOFF +\]/ })).toBeDefined()
+  expect(await before.find({ text: /after|when idle/ })).toBeUndefined()
+  await before.unmount()
+
+  const working = await $.ui.mount({ ...BAND, props: { ...BAND.props, isWorking: true } })
+  expect(await working.find({ key: 'handoff' })).toBeUndefined()
+  expect(await working.find({ type: 'Text', text: /\[ +HANDOFF +\]/ })).toBeDefined()
+  await working.unmount()
+
+  await respond($)
+  const after = await $.ui.mount(BAND)
+  expect(await after.find({ key: 'compact' })).toBeDefined()
+  expect(await after.find({ key: 'handoff' })).toBeDefined()
+  await after.unmount()
+})
+
 test('CONFIG opens the helm options below the buttons and changes them in place', { options: FIVE_MIN }, async ($, on) => {
   mock.clock(on, { now: 1_000_000 })
   world(on)

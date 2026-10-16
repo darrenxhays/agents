@@ -99,9 +99,10 @@ export async function drawBand($: EngineInterface, e: Band, config: Settings, be
   const quarter = Math.floor((width - 3) / 4)
   const last = width - 3 - 3 * quarter
   const label = (text: string, cols: number) => center(text, Math.max(text.length, cols - 4))
-  const idle = (text: string, cols: number) => (
+  // A button that can't be pressed yet: the same chrome and width, greyed out.
+  const greyed = (text: string, cols: number) => (
     <Box width={cols} justifyContent="center">
-      <Text dimColor>{text}</Text>
+      <Text dimColor>{`[ ${label(text, cols)} ]`}</Text>
     </Box>
   )
   const buttons = (
@@ -117,12 +118,12 @@ export async function drawBand($: EngineInterface, e: Band, config: Settings, be
           canCompact ? (
             <Button key="compact" label={label('COMPACT', quarter)} hotkey="c" variant="secondary" onPress={() => void compactNow($, false)} />
           ) : (
-            idle(e.props.isWorking ? 'COMPACT · when idle' : 'COMPACT · after first response', quarter)
+            greyed('COMPACT', quarter)
           ),
           canHandoff ? (
             <Button key="handoff" label={label('HANDOFF', quarter)} hotkey="h" variant="primary" onPress={() => void writeHandoff($, false)} />
           ) : (
-            idle(e.props.isWorking ? 'HANDOFF · when idle' : 'HANDOFF · after next response', quarter)
+            greyed('HANDOFF', quarter)
           ),
         ]
       )}
