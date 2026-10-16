@@ -1,9 +1,15 @@
 {
-  "name": "context-cache",
-  "version": "0.3.0",
-  "description": "Context window and prompt-cache band with auto keep-warm and one-click (or automatic) handoff to a fresh session",
+  "name": "helm",
+  "version": "0.1.0",
+  "description": "A band above the prompt with context fill, a prompt-cache countdown with idle keep-warm, compact, handoff and its settings, and numbered next steps Claude suggests when it finishes a task",
   "types": "./types/index.d.ts",
   "userConfig": {
+    "contextBand": {
+      "type": "boolean",
+      "title": "Show the context and cache band",
+      "description": "The context bar, cache countdown and COMPACT, HANDOFF and USAGE buttons above the prompt. Keep-warm and next steps work either way.",
+      "default": true
+    },
     "cacheTtl": {
       "type": "string",
       "title": "Prompt cache TTL",
@@ -47,6 +53,28 @@
       "title": "Act this many seconds before expiry",
       "description": "When to refresh or hand off, measured back from the cache expiring",
       "default": 120
+    },
+    "nextSteps": {
+      "type": "boolean",
+      "title": "Suggest next steps",
+      "description": "Show numbered next-step buttons above the prompt when Claude finishes a task.",
+      "default": true
+    },
+    "clickAction": {
+      "type": "string",
+      "title": "Next step click action",
+      "description": "run: send the step at once. fill: put it in the prompt box to edit before pressing Enter.",
+      "options": [
+        "run",
+        "fill"
+      ],
+      "default": "run"
+    },
+    "autoFallback": {
+      "type": "boolean",
+      "title": "Auto-suggest when Claude forgets",
+      "description": "After a turn that changed things but suggested no next steps, ask the model for some (one extra cached request).",
+      "default": false
     }
   }
 }

@@ -3,7 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 const BAND = {
-  plugin: 'context-cache',
+  plugin: 'helm',
   component: 'AbovePrompt',
   props: {
     hasSurvey: false,
@@ -27,6 +27,12 @@ const world = (on: On, { tokens, draft = '' }: { tokens: number; draft?: string 
   const pasted: string[] = []
   const compacts: string[] = []
   mock.store(on)
+  // The engine's own band beneath helm's, and its toasts.
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine band</Text>
+  })
+  on('ui.toast', () => ({ value: undefined }))
   on('session.usage', () => ({
     value: {
       startedAt: 0,

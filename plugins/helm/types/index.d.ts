@@ -17,9 +17,22 @@ export type KeepWarm = {
 
 export type Limit = { kind: string; percentUsed: number; resetsAt?: string }
 
+export type NextStep = { title: string; prompt: string }
+
+// One of helm's /config rows, as the CONFIG panel draws it.
+export type OptionRow = {
+  key: string
+  label: string
+  kind: 'boolean' | 'choice' | 'text' | 'number'
+  value: boolean | string | number | readonly string[]
+  choices?: readonly string[]
+  isLocked: boolean
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    'context-cache': {
+    helm: {
+      // Context and cache.
       meter: Meter | null
       cache: Cache | null
       now: number
@@ -28,6 +41,17 @@ declare module 'claude-code' {
       busy: boolean
       limits: Limit[]
       showUsage: boolean
+      // The CONFIG panel.
+      showConfig: boolean
+      optionRows: OptionRow[]
+      optionNote: string
+      // Next steps.
+      steps: NextStep[]
+      isShown: boolean
+      selected: number[]
+      isExpanded: boolean
+      generation: number
+      toolUseId: string
     }
   }
 }

@@ -56,14 +56,21 @@ Set `BUILD_OUTPUT_DIR` before starting Claude to change the output directory, fo
 
 ## Plugins
 
-### context-cache (Claude Code)
+### helm (Claude Code)
 
-A band above the prompt showing context usage and a prompt-cache countdown, with COMPACT, HANDOFF and USAGE buttons and an idle keep-warm.
+A band above the prompt:
+
+- **Context and cache:** a context-usage bar with a prompt-cache countdown, COMPACT, HANDOFF, USAGE and CONFIG, and an idle keep-warm that refreshes the cache, then compacts or hands off to a fresh session.
+- **Next steps:** when Claude finishes a task it suggests 2-5 next steps as numbered buttons in a card in the conversation. Click one to run it, type its number in the prompt (with a note if you like), or tick several to run them together. `/next-steps` shows the last ones again, `/next-steps suggest` asks for new ones, `/next-steps on|off` turns them on or off.
+
+CONFIG opens helm's options below the buttons to change in place. All of them, including hiding the context band itself, are also under `/plugin configure helm`.
 
 Install, at a Claude Code prompt (no clone needed):
 
 ```
-/plugin install context-cache --marketplace darrenxhays/agents
+/plugin install helm --marketplace darrenxhays/agents
 ```
 
-Answer `y` to add the marketplace, choose the user scope, then set the options. To update later: `claude plugin update context-cache`, then `/reload-plugins`.
+Answer `y` to add the marketplace, choose the user scope, then set the options. To update later: `claude plugin update helm`, then `/reload-plugins`.
+
+helm replaces context-cache. If you have context-cache installed, uninstall it (`/plugin uninstall context-cache`) before installing helm, or you'll get two bands. Your context-cache options don't carry over; set them again in helm.

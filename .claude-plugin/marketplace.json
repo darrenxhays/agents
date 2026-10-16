@@ -2,7 +2,7 @@
   "name": "agents",
   "owner": { "name": "darrenxhays" },
   "plugins": [
-    { "name": "context-cache", "source": "./plugins/context-cache" },
+    { "name": "helm", "source": "./plugins/helm" },
     { "name": "darrenxhays", "source": "./" }
   ]
 }
