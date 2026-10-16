@@ -25,6 +25,7 @@ const DEFAULTS = {
   maxConcurrentReviews: 2,
   workDir: process.cwd(),
   claude: { model: 'claude-opus-5-5', effort: 'xhigh', permissionMode: 'auto' },
+  reviewOwnPrs: false, // review tickets with PRs you authored; your own PRs get a comment review, as GitHub won't let you approve them
   approvals: true, // approve PRs with no blocking findings; off: comment that there are none and leave approving to a human
   dryRun: false,
   autoUpdate: true, // install a newer released version before launching

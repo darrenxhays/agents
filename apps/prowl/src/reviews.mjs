@@ -43,6 +43,9 @@ export function alive(run) {
   return run._ours;
 }
 
+/** True for a PR authored by `me`, the GitHub login Prowl runs as. GitHub won't let you approve your own PR. */
+export const isOwn = (pr, me) => Boolean(me && pr?.author?.toLowerCase() === me.toLowerCase());
+
 /** URLs of a review's approved PRs still waiting on a human. Reviews from before 2.5.0 didn't record it: `approvals` is the setting now. */
 export const awaitingHuman = (run, approvals) => run?.awaitingHuman ?? (approvals ? [] : Object.keys(run?.approved || {}));
 
@@ -50,16 +53,16 @@ export const awaitingHuman = (run, approvals) => run?.awaitingHuman ?? (approval
  * Starts a detached headless Claude Code session running prowl-review on the PRs. It outlives this
  * process; output goes to a log file this app tails, so a restart picks running reviews back up.
  */
-export function startReview(cfg, pluginDir, { tracker, ticket, prs, approvedPrs = [], prior }) {
+export function startReview(cfg, pluginDir, { tracker, ticket, prs, approvedPrs = [], prior, me = '' }) {
   const reviewNo = (prior?.reviewNo || 0) + 1;
   const id = `${ticket.key.replace(/[^A-Za-z0-9-]/g, '')}-${new Date().toISOString().slice(0, 16).replace(/[-:]/g, '')}-r${reviewNo}`;
   for (const dir of [REPORTS_DIR, LOGS_DIR, CONFIG_DIR]) fs.mkdirSync(dir, { recursive: true });
   const run = {
     id, tracker, ticket: ticket.key, ticketUrl: ticket.url, ref: ticket.ref, title: ticket.title, prs, reviewNo, priorId: prior?.id || null,
-    startedAt: Date.now(), status: 'running', pid: null, pendingTag: null, reviewedPrs: [], contextPrs: approvedPrs,
+    me, startedAt: Date.now(), status: 'running', pid: null, pendingTag: null, reviewedPrs: [], contextPrs: approvedPrs,
     // PR URL -> the head commit Prowl approved it at; the skipped PRs carry over, and finalize() adds this review's.
     approved: Object.fromEntries(approvedPrs.map(p => [p.url, prior.approved[p.url]])),
-    // The approved PRs that only got Prowl's stamp (Approve PRs off) and still need a human's approval.
+    // The approved PRs that only got Prowl's stamp (Approve PRs off, or your own PR) and still need a human's approval.
     approvals: cfg.approvals, awaitingHuman: approvedPrs.map(p => p.url).filter(u => awaitingHuman(prior, cfg.approvals).includes(u)),
     reportPath: path.join(REPORTS_DIR, `${id}.md`),
     logPath: path.join(LOGS_DIR, `${id}.ndjson`),
@@ -163,7 +166,7 @@ export function finalize(run) {
       const [url, sha] = [item.slice(0, item.lastIndexOf('@')), item.slice(item.lastIndexOf('@') + 1)];
       if (!sha || !run.prs.some(p => p.url === url)) continue;
       (run.approved ??= {})[url] = sha;
-      if (run.approvals === false) (run.awaitingHuman ??= []).push(url);
+      if (run.approvals === false || isOwn(run.prs.find(p => p.url === url), run.me)) (run.awaitingHuman ??= []).push(url);
     }
   } else {
     // A clean exit without the report is a failure too: the session can end "successfully" before prowl-review
@@ -232,7 +235,7 @@ const reportSpec = (id, n, file, again) => [
   'nit: <n>',
   `fixed: <prior findings verified fixed${again ? '' : '; 0 on a first review'}>`,
   `stillOpen: <prior findings still open${again ? '' : '; 0 on a first review'}>`,
-  'approved: <each PR this review approved, as <PR URL>@<head sha reviewed>, space-separated on this one line: the PRs whose review event was APPROVE, or would have been with approvals off. Leave it blank if none>',
+  'approved: <each PR this review approved, as <PR URL>@<head sha reviewed>, space-separated on this one line: the PRs whose review event was APPROVE, or would have been with approvals off or in comment mode (the user\'s own PRs). Leave it blank if none>',
   '---',
   '',
   'Then these sections:',

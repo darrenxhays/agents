@@ -78,7 +78,7 @@ async function github(cfg) {
   if (await works('gh', ['auth', 'status']) === null) await interactive('gh', ['auth', 'login', '--hostname', 'github.com', '--git-protocol', 'https', '--web']);
   const login = (await works('gh', ['api', 'user', '--jq', '.login']))?.trim();
   if (!login) { bad('not signed in to GitHub: run gh auth login'); return false; }
-  ok(`signed in as ${login}. Reviews post from this account; your own PRs are never reviewed.`);
+  ok(`signed in as ${login}. Reviews post from this account; your own PRs are skipped unless you turn on Review my own PRs (Config, 3).`);
   const orgs = (await works('gh', ['api', 'user/orgs', '--paginate', '--jq', '.[].login']))?.split('\n').filter(Boolean) || [];
   const owners = [...orgs, login];
   owners.forEach((o, i) => console.log(`    ${i + 1} = ${o}${o === login ? ' (your own repos)' : ''}`));

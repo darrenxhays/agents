@@ -5,7 +5,7 @@ import { mentions } from './match.mjs';
 
 let login = '';
 
-/** The GitHub login of whoever runs the poller. Their own PRs are never picked up. */
+/** The GitHub login of whoever runs the poller. Their own PRs are skipped unless Review my own PRs is on. */
 export async function me() {
   return (login ||= (await run('gh', ['api', 'user', '--jq', '.login'])).trim());
 }
@@ -26,7 +26,7 @@ export async function headSha(pr) {
 
 /**
  * True once the PR needs no approval from you: someone approved the commit Prowl stamped or the head now, or it
- * was merged or closed. Prowl itself never approves with Approve PRs off, so any approval is a human's.
+ * was merged or closed. Prowl itself never approves with Approve PRs off or on your own PR, so any approval is a human's.
  */
 export async function humanApproved(url, sha) {
   const pr = JSON.parse(await run('gh', ['pr', 'view', url, '--json', 'state,headRefOid,reviews']));

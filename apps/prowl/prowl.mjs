@@ -148,7 +148,7 @@ async function consider(tracker, ticket) {
   const prs = await github.openPrs(cfg.githubOwner, ticket.key);
   if (!prs.length) return log('info', `${ticket.key}: tagged, but no open PR mentions ${ticket.key} yet`, key);
   const mine = prs.filter(p => p.author.toLowerCase() === app.me.toLowerCase());
-  if (mine.length) {
+  if (mine.length && !cfg.reviewOwnPrs) {
     // Skip the whole ticket, not just your PRs: prowl-review reviews a ticket's PRs as one set.
     return log('info', `${ticket.key}: skipped, ${mine.map(p => `${p.repo}#${p.number}`).join(', ')} ${mine.length > 1 ? 'are' : 'is'} yours; leaving it for a teammate`, key);
   }
@@ -182,7 +182,7 @@ async function consider(tracker, ticket) {
   }
   let run;
   try {
-    run = rv.startReview(cfg, PLUGIN_DIR, { tracker: cfg.taskBoard, ticket, prs: toReview, approvedPrs: approved, prior });
+    run = rv.startReview(cfg, PLUGIN_DIR, { tracker: cfg.taskBoard, ticket, prs: toReview, approvedPrs: approved, prior, me: app.me });
   } catch (e) {
     log('error', `${ticket.key}: could not start the review: ${e.message}`);
     return applyTag({ tracker: cfg.taskBoard, ticket: ticket.key, ref: ticket.ref, id: `claim-${ticket.key}`, pendingTag: cfg.tags.trigger });
@@ -194,7 +194,7 @@ async function consider(tracker, ticket) {
   return log('ok', `${ticket.key}: ${prior ? `re-review #${run.reviewNo}` : 'review'} started on ${toReview.length} PR${toReview.length > 1 ? 's' : ''}${skipped}`);
 }
 
-/** Clears History's ⚑ flag on each PR a human has approved since Prowl gave it its stamp (Approve PRs off). */
+/** Clears History's ⚑ flag on each PR a human has approved since Prowl gave it its stamp (Approve PRs off, or your own PR). */
 async function checkHumanApprovals() {
   const latest = new Map(); // the flag shows on each ticket's latest review only
   for (const r of app.finished()) if (r.status === 'done' && !latest.has(r.ticket)) latest.set(r.ticket, r);

@@ -5,7 +5,7 @@ import { claimEntry, label } from './jira.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { alive, awaitingHuman, buildPrompt, finalize } from './reviews.mjs';
+import { alive, awaitingHuman, buildPrompt, finalize, isOwn } from './reviews.mjs';
 import { processStart } from './proc.mjs';
 import { createMascot, wrap } from './mascot.mjs';
 import { changelog, newer, syncConfigFiles } from './update.mjs';
@@ -87,6 +87,11 @@ const stampOnly = { ...withApprovals, status: 'running', approvals: false, appro
 finalize(stampOnly);
 assert.deepEqual(awaitingHuman(stampOnly, true), ['https://github.com/o/c/pull/3', pa]);
 assert.deepEqual(awaitingHuman({ approved: { [pa]: 'abc' } }, false), [pa], 'older reviews follow the current setting');
+// Your own PR can't get Prowl's approval even with Approve PRs on, so it waits on a teammate's.
+const selfReview = { ...withApprovals, status: 'running', approvals: true, approved: {}, awaitingHuman: undefined, me: 'Me', prs: [{ url: pa, author: 'me' }] };
+finalize(selfReview);
+assert.deepEqual(selfReview.awaitingHuman, [pa]);
+assert.ok(isOwn({ author: 'ME' }, 'me') && !isOwn({ author: 'me' }, '') && !isOwn(undefined, 'me'));
 assert.deepEqual(awaitingHuman({ approved: { [pa]: 'abc' } }, true), []);
 fs.rmSync(dir, { recursive: true });
 

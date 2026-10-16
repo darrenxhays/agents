@@ -2,6 +2,10 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.7.0
+- New setting, Review my own PRs (Config, 3), off by default. Turn it on and tickets with PRs you authored are reviewed instead of left for a teammate. GitHub won't let you approve or request changes on your own PR, so those get a comment review stating the verdict; a re-review still skips the ones with nothing blocking and no new commits.
+- History flags your own PRs that Prowl found nothing blocking on with "⚑ needs a teammate's approval", since you can't approve them yourself. The flag clears once someone approves the PR, or it is merged or closed.
+
 ## 2.6.0
 - Reviews are shorter. The review comment is now the PR-Owl banner with the verdict, a one-line summary, and one line per finding. The full write-up (quoted code, problem, failure scenario, a concrete fix and how to check it, for each finding) is a markdown file collapsed at the bottom of the review: expand it and copy it into your coding agent to fix the PR.
 - Inline comments read like a teammate's: a sentence or two on what goes wrong, then the fix. Severity, failure scenarios and verifier notes have moved to the details file. Replies on earlier threads are shortened the same way.

@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { CONFIG_DIR, CONFIG_PATH } from './config.mjs';
 import { createMascot, wrap } from './mascot.mjs';
 import { openExternal } from './proc.mjs';
-import { awaitingHuman } from './reviews.mjs';
+import { awaitingHuman, isOwn } from './reviews.mjs';
 
 const ST = {
   reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m', title: '\x1b[1;38;5;220m', yellow: '\x1b[38;5;220m',
@@ -41,13 +41,14 @@ const FIELDS = [
     jira: { label: 'Done label', help: 'Set when a review finishes. Spaces become dashes. Re-add the trigger label to ask for a re-review.' } },
   { key: 'tagMatchMaxTypos', label: 'Tag typo tolerance', type: 'int', min: 0, max: 3, help: 'Typos (wrong, missing, extra or swapped letters) still treated as the trigger tag. Case, spaces and punctuation are always ignored. 0 = exact.',
     jira: { label: 'Label typo tolerance', help: 'Typos (wrong, missing, extra or swapped letters) still treated as the trigger label. Case, spaces and punctuation are always ignored. 0 = exact.' } },
-  { key: 'githubOwner', label: 'GitHub org', type: 'text', help: 'Open PRs whose title or description mentions the ticket (AB#123 or PROJ-123) are searched for here. Your own PRs are always skipped.' },
+  { key: 'githubOwner', label: 'GitHub org', type: 'text', help: 'Open PRs whose title or description mentions the ticket (AB#123 or PROJ-123) are searched for here.' },
   { key: 'pollSeconds', label: 'Poll every (seconds)', type: 'int', min: 30, max: 86400, help: 'How often the boards are checked. r polls now.' },
   { key: 'maxConcurrentReviews', label: 'Max parallel reviews', type: 'int', min: 1, max: 10, help: "Extra tickets stay tagged until a slot frees, so a teammate's poller can take them." },
   { key: 'workDir', label: 'Projects Directory', type: 'text', help: 'Reviews run here and load its CLAUDE.md, e.g. your projects root. A PR repo not cloned here is cloned before its review.', valid: v => isDir(v) || 'folder not found' },
   { key: 'claude.model', label: 'Model', type: 'text', help: 'Model for review sessions.' },
   { key: 'claude.effort', label: 'Effort', type: 'enum', values: ['low', 'medium', 'high', 'xhigh', 'max'], help: 'Reasoning effort for review sessions. enter cycles.' },
   { key: 'claude.permissionMode', label: 'Permission mode', type: 'enum', values: ['auto', 'bypassPermissions'], help: 'auto lets a safety classifier block risky actions. bypassPermissions lets reviews run anything: not recommended, reviews read text written by PR authors.' },
+  { key: 'reviewOwnPrs', label: 'Review my own PRs', type: 'bool', help: "off: a ticket with any PR you authored is left for a teammate. on: it is reviewed like any other; GitHub won't let you approve or request changes on your own PR, so those get a comment review with the verdict." },
   { key: 'approvals', label: 'Approve PRs', type: 'bool', help: 'on: a PR with no blocking findings gets a GitHub approval. off: Prowl comments that it found no blocking issues, and a human approves (text in Output templates); History flags those PRs with ⚑ until someone approves them.' },
   { key: 'dryRun', label: 'Dry run', type: 'bool', help: 'Log what would be reviewed without changing tags or starting reviews.' },
   { key: 'autoUpdate', label: 'Auto-update', type: 'bool', help: 'Install a newer Prowl release before launching. It waits while reviews from an earlier launch are still running.' },
@@ -185,7 +186,7 @@ export function startTui(app, actions) {
     return [v.startsWith('BLOCK') ? ST.red : v.startsWith('REQUEST') ? ST.orange : v.startsWith('APPROVE') ? ST.green : ST.grey, v];
   }
 
-  // PRs given Prowl's stamp with Approve PRs off, flagged on the ticket's latest review until it is reviewed again.
+  // PRs given Prowl's stamp with Approve PRs off or on your own PR, flagged on the ticket's latest review until it is reviewed again.
   const waiting = r => (app.finished().find(x => x.ticket === r.ticket && x.status === 'done') === r ? awaitingHuman(r, app.cfg.approvals) : []);
   // The review's PRs, plus earlier-approved ones it carried over that still await a human.
   const prsOf = r => [...r.prs, ...(r.contextPrs || []).filter(p => waiting(r).includes(p.url))];
@@ -200,7 +201,7 @@ export function startTui(app, actions) {
       : [label('Report'), [ST.grey, '(none)']]);
     rows.push([label('Ticket'), [ST.link, r.ticketUrl, r.ticketUrl]]);
     prs.slice(0, 4).forEach((p, i) => rows.push([label(i ? '' : 'PRs'), [ST.link, p.url, p.url],
-      ...(flagged.includes(p.url) ? [[ST.yellow, '  ⚑ needs your approval']] : []), [ST.grey, `  ${p.title}`]]));
+      ...(flagged.includes(p.url) ? [[ST.yellow, isOwn(p, app.me) ? "  ⚑ needs a teammate's approval" : '  ⚑ needs your approval']] : []), [ST.grey, `  ${p.title}`]]));
     if (prs.length > 4) rows.push([label(''), [ST.grey, `+${prs.length - 4} more (o opens all)`]]);
     const how = r.status === 'failed' ? [ST.red, `failed: ${r.error}`]
       : r.status === 'stopped' ? [ST.grey, 'stopped by you']
