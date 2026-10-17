@@ -1,7 +1,8 @@
 // node prowl.mjs --self-test: checks the logic that decides which tickets and PRs get touched.
 import assert from 'node:assert/strict';
 import { frontMatter, mentions, norm, swapTags, tagMatches } from './match.mjs';
-import { claimEntry, label } from './jira.mjs';
+import { adfText, claimEntry, label } from './jira.mjs';
+import { htmlText } from './ado.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -121,6 +122,16 @@ assert.deepEqual(fs.readdirSync(logDir).sort(), ['AB2-r1.ndjson', 'AB3-r1.ndjson
 assert.ok(fs.existsSync(path.join(logHome, 'reports', 'AB1-r1.md')), 'reports are never pruned');
 assert.ok(!fs.existsSync(path.join(logHome, 'poller.log')) && fs.statSync(path.join(logHome, 'poller.log.1')).size > 5 * 1024 * 1024, 'poller.log rolled over');
 fs.rmSync(logHome, { recursive: true });
+
+// Ticket text: a ## Ticket section after the context lines, only when there is some, trimmed to about 6 KB.
+const withTicket = buildPrompt({ ...promptCases.approvalsOff, ticketText: 'Users can save.\n- Given a user' });
+assert.ok(withTicket.includes('Approvals off') && withTicket.indexOf('## Ticket') > withTicket.indexOf('Approvals off'));
+assert.ok(withTicket.includes('<ticket-text>\nUsers can save.\n- Given a user\n</ticket-text>') && !buildPrompt(promptCases.first).includes('## Ticket'));
+const long = buildPrompt({ ...promptCases.first, ticketText: 'x'.repeat(9000) });
+assert.ok(long.includes(`${'x'.repeat(6000)}\n(trimmed)\n</ticket-text>`) && !long.includes('x'.repeat(6001)));
+assert.equal(htmlText('<div>Save &amp; load</div><ul><li>a&nbsp;b</li><li>&lt;c&gt; &#X2713; &#99999999;</li></ul><p>Done</p>'), 'Save & load\n\n- a b\n- <c> ✓ &#99999999;\nDone');
+assert.equal(adfText({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Hi ' }, { type: 'mention', attrs: { text: '@Ann' } }] },
+  { type: 'bulletList', content: [{ type: 'listItem', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'one' }] }] }] }] }).trim(), 'Hi @Ann\n\n- one');
 
 // Run caps: passed only when set; a capped review fails with the cap named and isn't retried.
 const capped = reviewArgs({ claude: { ...claude, maxBudgetUsd: 50, maxTurns: 200 } }, '/plugin');

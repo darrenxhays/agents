@@ -128,6 +128,25 @@ export async function claim(cfg, ticket, drop, add) {
   }
 }
 
+/** Atlassian Document Format (a Jira description) as plain text. */
+export function adfText(node) {
+  if (!node) return '';
+  if (node.type === 'text') return node.text || '';
+  if (node.type === 'hardBreak') return '\n';
+  if (['mention', 'emoji', 'status'].includes(node.type)) return node.attrs?.text || node.attrs?.shortName || '';
+  if (['inlineCard', 'blockCard', 'embedCard'].includes(node.type)) return node.attrs?.url || '';
+  const inner = (node.content || []).map(adfText).join('');
+  if (node.type === 'listItem') return `- ${inner.trim()}\n`;
+  if (['paragraph', 'heading', 'codeBlock', 'blockquote', 'tableRow', 'bulletList', 'orderedList'].includes(node.type)) return `${inner.trimEnd()}\n\n`;
+  return node.type === 'tableCell' || node.type === 'tableHeader' ? `${inner.trim()} | ` : inner;
+}
+
+/** The issue's description, as plain text ('' if it has none). */
+export async function ticketText(cfg, ticket) {
+  const issue = await api(cfg, `/rest/api/3/issue/${enc(ticket.key)}?fields=description`);
+  return adfText(issue.fields.description).replace(/\n{3,}/g, '\n\n').trim();
+}
+
 /** Replaces the labels Prowl owns (`drop`) with `add` ('' = none) on a ticket a review ran for. */
 export async function retag(cfg, ref, drop, add) {
   const issue = await api(cfg, `/rest/api/3/issue/${enc(ref.key)}?fields=labels`);

@@ -112,6 +112,31 @@ async function findTagged(org, project, scope, tags) {
   return items;
 }
 
+const ENTITIES = { nbsp: ' ', amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+const entity = (m, e) => {
+  const n = /^#x/i.test(e) ? parseInt(e.slice(2), 16) : e[0] === '#' ? Number(e.slice(1)) : NaN;
+  return n <= 0x10ffff ? String.fromCodePoint(n) : ENTITIES[e.toLowerCase()] ?? m;
+};
+/** A work item's rich-text field as plain text: block tags become line breaks, list items "- ", entities decoded. */
+export const htmlText = html => String(html)
+  .replace(/<(br|\/p|\/div|\/h[1-6]|\/tr|\/ul|\/ol)\b[^>]*>/gi, '\n')
+  .replace(/<li\b[^>]*>/gi, '\n- ')
+  .replace(/<[^>]*>/g, '')
+  .replace(/&(#x[\da-f]+|#\d+|[a-z]+);/gi, entity)
+  .replace(/[ \t]+\n/g, '\n')
+  .replace(/\n{3,}/g, '\n\n')
+  .trim();
+
+/** The work item's description and acceptance criteria, as plain text ('' if it has neither). */
+export async function ticketText(cfg, ticket) {
+  const { org, project, id } = ticket.ref;
+  // All fields, not a list: naming a field the org's process doesn't have (Basic has no acceptance criteria) fails the call.
+  const { fields } = await api(org, `${enc(project)}/_apis/wit/workitems/${id}?api-version=7.1`);
+  return [['Description', fields['System.Description']], ['Acceptance criteria', fields['Microsoft.VSTS.Common.AcceptanceCriteria']]]
+    .map(([name, html]) => [name, htmlText(html || '')]).filter(([, text]) => text)
+    .map(([name, text]) => `${name}:\n${text}`).join('\n\n');
+}
+
 async function getItem(org, project, id) {
   return toItem(await api(org, `${enc(project)}/_apis/wit/workitems/${id}?fields=System.Title,System.Tags&api-version=7.1`));
 }

@@ -107,6 +107,7 @@ Settings live in `~/.prowl/config.json`. The Config view (`3`) edits the same fi
 | `allowMemoryWrites` | `true` | **Reviews use memory**. Off: review sessions run with Claude Code's auto-memory off (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`), so they don't add their outcome to the memory index that loads into your later sessions. They don't read your memory either |
 | `caffeinate` | `false` | **Keep Mac awake** (macOS only): while a review runs, `caffeinate -i` keeps the Mac from idle-sleeping, which stalls a review and stretches it out. It exits with the review. Closing the lid still sleeps the Mac |
 | `logRetentionDays` | `0` | **Keep logs (days)**: on launch and each poll, review logs in `logs/` older than this are deleted (never a running review's), and `poller.log` past 5 MB is renamed `poller.log.1`, replacing the older one. Reports are always kept. `0` = keep everything |
+| `ticketContext` | `false` | **Ticket text in reviews**: adds the ticket's description to the review's brief (on Azure DevOps, its acceptance criteria too), trimmed to about 6 KB, so reviewers know the goal without signing in to the tracker. It is read with Prowl's own sign-in, only for a ticket about to be reviewed; if that fails, the review runs without it |
 | `dryRun` | `false` | Log what would be reviewed without touching tags or starting reviews |
 | `autoUpdate` | `true` | Install a newer Prowl release before launching |
 

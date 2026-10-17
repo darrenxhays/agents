@@ -194,10 +194,18 @@ async function consider(tracker, ticket) {
   } catch (e) {
     log('warn', `${ticket.key}: ${e.message}; reviewing from GitHub without a local clone`);
   }
+  let ticketText = '';
+  if (cfg.ticketContext) {
+    try {
+      ticketText = await tracker.ticketText(cfg, ticket);
+    } catch (e) {
+      log('warn', `${ticket.key}: couldn't read the ticket's text (${e.message}); reviewing without it`);
+    }
+  }
   let run;
   try {
     if (prior && cfg.reReviewScope === 'delta' && !prior.reviewedHeads) log('info', `${ticket.key}: re-reviewing in full, as the last review is from before Prowl recorded the commits it reviewed`, `scope:${ticket.key}`);
-    run = rv.startReview(cfg, PLUGIN_DIR, { tracker: cfg.taskBoard, ticket, prs: toReview, approvedPrs: approved, prior, me: app.me, heads });
+    run = rv.startReview(cfg, PLUGIN_DIR, { tracker: cfg.taskBoard, ticket, prs: toReview, approvedPrs: approved, prior, me: app.me, heads, ticketText });
   } catch (e) {
     log('error', `${ticket.key}: could not start the review: ${e.message}`);
     return applyTag({ tracker: cfg.taskBoard, ticket: ticket.key, ref: ticket.ref, id: `claim-${ticket.key}`, pendingTag: cfg.tags.trigger });
