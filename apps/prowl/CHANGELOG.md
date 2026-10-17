@@ -2,6 +2,18 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.8.0
+- Nine new settings in Config (3), every one off or set to how Prowl works today, so reviews run exactly as before until you turn one on.
+- Spend cap per review ($), Turn cap per review and Review time limit (min). A review that hits one is stopped and shows as failed with the cap named, for example "stopped: spend cap $50". It isn't retried automatically, so a runaway review isn't paid for twice: re-tag the ticket to run it again.
+- Re-review scope: set it to delta and a re-review checks only the commits since the last review, plus that review's still-open findings, and gets only the last report's findings instead of the whole report. Prompts stay small and rounds settle sooner. A re-review of a review from before this update is still a full one.
+- Max review rounds: once a ticket has had that many reviews, Prowl stops reviewing it and leaves it tagged for a person to take over. History flags it "⚑ round cap reached" until the trigger tag comes off or the cap is raised.
+- Park human-only findings: on a re-review, an earlier finding that only a person can fix outside the code (creating a CI pipeline, tracker or permissions config, a product decision) is parked. It isn't posted again, it's listed under Parked in the details file, and it no longer holds the PR at REQUEST CHANGES.
+- This adds a Parked section to the default output.md. If you edited your copy in ~/.prowl/config/, it stays as it is: copy the *Parked* section of the default's *Details file* template to pick this up. Until you do, Prowl adds it from the default when a finding is parked.
+- Reviews use memory: turn it off and review sessions run with Claude Code's auto-memory off, so they stop adding what they did to your memory files.
+- Keep Mac awake (macOS only): keeps the Mac from idle-sleeping while a review runs.
+- Keep logs (days): deletes review logs older than that, and rolls poller.log over once it passes 5 MB. Reports are always kept.
+- Ticket text in reviews: adds the ticket's description (and, on Azure DevOps, its acceptance criteria) to the review's brief, so reviewers know the goal without trying to sign in to the tracker.
+
 ## 2.7.0
 - New setting, Review my own PRs (Config, 3), off by default. Turn it on and tickets with PRs you authored are reviewed instead of left for a teammate. GitHub won't let you approve or request changes on your own PR, so those get a comment review stating the verdict; a re-review still skips the ones with nothing blocking and no new commits.
 - History flags your own PRs that Prowl found nothing blocking on with "⚑ needs a teammate's approval", since you can't approve them yourself. The flag clears once someone approves the PR, or it is merged or closed.
