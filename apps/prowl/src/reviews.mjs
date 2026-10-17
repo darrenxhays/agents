@@ -80,7 +80,7 @@ export function startReview(cfg, pluginDir, { tracker, ticket, prs, approvedPrs 
   if (prior) {
     try { priorReport = fs.readFileSync(prior.reportPath, 'utf8'); } catch { priorReport = '(the previous report file is missing)'; }
   }
-  fs.writeFileSync(run.promptPath, buildPrompt({ ...run, prior, priorReport, approvals: cfg.approvals, reReviewScope: cfg.reReviewScope, heads }));
+  fs.writeFileSync(run.promptPath, buildPrompt({ ...run, prior, priorReport, approvals: cfg.approvals, reReviewScope: cfg.reReviewScope, heads, parkHumanOnly: cfg.parkHumanOnly }));
 
   const stdin = fs.openSync(run.promptPath, 'r');
   const log = fs.openSync(run.logPath, 'a');
@@ -210,7 +210,7 @@ export function finalize(run) {
 }
 
 /** The prompt (the agent's brief): the PR list for prowl-review, the ticket, the re-review brief and the report spec. */
-export function buildPrompt({ ticket, title, ticketUrl, prs, contextPrs = [], reviewNo, reportPath, prior, priorReport, approvals = true, reReviewScope = 'full', heads = {} }) {
+export function buildPrompt({ ticket, title, ticketUrl, prs, contextPrs = [], reviewNo, reportPath, prior, priorReport, approvals = true, reReviewScope = 'full', heads = {}, parkHumanOnly = false }) {
   const lines = [
     `/prowl:prowl-review ${[...prs, ...contextPrs].map(p => p.url).join(' ')}`,
     '',
@@ -227,8 +227,9 @@ export function buildPrompt({ ticket, title, ticketUrl, prs, contextPrs = [], re
       '', ...contextPrs.map(p => `- ${p.url}`));
   }
   // A delta re-review needs the commits the last review saw; reviews from before 2.8.0 didn't record them.
-  if (prior && reReviewScope === 'delta' && prior.reviewedHeads) lines.push('', ...deltaBrief(prior, priorReport, prs, heads));
-  else if (prior) lines.push('', ...reReviewBrief(prior, priorReport));
+  const steps = parkHumanOnly ? [...PRIOR_STEPS, PARK_STEP] : PRIOR_STEPS;
+  if (prior && reReviewScope === 'delta' && prior.reviewedHeads) lines.push('', ...deltaBrief(prior, priorReport, prs, heads, steps));
+  else if (prior) lines.push('', ...reReviewBrief(prior, priorReport, steps));
   lines.push('', ...reportSpec(ticket, reviewNo, reportPath, Boolean(prior)));
   return `${lines.join('\n')}\n`;
 }
@@ -242,14 +243,16 @@ const PRIOR_STEPS = [
   'Post new inline comments only for findings that are new since the previous review.',
   "Each PR's verdict counts still-open prior findings as well as new ones, and its review body's summary and details file list them too.",
 ];
+// Prowl's Park human-only findings setting.
+const PARK_STEP = "Park a prior finding that only a person can resolve outside the code (creating a CI pipeline, changing tracker or permissions config, a product decision): it has been raised, and no code change can fix it. Classify it Parked, not Still open: post no new comment or reply on it, list it under *Parked* in its PR's details file and in the report's *Still open from the previous review* section marked Parked (so the next re-review keeps it parked), and leave it out of the verdict and the front matter's counts.";
 const numbered = (steps, from = 1) => steps.map((s, i) => `${from + i}. ${s}`);
 
-const reReviewBrief = (prior, report) => [
+const reReviewBrief = (prior, report, steps) => [
   '## This is a re-review',
   '',
   `The previous review (review ${prior.reviewNo}, finished ${finished(prior)} UTC) produced the report below. The ticket has been tagged for review again, so the authors believe they have addressed it. On top of the normal prowl-review steps:`,
   '',
-  ...numbered(PRIOR_STEPS),
+  ...numbered(steps),
   '',
   '<previous-report>',
   report.trim(),
@@ -257,7 +260,7 @@ const reReviewBrief = (prior, report) => [
 ];
 
 /** A re-review of only the commits since the last review, carrying the last report's front matter and findings. */
-function deltaBrief(prior, report, prs, heads) {
+function deltaBrief(prior, report, prs, heads, steps) {
   const since = prs.map(({ url }) => {
     const [last, now] = [prior.reviewedHeads[url], heads[url]];
     if (!last || !now) return `- ${url}: not reviewed at a known commit before; review it in full`;
@@ -270,7 +273,7 @@ function deltaBrief(prior, report, prs, heads) {
     '',
     '1. Review each PR only from the commit the previous review saw to its head now (listed below): give its reviewer those commits (`git diff <last>..<head>`, or `gh api repos/{o}/{r}/compare/<last>...<head>`) and its still-open prior findings, and have it read the rest of the PR as context for them. If a last commit is no longer in the PR\'s history (a force-push), review that PR in full.',
     "2. If the author merged the base branch into the PR since then, that range includes the base branch's changes: raise new findings only in files the PR itself changes (`gh pr diff <PR> --name-only`).",
-    ...numbered(PRIOR_STEPS, 3),
+    ...numbered(steps, 3),
     '',
     'Commits since the previous review:',
     '',

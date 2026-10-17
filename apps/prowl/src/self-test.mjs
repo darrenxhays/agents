@@ -93,6 +93,12 @@ assert.ok(!roundCapped({ maxReviewRounds: 0 }, { reviewNo: 9 }), 'no cap');
 assert.ok(!roundCapped({ maxReviewRounds: 3 }, undefined) && !roundCapped({ maxReviewRounds: 3 }, { reviewNo: 2 }), 'review 3 of 3 runs');
 assert.ok(roundCapped({ maxReviewRounds: 3 }, { reviewNo: 3 }) && roundCapped({ maxReviewRounds: 1 }, { reviewNo: 1 }));
 
+// Park human-only findings: the brief's extra step, only when on (and only on a re-review).
+const parks = c => buildPrompt({ ...c, parkHumanOnly: true }).includes('Classify it Parked');
+assert.ok(parks(promptCases.reReview) && parks({ ...promptCases.reReview, prior: priorRun, reReviewScope: 'delta' }) && !parks(promptCases.first));
+assert.ok(buildPrompt({ ...promptCases.reReview, parkHumanOnly: true }).includes('\n5. Park a prior finding'), 'numbered after the four prior-finding steps');
+assert.ok(!buildPrompt(promptCases.reReview).includes('Parked'), 'off by default');
+
 // Run caps: passed only when set; a capped review fails with the cap named and isn't retried.
 const capped = reviewArgs({ claude: { ...claude, maxBudgetUsd: 50, maxTurns: 200 } }, '/plugin');
 assert.deepEqual(capped.slice(capped.indexOf('--max-budget-usd'), -3), ['--max-budget-usd', '50', '--max-turns', '200']);

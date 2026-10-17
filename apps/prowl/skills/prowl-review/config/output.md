@@ -93,6 +93,10 @@ Fix the findings below in order, most severe first. Each one quotes the code at 
 
 <re-reviews only: each prior finding still open, in the same form as above, with a link to its comment thread>
 
+## Parked
+
+<re-reviews with Prowl's Park human-only findings on, and only when there are any: each prior finding parked because only a person can resolve it outside the code, one line each: its title, what a person needs to do, and a link to its comment thread. Parked findings don't count toward the verdict>
+
 ## Coverage
 
 **Axes reviewed:**
