@@ -22,13 +22,13 @@ const INSTRUCTIONS = `# Next steps (helm plugin)
 When you finish a task the user gave you and are about to end your turn, call \`${TOOL}\` as your very last action with 2-5 concrete next steps the user is most likely to want, most likely first. The user sees them as numbered buttons in the conversation and starts one with a click or by typing its number.
 - \`title\`: the button label, an imperative under 60 characters ("Run the unit tests").
 - \`prompt\`: the complete, self-contained instruction you would want to receive to do that step: name the files, branches, PRs, work items and commands it involves, since it is sent as the user's next message.
-Write your summary first, then call the tool; after it returns, end your turn with no further text, and do not repeat the steps as a list in your reply.
+Write your summary first, then call the tool; after it returns, end your turn with no further text. The buttons speak for themselves: don't mention or introduce them in your reply (no "I've added some next steps below"), and don't repeat the steps as a list.
 Do not call it for a reply that only answers a question or chats, while you are waiting on the user to answer a question of yours, mid-task, or in a subagent.`
 
 const TOOL_DESCRIPTION =
   'Shows the user 2-5 numbered next-step buttons in the conversation. Call it whenever you finish ' +
   'a task the user gave you, as the last action of the turn, after your summary; then end the ' +
-  'turn with no further text. Each step has a short imperative button title and the full, ' +
+  'turn with no further text. Never mention or introduce the buttons in your reply. Each step has a short imperative button title and the full, ' +
   'self-contained prompt sent as the user message when they pick it. Skip it for replies that ' +
   'only answer a question, while waiting on the user to answer you, mid-task, and in subagents.'
 
