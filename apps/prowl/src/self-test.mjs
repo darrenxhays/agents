@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { frontMatter, mentions, norm, swapTags, tagMatches } from './match.mjs';
 import { adfText, claimEntry, label } from './jira.mjs';
 import { htmlText } from './ado.mjs';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,6 +13,7 @@ import { alive, awaitingHuman, buildPrompt, finalize, findingsOnly, isOwn, overd
 import { processStart } from './proc.mjs';
 import { createMascot, wrap } from './mascot.mjs';
 import { changelog, newer, syncConfigFiles } from './update.mjs';
+import { DISALLOWED, fenceDecision, fenceSettings } from './fence.mjs';
 
 const T = 'Ready for Review';
 for (const t of ['Ready for Review', 'ready for review', 'Ready-For-Review', 'READY  FOR REVIEW', 'ReadyForReview', 'Ready for Reveiw', 'Redy for Review', 'Ready fro Reviw']) {
@@ -252,5 +254,44 @@ for (const mood of ['idle', 'poll', 'review', 'cheer', 'sleep', 'error']) {
     for (const row of rows) assert.equal(row.reduce((n, [, text]) => n + text.length, 0), i % 2 ? 50 : 12, `${mood} row width`);
   }
 }
+
+// The fix-session fence: pushes, GitHub writes and edits outside the worktree are denied; commits and reads are not.
+const fenceHome = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'prowl-test-')));
+const [wt, briefDir] = [path.join(fenceHome, 'wt'), path.join(fenceHome, 'brief')];
+fs.mkdirSync(wt);
+fs.mkdirSync(briefDir);
+const fenceEnv = { PROWL_SESSION: 'fix', PROWL_FIX_ROOTS: [wt, briefDir].join(path.delimiter) };
+const bash = command => fenceDecision({ tool_name: 'Bash', tool_input: { command } }, fenceEnv)?.hookSpecificOutput.permissionDecision || 'allow';
+for (const c of ['git push', 'git push origin HEAD:feature', 'cd x && git -C /tmp/r push -u origin b', 'git --no-pager push', 'git remote set-url origin x',
+  'gh pr create --fill', 'gh pr merge 3', 'gh pr review --approve', 'gh pr comment 1 -b hi', 'gh api -X POST repos/o/r/issues/1/comments -f body=x',
+  'gh api --method=PATCH repos/o/r/pulls/1', 'gh api repos/o/r/issues/1/comments -f body=hi', "gh api graphql -f query='mutation { resolveReviewThread(input:{threadId:\"x\"}) { clientMutationId } }'",
+  "gh api graphql -f query='\nmutation($id:ID!) {\n x }'", 'gh repo delete o/r --yes', 'gh issue comment 4 -b x', 'echo ok; gh api -XDELETE repos/o/r/git/refs/heads/b']) {
+  assert.equal(bash(c), 'deny', `denies: ${c}`);
+}
+for (const c of ['git commit -m "AB#1: fix"', 'git status && git diff HEAD~1', 'git log --oneline | head', 'npm test', 'gh pr view 3 --json title', 'gh pr diff 3',
+  'gh api repos/o/r/pulls/1/comments', 'gh api -X GET search/issues -f q=x', "gh api graphql -f query='query { viewer { login } }'", 'git remote -v', 'echo "git pushes are Prowl\'s job"']) {
+  assert.equal(bash(c), 'allow', `allows: ${c}`);
+}
+const write = (tool, file) => fenceDecision({ tool_name: tool, tool_input: tool === 'NotebookEdit' ? { notebook_path: file } : { file_path: file } }, fenceEnv) ? 'deny' : 'allow';
+assert.equal(write('Edit', path.join(wt, 'src', 'new', 'a.js')), 'allow', 'a new file in the worktree');
+assert.equal(write('Write', path.join(briefDir, 'result.json')), 'allow');
+assert.equal(write('Write', path.join(fenceHome, 'elsewhere.txt')), 'deny');
+assert.equal(write('Edit', path.join(wt, '..', 'escape.txt')), 'deny', 'no .. out of the worktree');
+assert.equal(write('NotebookEdit', '/etc/x.ipynb'), 'deny');
+let linked = true;
+try { fs.symlinkSync(fenceHome, path.join(wt, 'link'), 'junction'); } catch { linked = false; } // Windows may not allow links
+if (linked) assert.equal(write('Write', path.join(wt, 'link', 'out.txt')), 'deny', 'no symlink out of the worktree');
+assert.equal(fenceDecision({ tool_name: 'Bash', tool_input: { command: 'git push' } }, {}), null, 'review sessions are untouched');
+assert.equal(fenceDecision({ tool_name: 'Read', tool_input: { file_path: '/etc/hosts' } }, fenceEnv), null, 'reads are allowed');
+assert.ok(DISALLOWED.includes('Bash(git push *)') && DISALLOWED.includes('Bash(gh pr create *)'));
+assert.match(fenceSettings('/app', '/bin/node').hooks.PreToolUse[0].hooks[0].command, /^"\/bin\/node" "\/app\/hooks\/fix-guard\.mjs"$/);
+// ...and the hook itself, run as Claude Code runs it.
+const hook = (call, env) => spawnSync(process.execPath, [path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'hooks', 'fix-guard.mjs')],
+  { input: JSON.stringify(call), env: { ...process.env, PROWL_SESSION: '', ...env }, encoding: 'utf8' });
+const denied = hook({ tool_name: 'Bash', tool_input: { command: 'git push' } }, fenceEnv);
+assert.equal(denied.status, 0);
+assert.equal(JSON.parse(denied.stdout).hookSpecificOutput.permissionDecision, 'deny');
+assert.equal(hook({ tool_name: 'Bash', tool_input: { command: 'git push' } }, {}).stdout, '', 'not a fix session: no output');
+fs.rmSync(fenceHome, { recursive: true });
 
 console.log('self-test passed');
