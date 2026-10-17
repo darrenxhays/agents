@@ -2,6 +2,15 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.9.0
+- Fix my PRs (Config, 4), off by default: reviews run just as before until you turn it on. When a review asks for changes on PRs you authored, Prowl fixes them in a worktree, runs your checks, pushes, replies on each thread it fixed or disputed, waits for CI and re-tags the ticket for a re-review, round after round, until it's ready to merge or needs you. It never force-pushes, resolves, approves or merges.
+- With Review my own PRs off, Prowl doesn't review your PRs, so fix rounds start only on tickets you watch: press w on one in History, or run prowl --watch AB#123. Rounds then also follow reviews by a teammate's Prowl, or by people.
+- New tab, Needs you (3): questions only you can answer, and fixes Prowl stopped (a cap, failing checks, a guard before a push). enter answers, s skips, t takes the ticket over. Config is now tab 4 and Log tab 5.
+- History shows each fix under its ticket's reviews, and flags "⚑ ready to merge" once every PR is approved, has no open threads and its required checks are green.
+- Fix my PRs has its own caps: per fix session (spend, turns, time), per ticket and per day, plus rounds per ticket, lines changed per round, paths that need a person and branches never pushed. Defaults: $25 and 60 minutes per fix, 3 rounds, 1,000 lines, no pushes to .github/workflows, main, master or release/*.
+- Two new config files, linked in Config once Fix my PRs is on: fix.md (Fix rules) and checks.json (Checks before push: the commands Prowl runs before each push, per repo; empty until you fill it in).
+- output.md gains Fix reply, Dispute reply and Fix commit message sections. If you edited your copy in ~/.prowl/config/, it stays as it is: copy those three sections from the default to pick them up. Until you do, Prowl uses the default's.
+
 ## 2.8.0
 - Nine new settings in Config (3), every one off or set to how Prowl works today, so reviews run exactly as before until you turn one on.
 - Spend cap per review ($), Turn cap per review and Review time limit (min). A review that hits one is stopped and shows as failed with the cap named, for example "stopped: spend cap $50". It isn't retried automatically, so a runaway review isn't paid for twice: re-tag the ticket to run it again.
