@@ -138,13 +138,14 @@ Off by default. Turn on `fix.enabled` (Config, **Fix my PRs**) and, when a revie
 
 ## Review config
 
-How each PR is reviewed and what Prowl posts are set by three files. Prowl keeps your copy of each in `~/.prowl/config/`, and the Config view (`3`) links to all of them, along with `config.json` (`enter` opens one):
+How each PR is reviewed and what Prowl posts are set by these files. Prowl keeps your copy of each in `~/.prowl/config/`, and the Config view (`3`) links to all of them, along with `config.json` (`enter` opens one):
 
 | File | Sets |
 |---|---|
 | `review.md` | The reviewer's stance, the severity definitions, and the verdict rules (highest severity → verdict → APPROVE / REQUEST_CHANGES / COMMENT) |
 | `review-axis-catalog.md` | What reviewers check: the review axes and their checklists. An axis marked ALWAYS INCLUDED is in every PR's review |
-| `output.md` | Templates for everything posted on GitHub: the review banner, comment prefix, the short review body, the details file collapsed at its bottom (the full write-up of every finding, for a coding agent to fix from), inline comments, replies on existing threads, and the *No blocking issues* comment used when `approvals` is off |
+| `output.md` | Templates for everything posted on GitHub: the review banner, comment prefix, the short review body, the details file collapsed at its bottom (the full write-up of every finding, for a coding agent to fix from), inline comments, replies on existing threads, and the *No blocking issues* comment used when `approvals` is off. With Fix my PRs on, also the *Fix reply* and *Dispute reply* Prowl posts after a fix, and the *Fix commit message* |
+| `fix.md` | Fix my PRs only: how a fix session sorts each finding and thread (fix, dispute, ask you, or park) and what it leaves alone |
 
 Edit your copy. Changes apply from the next review. The defaults ship in [`skills/prowl-review/config/`](skills/prowl-review/config/), and on each launch Prowl compares them with your copies:
 
@@ -159,5 +160,5 @@ Keep the five severity names (Critical, High, Medium, Low, Nit): reports count t
 - `--setup`: sign in and pick boards. `--dry-run`: dry run for this launch only. `--once`: a single poll without the UI. `--self-test`: checks the matching and tagging logic and changes nothing.
 - Everything lives in `~/.prowl/` (override with `PROWL_HOME`): `config.json`, `state.json` (review history; `capped` maps each ticket at the round cap, still tagged for review, to the reviews it has had, e.g. `"capped": { "AB#123": 3 }`), `config/` (your review config), `seen.json` (the last version launched, for the Update Notes), `reports/`, `logs/` (each review's prompt and session log) and `poller.log`.
 - Only one instance runs per user.
-- `skills/prowl-review` is Prowl's batch review skill, and only Prowl uses it: each review session loads it with `--plugin-dir` as `/prowl:prowl-review`. It isn't in the plugin marketplace and is never added to your own Claude Code skills.
+- `skills/prowl-review` is Prowl's batch review skill, and `skills/prowl-fix` its fix skill. Only Prowl uses them: each session loads them with `--plugin-dir` as `/prowl:prowl-review` and `/prowl:prowl-fix`. They aren't in the plugin marketplace and are never added to your own Claude Code skills.
 - Prowl's version is `version` in `.claude-plugin/plugin.json`. Raising it on `main` releases it: every installed copy updates on its next launch, and shows that version's `CHANGELOG.md` section as its Update Notes.

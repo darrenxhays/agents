@@ -128,7 +128,8 @@ export function updateNotes(appDir) {
   const fresh = !seen && !fs.existsSync(path.join(HOME, 'poller.log'));
   const version = localVersion(appDir);
   const synced = seen?.defaults || {};
-  const files = syncConfigFiles(path.join(appDir, 'skills', 'prowl-review', 'config'), CONFIG_DIR, synced, !fresh);
+  // Both skills' defaults share one folder, so their file names must differ.
+  const files = ['prowl-review', 'prowl-fix'].flatMap(skill => syncConfigFiles(path.join(appDir, 'skills', skill, 'config'), CONFIG_DIR, synced, !fresh));
   const added = fresh ? [] : newSettings();
   if (added.length) {
     saveConfig(loadConfig()); // writes the new settings with their defaults, so they are announced once

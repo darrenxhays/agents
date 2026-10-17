@@ -230,6 +230,9 @@ assert.equal(get(mine, 'review-axis-catalog.md'), 'my axes', 'a renamed file kee
 assert.ok(!fs.existsSync(path.join(mine, 'axis-catalog.md')) && !('axis-catalog.md' in synced));
 assert.deepEqual(notes.map(n => n.text), ['axis-catalog.md is now review-axis-catalog.md']);
 fs.rmSync(cfgTmp, { recursive: true });
+// prowl-fix's config defaults are synced into the same folder, so no file name may be in both skills' defaults.
+const skillCfg = skill => fs.readdirSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'skills', skill, 'config'));
+assert.deepEqual(skillCfg('prowl-fix').filter(f => skillCfg('prowl-review').includes(f)), [], 'config file names are unique across skills');
 
 // A pid saved by an earlier launch is the review only if its process started with the review (not a reused pid).
 const born = Date.now() - process.uptime() * 1000;
