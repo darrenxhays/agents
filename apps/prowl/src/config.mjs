@@ -30,6 +30,7 @@ const DEFAULTS = {
     maxTurns: 0, // turn cap per review (--max-turns); 0 = no cap
   },
   reReviewScope: 'full', // 'full': a re-review reads each PR whole; 'delta': only the commits since the last review, plus its open findings
+  maxReviewRounds: 0, // reviews per ticket before it is left for a person: not claimed, flagged in History; 0 = no cap
   reviewTimeoutMinutes: 0, // stop a review running longer than this; 0 = no limit. A review stopped by a cap fails and isn't retried
   reviewOwnPrs: false, // review tickets with PRs you authored; your own PRs get a comment review, as GitHub won't let you approve them
   approvals: true, // approve PRs with no blocking findings; off: comment that there are none and leave approving to a human

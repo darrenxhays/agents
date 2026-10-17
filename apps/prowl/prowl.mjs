@@ -109,6 +109,7 @@ async function poll() {
     }
     hoot(`Checking ${boards.length > 1 ? 'the boards' : 'the board'} for new review tasks...`);
     const seen = new Set();
+    let allRead = true;
     for (const board of boards) {
       const where = tracker.boardLabel(board);
       try {
@@ -121,10 +122,15 @@ async function poll() {
           await consider(tracker, ticket);
         }
       } catch (e) {
+        allRead = false;
         app.lastError = e.message;
         log('error', `${where}: ${e.message}`, `board:${where}`);
       }
     }
+    // A ticket at the round cap that is no longer tagged for review has been taken over: its flag clears.
+    const untagged = allRead ? Object.keys(app.state.capped || {}).filter(t => !seen.has(t)) : [];
+    for (const t of untagged) delete app.state.capped[t];
+    if (untagged.length) rv.saveState(app.state);
     await checkHumanApprovals();
   } catch (e) {
     app.lastError = e.message;
@@ -158,6 +164,14 @@ async function consider(tracker, ticket) {
   // A re-review leaves out the PRs the last review approved that have no new commits since; they stay as context.
   const approved = prs.filter(pr => prior?.approved?.[pr.url] && prior.approved[pr.url] === heads[pr.url]);
   const toReview = prs.filter(p => !approved.includes(p));
+  if (toReview.length && rv.roundCapped(cfg, prior)) {
+    // Left tagged and unclaimed for a person to take over. state.capped lets other tools see it; History flags it.
+    if (state.capped?.[ticket.key] !== prior.reviewNo) {
+      (state.capped ??= {})[ticket.key] = prior.reviewNo;
+      rv.saveState(state);
+    }
+    return log('warn', `${ticket.key}: not reviewed: it has had ${prior.reviewNo} reviews, the round cap (Max review rounds); leaving it for a person`, key);
+  }
   const skipped = approved.length ? ` (already approved, unchanged: ${approved.map(p => `${p.repo}#${p.number}`).join(', ')})` : '';
   if (app.dryRun()) return log('info', `${ticket.key}: would review ${toReview.map(p => p.url).join(' ') || 'nothing'}${skipped}`, key);
 
@@ -187,6 +201,7 @@ async function consider(tracker, ticket) {
     return applyTag({ tracker: cfg.taskBoard, ticket: ticket.key, ref: ticket.ref, id: `claim-${ticket.key}`, pendingTag: cfg.tags.trigger });
   }
   state.runs.push(run);
+  if (state.capped) delete state.capped[ticket.key]; // the cap was raised or turned off
   rv.saveState(state);
   lastByKey.delete(key);
   hoot(toReview.length > 1 ? `Starting a batch review of ${toReview.length} PRs` : `Starting a review of ${toReview[0].title}`);

@@ -101,6 +101,7 @@ Settings live in `~/.prowl/config.json`. The Config view (`3`) edits the same fi
 | `claude.maxBudgetUsd` / `maxTurns` | `0` / `0` | **Spend cap** (USD) and **turn cap** per review, passed to Claude Code as `--max-budget-usd` and `--max-turns`. `0` = no cap |
 | `reviewTimeoutMinutes` | `0` | **Review time limit**: stops a review running longer than this, counted from its start. `0` = no limit. A review stopped by any cap fails with the cap named (e.g. "stopped: spend cap $50") and isn't retried automatically |
 | `approvals` | `true` | Approve PRs with no blocking findings. Off: comment that nothing is blocking (the *No blocking issues* template in `output.md`) and leave approving to a human. Blocking findings still request changes |
+| `maxReviewRounds` | `0` | **Max review rounds** per ticket. A ticket that has had this many isn't reviewed again or claimed: it keeps its trigger tag for a person to take over, and History flags it "⚑ round cap reached". `0` = no cap |
 | `reReviewScope` | `full` | **Re-review scope**. `full`: a re-review reads each PR whole and gets the whole previous report. `delta`: it reviews only the commits since the previous review, plus that review's still-open findings, and gets only the previous report's front matter and findings. A re-review of a review from before 2.8.0 is always `full` |
 | `dryRun` | `false` | Log what would be reviewed without touching tags or starting reviews |
 | `autoUpdate` | `true` | Install a newer Prowl release before launching |
@@ -128,7 +129,7 @@ Keep the five severity names (Critical, High, Medium, Low, Nit): reports count t
 ## Flags and files
 
 - `--setup`: sign in and pick boards. `--dry-run`: dry run for this launch only. `--once`: a single poll without the UI. `--self-test`: checks the matching and tagging logic and changes nothing.
-- Everything lives in `~/.prowl/` (override with `PROWL_HOME`): `config.json`, `state.json` (review history), `config/` (your review config), `seen.json` (the last version launched, for the Update Notes), `reports/`, `logs/` (each review's prompt and session log) and `poller.log`.
+- Everything lives in `~/.prowl/` (override with `PROWL_HOME`): `config.json`, `state.json` (review history; `capped` maps each ticket at the round cap, still tagged for review, to the reviews it has had, e.g. `"capped": { "AB#123": 3 }`), `config/` (your review config), `seen.json` (the last version launched, for the Update Notes), `reports/`, `logs/` (each review's prompt and session log) and `poller.log`.
 - Only one instance runs per user.
 - `skills/prowl-review` is Prowl's batch review skill, and only Prowl uses it: each review session loads it with `--plugin-dir` as `/prowl:prowl-review`. It isn't in the plugin marketplace and is never added to your own Claude Code skills.
 - Prowl's version is `version` in `.claude-plugin/plugin.json`. Raising it on `main` releases it: every installed copy updates on its next launch, and shows that version's `CHANGELOG.md` section as its Update Notes.

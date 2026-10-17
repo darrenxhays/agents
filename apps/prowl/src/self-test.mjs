@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CONFIG_DIR } from './config.mjs';
-import { alive, awaitingHuman, buildPrompt, finalize, findingsOnly, isOwn, overdue, REPORTS_DIR, retryFailed, reviewArgs } from './reviews.mjs';
+import { alive, awaitingHuman, buildPrompt, finalize, findingsOnly, isOwn, overdue, REPORTS_DIR, retryFailed, reviewArgs, roundCapped } from './reviews.mjs';
 import { processStart } from './proc.mjs';
 import { createMascot, wrap } from './mascot.mjs';
 import { changelog, newer, syncConfigFiles } from './update.mjs';
@@ -87,6 +87,11 @@ assert.ok(!delta.includes('<previous-report>') && !delta.includes('## Pull reque
 assert.equal(buildPrompt({ ...promptCases.reReview, reReviewScope: 'delta' }), fixture('reReview.prompt.md'), 'no reviewedHeads (a 2.7.0 review): full scope');
 assert.equal(findingsOnly('no sections here'), 'no sections here');
 assert.equal(findingsOnly('## Issues found\n```py\n# not a heading\n```\n### o/a#1\n- F-01\n## Not posted\n- x\n'), '## Issues found\n```py\n# not a heading\n```\n### o/a#1\n- F-01\n');
+
+// Round cap: a ticket's next review would go past Max review rounds.
+assert.ok(!roundCapped({ maxReviewRounds: 0 }, { reviewNo: 9 }), 'no cap');
+assert.ok(!roundCapped({ maxReviewRounds: 3 }, undefined) && !roundCapped({ maxReviewRounds: 3 }, { reviewNo: 2 }), 'review 3 of 3 runs');
+assert.ok(roundCapped({ maxReviewRounds: 3 }, { reviewNo: 3 }) && roundCapped({ maxReviewRounds: 1 }, { reviewNo: 1 }));
 
 // Run caps: passed only when set; a capped review fails with the cap named and isn't retried.
 const capped = reviewArgs({ claude: { ...claude, maxBudgetUsd: 50, maxTurns: 200 } }, '/plugin');

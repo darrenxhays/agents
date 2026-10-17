@@ -43,6 +43,9 @@ export function alive(run) {
   return run._ours;
 }
 
+/** True when a ticket's next review would go past Max review rounds; `prior` is its latest finished review. */
+export const roundCapped = (cfg, prior) => cfg.maxReviewRounds > 0 && (prior?.reviewNo || 0) >= cfg.maxReviewRounds;
+
 /** True for a PR authored by `me`, the GitHub login Prowl runs as. GitHub won't let you approve your own PR. */
 export const isOwn = (pr, me) => Boolean(me && pr?.author?.toLowerCase() === me.toLowerCase());
 
