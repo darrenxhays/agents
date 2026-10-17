@@ -101,6 +101,7 @@ Settings live in `~/.prowl/config.json`. The Config view (`3`) edits the same fi
 | `claude.maxBudgetUsd` / `maxTurns` | `0` / `0` | **Spend cap** (USD) and **turn cap** per review, passed to Claude Code as `--max-budget-usd` and `--max-turns`. `0` = no cap |
 | `reviewTimeoutMinutes` | `0` | **Review time limit**: stops a review running longer than this, counted from its start. `0` = no limit. A review stopped by any cap fails with the cap named (e.g. "stopped: spend cap $50") and isn't retried automatically |
 | `approvals` | `true` | Approve PRs with no blocking findings. Off: comment that nothing is blocking (the *No blocking issues* template in `output.md`) and leave approving to a human. Blocking findings still request changes |
+| `reReviewScope` | `full` | **Re-review scope**. `full`: a re-review reads each PR whole and gets the whole previous report. `delta`: it reviews only the commits since the previous review, plus that review's still-open findings, and gets only the previous report's front matter and findings. A re-review of a review from before 2.8.0 is always `full` |
 | `dryRun` | `false` | Log what would be reviewed without touching tags or starting reviews |
 | `autoUpdate` | `true` | Install a newer Prowl release before launching |
 

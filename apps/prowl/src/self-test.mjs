@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CONFIG_DIR } from './config.mjs';
-import { alive, awaitingHuman, buildPrompt, finalize, isOwn, overdue, REPORTS_DIR, retryFailed, reviewArgs } from './reviews.mjs';
+import { alive, awaitingHuman, buildPrompt, finalize, findingsOnly, isOwn, overdue, REPORTS_DIR, retryFailed, reviewArgs } from './reviews.mjs';
 import { processStart } from './proc.mjs';
 import { createMascot, wrap } from './mascot.mjs';
 import { changelog, newer, syncConfigFiles } from './update.mjs';
@@ -74,6 +74,19 @@ for (const [name, c] of Object.entries(promptCases)) assert.equal(buildPrompt(c)
 const claude = { model: 'm', effort: 'xhigh', permissionMode: 'auto', maxBudgetUsd: 0, maxTurns: 0 };
 assert.deepEqual(reviewArgs({ claude }, '/plugin'), ['-p', '--plugin-dir', '/plugin', '--add-dir', REPORTS_DIR, '--add-dir', CONFIG_DIR,
   '--model', 'm', '--effort', 'xhigh', '--permission-mode', 'auto', '--output-format', 'stream-json', '--verbose'], 'golden spawn arguments');
+
+// Delta re-reviews: the commits since the last review, and only the last report's front matter and findings.
+const priorRun = { ...promptCases.reReview.prior, reviewedHeads: { [base.prs[0].url]: 'aaa111', [base.prs[1].url]: 'bbb222' } };
+const delta = buildPrompt({ ...promptCases.reReview, prior: priorRun, reReviewScope: 'delta',
+  prs: [...base.prs, { url: 'https://github.com/o/d/pull/4' }], heads: { [base.prs[0].url]: 'aaa111', [base.prs[1].url]: 'ccc333' } });
+assert.ok(delta.includes(`- ${base.prs[1].url}: bbb222..ccc333`), 'names the last reviewed commit and the head');
+assert.ok(delta.includes(`- ${base.prs[0].url}: no new commits since aaa111`) && delta.includes('- https://github.com/o/d/pull/4: not reviewed at a known commit before; review it in full'));
+assert.ok(delta.includes('gh pr diff <PR> --name-only'), 'base-branch merges: findings only in files the PR changes');
+assert.ok(delta.includes('<previous-findings>\n---\nticket: AB#42') && delta.includes('F-02 [MEDIUM] Missing CI pipeline') && delta.includes('## Still open from the previous review'));
+assert.ok(!delta.includes('<previous-report>') && !delta.includes('## Pull requests') && !delta.includes('Refuted: race on save') && !delta.includes('## Summary'), 'only the findings');
+assert.equal(buildPrompt({ ...promptCases.reReview, reReviewScope: 'delta' }), fixture('reReview.prompt.md'), 'no reviewedHeads (a 2.7.0 review): full scope');
+assert.equal(findingsOnly('no sections here'), 'no sections here');
+assert.equal(findingsOnly('## Issues found\n```py\n# not a heading\n```\n### o/a#1\n- F-01\n## Not posted\n- x\n'), '## Issues found\n```py\n# not a heading\n```\n### o/a#1\n- F-01\n');
 
 // Run caps: passed only when set; a capped review fails with the cap named and isn't retried.
 const capped = reviewArgs({ claude: { ...claude, maxBudgetUsd: 50, maxTurns: 200 } }, '/plugin');

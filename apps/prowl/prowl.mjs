@@ -153,12 +153,10 @@ async function consider(tracker, ticket) {
     return log('info', `${ticket.key}: skipped, ${mine.map(p => `${p.repo}#${p.number}`).join(', ')} ${mine.length > 1 ? 'are' : 'is'} yours; leaving it for a teammate`, key);
   }
   const prior = state.runs.filter(r => r.ticket === ticket.key && r.status === 'done').sort((a, b) => b.endedAt - a.endedAt)[0];
+  const heads = {}; // PR URL -> its head commit now ('' if unreadable)
+  for (const pr of prs) heads[pr.url] = await github.headSha(pr).catch(() => '');
   // A re-review leaves out the PRs the last review approved that have no new commits since; they stay as context.
-  const approved = [];
-  for (const pr of prior?.approved ? prs : []) {
-    const sha = prior.approved[pr.url];
-    if (sha && sha === await github.headSha(pr).catch(() => '')) approved.push(pr);
-  }
+  const approved = prs.filter(pr => prior?.approved?.[pr.url] && prior.approved[pr.url] === heads[pr.url]);
   const toReview = prs.filter(p => !approved.includes(p));
   const skipped = approved.length ? ` (already approved, unchanged: ${approved.map(p => `${p.repo}#${p.number}`).join(', ')})` : '';
   if (app.dryRun()) return log('info', `${ticket.key}: would review ${toReview.map(p => p.url).join(' ') || 'nothing'}${skipped}`, key);
@@ -182,7 +180,8 @@ async function consider(tracker, ticket) {
   }
   let run;
   try {
-    run = rv.startReview(cfg, PLUGIN_DIR, { tracker: cfg.taskBoard, ticket, prs: toReview, approvedPrs: approved, prior, me: app.me });
+    if (prior && cfg.reReviewScope === 'delta' && !prior.reviewedHeads) log('info', `${ticket.key}: re-reviewing in full, as the last review is from before Prowl recorded the commits it reviewed`, `scope:${ticket.key}`);
+    run = rv.startReview(cfg, PLUGIN_DIR, { tracker: cfg.taskBoard, ticket, prs: toReview, approvedPrs: approved, prior, me: app.me, heads });
   } catch (e) {
     log('error', `${ticket.key}: could not start the review: ${e.message}`);
     return applyTag({ tracker: cfg.taskBoard, ticket: ticket.key, ref: ticket.ref, id: `claim-${ticket.key}`, pendingTag: cfg.tags.trigger });

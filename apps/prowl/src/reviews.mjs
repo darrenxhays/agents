@@ -53,7 +53,7 @@ export const awaitingHuman = (run, approvals) => run?.awaitingHuman ?? (approval
  * Starts a detached headless Claude Code session running prowl-review on the PRs. It outlives this
  * process; output goes to a log file this app tails, so a restart picks running reviews back up.
  */
-export function startReview(cfg, pluginDir, { tracker, ticket, prs, approvedPrs = [], prior, me = '' }) {
+export function startReview(cfg, pluginDir, { tracker, ticket, prs, approvedPrs = [], prior, me = '', heads = {} }) {
   const reviewNo = (prior?.reviewNo || 0) + 1;
   const id = `${ticket.key.replace(/[^A-Za-z0-9-]/g, '')}-${new Date().toISOString().slice(0, 16).replace(/[-:]/g, '')}-r${reviewNo}`;
   for (const dir of [REPORTS_DIR, LOGS_DIR, CONFIG_DIR]) fs.mkdirSync(dir, { recursive: true });
@@ -64,6 +64,9 @@ export function startReview(cfg, pluginDir, { tracker, ticket, prs, approvedPrs 
     approved: Object.fromEntries(approvedPrs.map(p => [p.url, prior.approved[p.url]])),
     // The approved PRs that only got Prowl's stamp (Approve PRs off, or your own PR) and still need a human's approval.
     approvals: cfg.approvals, awaitingHuman: approvedPrs.map(p => p.url).filter(u => awaitingHuman(prior, cfg.approvals).includes(u)),
+    // PR URL -> its head commit as this review starts, for a delta re-review to start from. The context PRs are
+    // unchanged since they were last reviewed, so their head is their last reviewed commit too.
+    reviewedHeads: Object.fromEntries([...prs, ...approvedPrs].filter(p => heads[p.url]).map(p => [p.url, heads[p.url]])),
     reportPath: path.join(REPORTS_DIR, `${id}.md`),
     logPath: path.join(LOGS_DIR, `${id}.ndjson`),
     promptPath: path.join(LOGS_DIR, `${id}.prompt.md`),
@@ -74,7 +77,7 @@ export function startReview(cfg, pluginDir, { tracker, ticket, prs, approvedPrs 
   if (prior) {
     try { priorReport = fs.readFileSync(prior.reportPath, 'utf8'); } catch { priorReport = '(the previous report file is missing)'; }
   }
-  fs.writeFileSync(run.promptPath, buildPrompt({ ...run, prior, priorReport, approvals: cfg.approvals }));
+  fs.writeFileSync(run.promptPath, buildPrompt({ ...run, prior, priorReport, approvals: cfg.approvals, reReviewScope: cfg.reReviewScope, heads }));
 
   const stdin = fs.openSync(run.promptPath, 'r');
   const log = fs.openSync(run.logPath, 'a');
@@ -204,7 +207,7 @@ export function finalize(run) {
 }
 
 /** The prompt (the agent's brief): the PR list for prowl-review, the ticket, the re-review brief and the report spec. */
-export function buildPrompt({ ticket, title, ticketUrl, prs, contextPrs = [], reviewNo, reportPath, prior, priorReport, approvals = true }) {
+export function buildPrompt({ ticket, title, ticketUrl, prs, contextPrs = [], reviewNo, reportPath, prior, priorReport, approvals = true, reReviewScope = 'full', heads = {} }) {
   const lines = [
     `/prowl:prowl-review ${[...prs, ...contextPrs].map(p => p.url).join(' ')}`,
     '',
@@ -220,25 +223,79 @@ export function buildPrompt({ ticket, title, ticketUrl, prs, contextPrs = [], re
       'Prowl approved these PRs in an earlier review and they have no new commits since. They are already approved (see Step 1): read them for the batch brief and the cross-PR contracts, but give them no spec or reviewer, post nothing on them, and leave their earlier findings and comment threads alone.',
       '', ...contextPrs.map(p => `- ${p.url}`));
   }
-  if (prior) lines.push('', ...reReviewBrief(prior, priorReport));
+  // A delta re-review needs the commits the last review saw; reviews from before 2.8.0 didn't record them.
+  if (prior && reReviewScope === 'delta' && prior.reviewedHeads) lines.push('', ...deltaBrief(prior, priorReport, prs, heads));
+  else if (prior) lines.push('', ...reReviewBrief(prior, priorReport));
   lines.push('', ...reportSpec(ticket, reviewNo, reportPath, Boolean(prior)));
   return `${lines.join('\n')}\n`;
 }
 
+const finished = prior => new Date(prior.endedAt).toISOString().slice(0, 16).replace('T', ' ');
+
+// What every re-review does with the previous review's findings.
+const PRIOR_STEPS = [
+  'Add every finding from the previous report to the ledger as a prior finding. Re-verify each one against the current head of its PR and classify it as Fixed (cite the commit), Still open, or No longer applicable (code removed, PR merged or closed). These go through verifiers like any other finding.',
+  'Do not post duplicates of prior findings. Reply on the existing comment thread instead, with the *Verified fixed* reply from the output config and then resolve the thread (`gh api graphql`, resolveReviewThread), or with its *Still open* reply. The Step 8 re-run guard treats still-open prior findings as already posted.',
+  'Post new inline comments only for findings that are new since the previous review.',
+  "Each PR's verdict counts still-open prior findings as well as new ones, and its review body's summary and details file list them too.",
+];
+const numbered = (steps, from = 1) => steps.map((s, i) => `${from + i}. ${s}`);
+
 const reReviewBrief = (prior, report) => [
   '## This is a re-review',
   '',
-  `The previous review (review ${prior.reviewNo}, finished ${new Date(prior.endedAt).toISOString().slice(0, 16).replace('T', ' ')} UTC) produced the report below. The ticket has been tagged for review again, so the authors believe they have addressed it. On top of the normal prowl-review steps:`,
+  `The previous review (review ${prior.reviewNo}, finished ${finished(prior)} UTC) produced the report below. The ticket has been tagged for review again, so the authors believe they have addressed it. On top of the normal prowl-review steps:`,
   '',
-  '1. Add every finding from the previous report to the ledger as a prior finding. Re-verify each one against the current head of its PR and classify it as Fixed (cite the commit), Still open, or No longer applicable (code removed, PR merged or closed). These go through verifiers like any other finding.',
-  '2. Do not post duplicates of prior findings. Reply on the existing comment thread instead, with the *Verified fixed* reply from the output config and then resolve the thread (`gh api graphql`, resolveReviewThread), or with its *Still open* reply. The Step 8 re-run guard treats still-open prior findings as already posted.',
-  '3. Post new inline comments only for findings that are new since the previous review.',
-  "4. Each PR's verdict counts still-open prior findings as well as new ones, and its review body's summary and details file list them too.",
+  ...numbered(PRIOR_STEPS),
   '',
   '<previous-report>',
   report.trim(),
   '</previous-report>',
 ];
+
+/** A re-review of only the commits since the last review, carrying the last report's front matter and findings. */
+function deltaBrief(prior, report, prs, heads) {
+  const since = prs.map(({ url }) => {
+    const [last, now] = [prior.reviewedHeads[url], heads[url]];
+    if (!last || !now) return `- ${url}: not reviewed at a known commit before; review it in full`;
+    return last === now ? `- ${url}: no new commits since ${last}; only re-check its prior findings` : `- ${url}: ${last}..${now}`;
+  });
+  return [
+    '## This is a re-review of what changed',
+    '',
+    `The previous review (review ${prior.reviewNo}, finished ${finished(prior)} UTC) found what is below. The ticket has been tagged for review again, so the authors believe they have addressed it. Prowl's Re-review scope is set to delta: review only what changed since then. On top of the normal prowl-review steps:`,
+    '',
+    '1. Review each PR only from the commit the previous review saw to its head now (listed below): give its reviewer those commits (`git diff <last>..<head>`, or `gh api repos/{o}/{r}/compare/<last>...<head>`) and its still-open prior findings, and have it read the rest of the PR as context for them. If a last commit is no longer in the PR\'s history (a force-push), review that PR in full.',
+    "2. If the author merged the base branch into the PR since then, that range includes the base branch's changes: raise new findings only in files the PR itself changes (`gh pr diff <PR> --name-only`).",
+    ...numbered(PRIOR_STEPS, 3),
+    '',
+    'Commits since the previous review:',
+    '',
+    ...since,
+    '',
+    '<previous-findings>',
+    findingsOnly(report).trim(),
+    '</previous-findings>',
+  ];
+}
+
+/**
+ * A report cut to its front matter and its findings sections (Issues found, Still open from the previous review),
+ * the parts a delta re-review needs. The whole report if it has neither.
+ */
+export function findingsOnly(report) {
+  const head = /^---\n[\s\S]*?\n---\n/.exec(report)?.[0] || '';
+  const kept = [];
+  let level = 0; // heading level of the findings section being kept; 0 = not in one
+  let fence = false;
+  for (const line of report.slice(head.length).split('\n')) {
+    if (/^\s*(```|~~~)/.test(line)) fence = !fence;
+    const h = !fence && /^(#{1,6})\s+(.*)/.exec(line);
+    if (h && (!level || h[1].length <= level)) level = /issues found|still open/i.test(h[2]) ? h[1].length : 0;
+    if (level) kept.push(line);
+  }
+  return kept.length ? `${head && `${head}\n`}${kept.join('\n').trim()}\n` : report;
+}
 
 const reportSpec = (id, n, file, again) => [
   '## Report file (required, final step)',

@@ -53,6 +53,7 @@ const FIELDS = [
   { key: 'reviewTimeoutMinutes', label: 'Review time limit (min)', type: 'int', min: 0, max: 10080, help: "Stops a review that runs longer than this, counted from its start. It fails with the cap named and isn't retried. 0 = no limit." },
   { key: 'reviewOwnPrs', label: 'Review my own PRs', type: 'bool', help: "off: a ticket with any PR you authored is left for a teammate. on: it is reviewed like any other; GitHub won't let you approve or request changes on your own PR, so those get a comment review with the verdict." },
   { key: 'approvals', label: 'Approve PRs', type: 'bool', help: 'on: a PR with no blocking findings gets a GitHub approval. off: Prowl comments that it found no blocking issues, and a human approves (text in Output templates); History flags those PRs with ⚑ until someone approves them.' },
+  { key: 'reReviewScope', label: 'Re-review scope', type: 'enum', values: ['full', 'delta'], help: "full: a re-review reads each PR whole, with the whole last report. delta: only the commits since the last review, plus its still-open findings; the rest of the PR is context. enter switches." },
   { key: 'dryRun', label: 'Dry run', type: 'bool', help: 'Log what would be reviewed without changing tags or starting reviews.' },
   { key: 'autoUpdate', label: 'Auto-update', type: 'bool', help: 'Install a newer Prowl release before launching. It waits while reviews from an earlier launch are still running.' },
 ];
