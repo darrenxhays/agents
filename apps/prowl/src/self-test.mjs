@@ -5,6 +5,7 @@ import { claimEntry, label } from './jira.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { alive, awaitingHuman, buildPrompt, finalize, isOwn } from './reviews.mjs';
 import { processStart } from './proc.mjs';
 import { createMascot, wrap } from './mascot.mjs';
@@ -61,6 +62,13 @@ assert.ok(ctx.startsWith('/prowl:prowl-review https://github.com/o/b/pull/2 http
 assert.ok(ctx.includes('## Already approved: context only\n\n') && ctx.includes('- https://github.com/o/a/pull/1') && !first.includes('Already approved'));
 assert.ok(first.includes('approved: <each PR'));
 assert.ok(again.includes('This is a re-review') && again.includes('F-01 [HIGH] old finding') && again.includes('What was fixed: every prior finding'));
+
+// With every setting at its default, the prompt is byte for byte what 2.7.0 sent (fixtures captured from 2.7.0).
+const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), 'self-test-fixtures');
+const fixture = name => fs.readFileSync(path.join(FIX, name), 'utf8');
+const promptCases = JSON.parse(fixture('prompt-cases.json'));
+for (const c of Object.values(promptCases)) if (c.priorReport) c.priorReport = fixture(c.priorReport);
+for (const [name, c] of Object.entries(promptCases)) assert.equal(buildPrompt(c), fixture(`${name}.prompt.md`), `golden prompt: ${name}`);
 
 // A session that ends cleanly but never wrote its report did not review anything: it must fail, not tag Reviewed.
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prowl-test-'));
