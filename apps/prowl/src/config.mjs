@@ -24,7 +24,12 @@ const DEFAULTS = {
   pollSeconds: 300,
   maxConcurrentReviews: 2,
   workDir: process.cwd(),
-  claude: { model: 'claude-opus-5-5', effort: 'xhigh', permissionMode: 'auto' },
+  claude: {
+    model: 'claude-opus-5-5', effort: 'xhigh', permissionMode: 'auto',
+    maxBudgetUsd: 0, // spend cap per review in USD (--max-budget-usd); 0 = no cap
+    maxTurns: 0, // turn cap per review (--max-turns); 0 = no cap
+  },
+  reviewTimeoutMinutes: 0, // stop a review running longer than this; 0 = no limit. A review stopped by a cap fails and isn't retried
   reviewOwnPrs: false, // review tickets with PRs you authored; your own PRs get a comment review, as GitHub won't let you approve them
   approvals: true, // approve PRs with no blocking findings; off: comment that there are none and leave approving to a human
   dryRun: false,

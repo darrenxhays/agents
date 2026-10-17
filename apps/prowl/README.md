@@ -60,7 +60,7 @@ On Windows, use Windows Terminal. Reviews run in the **Projects Directory** from
 
 **Re-review**: add the trigger tag again. The next review gets the previous report as its brief. It re-checks every earlier finding (fixed, still open or no longer applicable), replies on the old comment threads instead of re-posting, and its report lists what was fixed. PRs the last review approved (with `approvals` off, the ones it found nothing blocking on) are left out if they have no new commits since. They are still read as context for the other PRs, but nothing is posted on them. If every PR is approved and unchanged, the ticket goes straight to **Reviewed**.
 
-**Failures**, including a session that ends without writing its report, are retried once automatically (the trigger tag is put back). After a second failure Prowl waits for someone to re-tag. **Stopping** a review removes **In Review**; re-tag the ticket to run it again.
+**Failures**, including a session that ends without writing its report, are retried once automatically (the trigger tag is put back), except a review stopped by a spend, turn or time cap, so a runaway review isn't paid for twice. After a second failure Prowl waits for someone to re-tag. **Stopping** a review removes **In Review**; re-tag the ticket to run it again.
 
 **Hoot** sleeps until there's news. He wakes up to say when he's checking the boards, when he picks up a ticket and starts its reviews, when each PR's review is posted, when a ticket is done, and when something goes wrong (with what went wrong).
 
@@ -98,6 +98,8 @@ Settings live in `~/.prowl/config.json`. The Config view (`3`) edits the same fi
 | `maxConcurrentReviews` | `2` | Extra tickets stay tagged until a slot frees, so a teammate can take them |
 | `workDir` | your projects folder | **Projects Directory**: where reviews run; its `CLAUDE.md` is loaded, and PR repos not cloned there are cloned first |
 | `claude.model` / `effort` / `permissionMode` | `claude-opus-5-5` / `xhigh` / `auto` | Review sessions. Avoid `bypassPermissions`: reviews read text written by PR authors |
+| `claude.maxBudgetUsd` / `maxTurns` | `0` / `0` | **Spend cap** (USD) and **turn cap** per review, passed to Claude Code as `--max-budget-usd` and `--max-turns`. `0` = no cap |
+| `reviewTimeoutMinutes` | `0` | **Review time limit**: stops a review running longer than this, counted from its start. `0` = no limit. A review stopped by any cap fails with the cap named (e.g. "stopped: spend cap $50") and isn't retried automatically |
 | `approvals` | `true` | Approve PRs with no blocking findings. Off: comment that nothing is blocking (the *No blocking issues* template in `output.md`) and leave approving to a human. Blocking findings still request changes |
 | `dryRun` | `false` | Log what would be reviewed without touching tags or starting reviews |
 | `autoUpdate` | `true` | Install a newer Prowl release before launching |

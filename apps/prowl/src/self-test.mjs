@@ -6,7 +6,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { alive, awaitingHuman, buildPrompt, finalize, isOwn } from './reviews.mjs';
+import { CONFIG_DIR } from './config.mjs';
+import { alive, awaitingHuman, buildPrompt, finalize, isOwn, overdue, REPORTS_DIR, retryFailed, reviewArgs } from './reviews.mjs';
 import { processStart } from './proc.mjs';
 import { createMascot, wrap } from './mascot.mjs';
 import { changelog, newer, syncConfigFiles } from './update.mjs';
@@ -69,6 +70,31 @@ const fixture = name => fs.readFileSync(path.join(FIX, name), 'utf8');
 const promptCases = JSON.parse(fixture('prompt-cases.json'));
 for (const c of Object.values(promptCases)) if (c.priorReport) c.priorReport = fixture(c.priorReport);
 for (const [name, c] of Object.entries(promptCases)) assert.equal(buildPrompt(c), fixture(`${name}.prompt.md`), `golden prompt: ${name}`);
+// ...and the review session gets 2.7.0's arguments.
+const claude = { model: 'm', effort: 'xhigh', permissionMode: 'auto', maxBudgetUsd: 0, maxTurns: 0 };
+assert.deepEqual(reviewArgs({ claude }, '/plugin'), ['-p', '--plugin-dir', '/plugin', '--add-dir', REPORTS_DIR, '--add-dir', CONFIG_DIR,
+  '--model', 'm', '--effort', 'xhigh', '--permission-mode', 'auto', '--output-format', 'stream-json', '--verbose'], 'golden spawn arguments');
+
+// Run caps: passed only when set; a capped review fails with the cap named and isn't retried.
+const capped = reviewArgs({ claude: { ...claude, maxBudgetUsd: 50, maxTurns: 200 } }, '/plugin');
+assert.deepEqual(capped.slice(capped.indexOf('--max-budget-usd'), -3), ['--max-budget-usd', '50', '--max-turns', '200']);
+const overBudget = { status: 'running', reportPath: '/nowhere.md', caps: { maxBudgetUsd: 50 }, _result: { subtype: 'error_max_budget_usd', is_error: true, total_cost_usd: 50.4 } };
+finalize(overBudget);
+assert.equal(overBudget.status, 'failed');
+assert.equal(overBudget.error, 'stopped: spend cap $50');
+assert.equal(retryFailed(overBudget, 1), false, 'a capped review is not retried');
+assert.equal(retryFailed({ status: 'failed' }, 1), true, 'any other failure is retried once');
+assert.equal(retryFailed({ status: 'failed' }, 2), false);
+const overTime = { status: 'stopping', capped: 'time cap 90 min', reportPath: '/nowhere.md' };
+finalize(overTime);
+assert.equal(overTime.status, 'failed', 'stopped by the time limit, not by you');
+assert.equal(overTime.error, 'stopped: time cap 90 min');
+const byYou = { status: 'stopping', reportPath: '/nowhere.md' };
+finalize(byYou);
+assert.equal(byYou.status, 'stopped');
+const longRun = { status: 'running', startedAt: Date.now() - 91 * 60_000 };
+assert.ok(overdue(longRun, { reviewTimeoutMinutes: 90 }) && !overdue(longRun, { reviewTimeoutMinutes: 0 }) && !overdue(longRun, { reviewTimeoutMinutes: 120 }));
+assert.ok(!overdue({ ...longRun, status: 'stopping' }, { reviewTimeoutMinutes: 90 }), 'already stopping');
 
 // A session that ends cleanly but never wrote its report did not review anything: it must fail, not tag Reviewed.
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prowl-test-'));

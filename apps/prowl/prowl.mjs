@@ -245,9 +245,10 @@ async function finish(run) {
     hoot(`Done reviewing PRs for ${run.title}, marking as '${tags.done}'`, 'cheer');
   } else if (run.status === 'failed') {
     failures[run.ticket] = (failures[run.ticket] || 0) + 1;
-    const retry = failures[run.ticket] === 1; // one automatic retry, then wait for a human to re-tag
+    const retry = rv.retryFailed(run, failures[run.ticket]); // one automatic retry, then wait for a human to re-tag
     run.pendingTag = retry ? tags.trigger : '';
-    log('error', `${run.ticket}: review failed: ${run.error}. ${retry ? `Re-tagged '${tags.trigger}' to retry once.` : `Not retrying again; re-tag '${tags.trigger}' to try again.`}`);
+    const why = run.capped ? 'Not retried, as it hit a cap' : 'Not retrying again';
+    log('error', `${run.ticket}: review failed: ${run.error}. ${retry ? `Re-tagged '${tags.trigger}' to retry once.` : `${why}; re-tag '${tags.trigger}' to try again.`}`);
   } else {
     run.pendingTag = '';
     log('warn', `${run.ticket}: review stopped. Re-tag '${tags.trigger}' to run it again.`);
@@ -271,6 +272,14 @@ async function applyTag(run) {
   }
 }
 
+/** Stops a review that has run past the Review time limit. It then fails with the cap named, and isn't retried. */
+function stopOverdue(run) {
+  run.capped = `time cap ${app.cfg.reviewTimeoutMinutes} min`;
+  rv.stopReview(run);
+  rv.saveState(app.state);
+  log('warn', `${run.ticket}: stopping the review: it ran past the ${app.cfg.reviewTimeoutMinutes}-minute time limit`);
+}
+
 /** Once a second: tail running reviews, settle finished ones, retry tag writes, poll when due. */
 function tick() {
   for (const run of app.running()) {
@@ -280,6 +289,8 @@ function tick() {
       rv.readActivity(run); // pick up the last lines written before exit
       run._finishing = true;
       finish(run).catch(e => log('error', `${run.ticket}: ${e.message}`));
+    } else if (rv.overdue(run, app.cfg)) {
+      stopOverdue(run);
     } else if (app.me && !run._checking && Date.now() - (run._checkedAt || 0) > 60_000) {
       run._checking = true;
       checkPosted(run).finally(() => { run._checking = false; });
@@ -331,6 +342,7 @@ if (ONCE) {
   for (const run of app.running()) {
     rv.readActivity(run);
     if (run._result || !rv.alive(run)) await finish(run);
+    else if (rv.overdue(run, app.cfg)) stopOverdue(run); // settled by the next launch, once it has exited
   }
   await poll();
   process.exit(0);

@@ -68,6 +68,8 @@ export function startReview(cfg, pluginDir, { tracker, ticket, prs, approvedPrs 
     logPath: path.join(LOGS_DIR, `${id}.ndjson`),
     promptPath: path.join(LOGS_DIR, `${id}.prompt.md`),
   };
+  const { maxBudgetUsd, maxTurns } = cfg.claude;
+  if (maxBudgetUsd > 0 || maxTurns > 0) run.caps = { maxBudgetUsd, maxTurns }; // to name the cap if the session hits one
   let priorReport = '';
   if (prior) {
     try { priorReport = fs.readFileSync(prior.reportPath, 'utf8'); } catch { priorReport = '(the previous report file is missing)'; }
@@ -76,11 +78,7 @@ export function startReview(cfg, pluginDir, { tracker, ticket, prs, approvedPrs 
 
   const stdin = fs.openSync(run.promptPath, 'r');
   const log = fs.openSync(run.logPath, 'a');
-  const child = spawnCli('claude', [
-    '-p', '--plugin-dir', pluginDir, '--add-dir', REPORTS_DIR, '--add-dir', CONFIG_DIR,
-    '--model', cfg.claude.model, '--effort', cfg.claude.effort, '--permission-mode', cfg.claude.permissionMode,
-    '--output-format', 'stream-json', '--verbose',
-  ], {
+  const child = spawnCli('claude', reviewArgs(cfg, pluginDir), {
     cwd: cfg.workDir, detached: true, stdio: [stdin, log, log],
     // prowl-review runs its reviewers as background subagents and ends its turn while they work. `claude -p`
     // stops background tasks still running 10 minutes after the last turn, which kills a large batch's
@@ -99,6 +97,27 @@ export function startReview(cfg, pluginDir, { tracker, ticket, prs, approvedPrs 
   child.unref();
   return run;
 }
+
+/** The `claude` arguments for a review session. */
+export function reviewArgs(cfg, pluginDir) {
+  const { model, effort, permissionMode, maxBudgetUsd, maxTurns } = cfg.claude;
+  return [
+    '-p', '--plugin-dir', pluginDir, '--add-dir', REPORTS_DIR, '--add-dir', CONFIG_DIR,
+    '--model', model, '--effort', effort, '--permission-mode', permissionMode,
+    ...(maxBudgetUsd > 0 ? ['--max-budget-usd', String(maxBudgetUsd)] : []),
+    ...(maxTurns > 0 ? ['--max-turns', String(maxTurns)] : []),
+    '--output-format', 'stream-json', '--verbose',
+  ];
+}
+
+/** True once a running review has run past the Review time limit; it is then stopped, and fails with the cap named. */
+export const overdue = (run, cfg) => cfg.reviewTimeoutMinutes > 0 && run.status === 'running' && Date.now() - run.startedAt > cfg.reviewTimeoutMinutes * 60_000;
+
+/**
+ * Whether a failed review is retried automatically: once per ticket (`failures` counts this one), and never one
+ * stopped by a cap, so a runaway review isn't paid for twice.
+ */
+export const retryFailed = (run, failures) => !run.capped && failures === 1;
 
 export function stopReview(run) {
   run.status = 'stopping';
@@ -157,7 +176,11 @@ export function finalize(run) {
   run.costUsd = result?.total_cost_usd ?? null;
   const ok = result?.subtype === 'success' && !result.is_error;
   const stderr = run._activity?.filter(a => a.error).at(-1)?.text;
-  if (run.status === 'stopping') {
+  run.capped ??= { error_max_budget_usd: `spend cap $${run.caps?.maxBudgetUsd}`, error_max_turns: `turn cap ${run.caps?.maxTurns}` }[result?.subtype];
+  if (run.capped) {
+    run.status = 'failed';
+    run.error = `stopped: ${run.capped}`;
+  } else if (run.status === 'stopping') {
     run.status = 'stopped';
   } else if (ok && fs.existsSync(run.reportPath)) {
     run.status = 'done';
