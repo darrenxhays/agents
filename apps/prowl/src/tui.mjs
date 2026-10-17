@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { CONFIG_DIR, CONFIG_PATH } from './config.mjs';
+import { CHECKS_PATH, CONFIG_DIR, CONFIG_PATH } from './config.mjs';
 import { createMascot, wrap } from './mascot.mjs';
 import { openExternal } from './proc.mjs';
 import { awaitingHuman, isOwn } from './reviews.mjs';
@@ -19,6 +19,7 @@ const isDir = p => { try { return fs.statSync(p).isDirectory(); } catch { return
 const https = v => /^https:\/\/\S+$/.test(v) || 'must be an https:// URL';
 const ADO = c => c.taskBoard === 'ado';
 const JIRA = c => c.taskBoard === 'jira';
+const FIX = c => c.fix?.enabled;
 const opens = 'enter opens it. Updates never overwrite your edits.';
 const FIELDS = [
   // The user's config files: enter opens one in its default app.
@@ -60,9 +61,29 @@ const FIELDS = [
   { key: 'caffeinate', label: 'Keep Mac awake', type: 'bool', when: () => process.platform === 'darwin', help: "on: the Mac doesn't idle-sleep while a review runs (caffeinate), since sleep stalls a review and stretches it out. Closing the lid still sleeps it." },
   { key: 'logRetentionDays', label: 'Keep logs (days)', type: 'int', min: 0, max: 3650, help: 'Review logs older than this are deleted, and poller.log rolls over to poller.log.1 past 5 MB. Reports are always kept. 0 = keep everything.' },
   { key: 'ticketContext', label: 'Ticket text in reviews', type: 'bool', help: "on: the ticket's description (and, on Azure DevOps, its acceptance criteria) is added to the review's brief, so reviewers know the goal without signing in to the tracker. Up to about 6 KB." },
+  { key: 'fix.enabled', label: 'Fix my PRs', type: 'bool', help: "on: when a review asks for changes on your own PRs, Prowl fixes them, runs your checks, pushes, replies on the threads and re-tags for a re-review. With Review my own PRs off, Prowl never reviews your PRs, so rounds start only on tickets you watch (w in History)." },
+  { file: path.join(CONFIG_DIR, 'fix.md'), label: 'Fix rules', when: FIX, help: `How fix sessions work through findings and threads: what they fix, dispute or ask you. Applies from the next fix. ${opens}` },
+  { file: CHECKS_PATH, label: 'Checks before push', when: FIX, help: 'Commands run in the fix worktree before a push, per repo, e.g. { "my-org/*": { "run": ["npm test"] } }. Nothing matches: no checks. Never overwritten. enter opens it.' },
+  { key: 'fix.from', label: 'Fix comments from', type: 'enum', values: ['prowl', 'prowl+bots', 'everyone'], when: FIX, help: "Whose unresolved threads fix sessions take on: Prowl's own, Prowl's plus bots', or everyone's. enter cycles." },
+  { key: 'fix.maxRounds', label: 'Fix rounds per ticket', type: 'int', min: 1, max: 20, when: FIX, help: 'Fix-and-re-review rounds per ticket. Then the ticket goes to Needs you.' },
+  { key: 'fix.maxBudgetUsd', label: 'Spend cap per fix ($)', type: 'int', min: 0, max: 100000, when: FIX, help: "Stops a fix session once it has spent this much. It goes to Needs you and isn't retried. 0 = no cap." },
+  { key: 'fix.maxTurns', label: 'Turn cap per fix', type: 'int', min: 0, max: 100000, when: FIX, help: "Stops a fix session after this many turns. It goes to Needs you and isn't retried. 0 = no cap." },
+  { key: 'fix.timeoutMinutes', label: 'Fix time limit (min)', type: 'int', min: 0, max: 10080, when: FIX, help: "Stops a fix session that runs longer than this. It goes to Needs you and isn't retried. 0 = no limit." },
+  { key: 'fix.ticketBudgetUsd', label: 'Spend cap per ticket ($)', type: 'int', min: 0, max: 100000, when: FIX, help: 'Reviews plus fixes for one ticket, since its loop started. At the cap no new fix starts and the ticket goes to Needs you. 0 = no cap.' },
+  { key: 'fix.dailyBudgetUsd', label: 'Spend cap per day ($)', type: 'int', min: 0, max: 100000, when: FIX, help: 'Fix sessions since midnight. At the cap no new fix starts until tomorrow. 0 = no cap.' },
+  { key: 'fix.waitForChecksMinutes', label: 'Wait for CI (min)', type: 'int', min: 0, max: 1440, when: FIX, help: "After a push, how long to wait for the PR's required checks before re-tagging anyway. A failing check gets one more fix. 0 = re-tag at once." },
+  { key: 'fix.maxChangedLines', label: 'Max lines changed per round', type: 'int', min: 1, max: 1000000, when: FIX, help: 'A fix that changes more lines than this is not pushed; it goes to Needs you.' },
+  { key: 'fix.protectedPaths', label: 'Paths that need a person', type: 'list', when: FIX, help: 'Globs, e.g. .github/workflows/**. A fix that changes one is not pushed; it goes to Needs you. Edit them in the settings file: enter opens it.' },
+  { key: 'fix.protectedBranches', label: 'Branches never pushed', type: 'list', when: FIX, help: "Globs, e.g. release/*. Prowl never pushes to these, nor to a repo's default branch. Edit them in the settings file: enter opens it." },
+  { key: 'fix.maxConcurrent', label: 'Max parallel fixes', type: 'int', min: 1, max: 10, when: FIX, help: 'Fix sessions at once. Separate from Max parallel reviews.' },
+  { key: 'fix.model', label: 'Fix model', type: 'text', empty: true, when: FIX, help: 'Model for fix sessions. Empty: the review Model.' },
+  { key: 'fix.effort', label: 'Fix effort', type: 'enum', values: ['low', 'medium', 'high', 'xhigh', 'max'], when: FIX, help: 'Reasoning effort for fix sessions. enter cycles.' },
+  { key: 'fix.notify', label: 'Desktop notifications', type: 'bool', when: FIX, help: 'on: a desktop notification when a ticket is ready to merge or needs you.' },
   { key: 'dryRun', label: 'Dry run', type: 'bool', help: 'Log what would be reviewed without changing tags or starting reviews.' },
   { key: 'autoUpdate', label: 'Auto-update', type: 'bool', help: 'Install a newer Prowl release before launching. It waits while reviews from an earlier launch are still running.' },
 ];
+
+const LABEL_W = Math.max(...FIELDS.map(f => f.label?.length || 0)) + 2; // the Config view's label column
 
 // Control characters (ESC included) are stripped from everything shown: titles, PR text and agent output
 // come from other people, and raw escape sequences would let them drive this terminal. Wide characters
@@ -261,6 +282,8 @@ export function startTui(app, actions) {
     if (f.addBoard) return '';
     if (f.type === 'secret') return app.hasToken() ? 'saved ••••••••' : 'not set: enter to add';
     if (f.type === 'bool') return getPath(c, f.key) ? 'on' : 'off';
+    if (f.type === 'list') return plural(getPath(c, f.key)?.length || 0, 'pattern');
+    if (f.empty && !getPath(c, f.key)) return '(same as Model)';
     if (f.names) return f.names[getPath(c, f.key)] || String(getPath(c, f.key));
     return String(getPath(c, f.key));
   }
@@ -275,7 +298,7 @@ export function startTui(app, actions) {
       const value = e
         ? [[ST.yellow, v.slice(0, e.cursor)], [ST.cursor, v[e.cursor] || ' '], [ST.yellow, v.slice(e.cursor + 1)]]
         : f.file ? [[ST.link, f.file, pathToFileURL(f.file).href]] : [['', shown(f)]];
-      rows.push([cursor(i === sel), [f.addBoard ? ST.green : ST.grey, f.label.padEnd(24)], ...value]);
+      rows.push([cursor(i === sel), [f.addBoard ? ST.green : ST.grey, f.label.padEnd(LABEL_W)], ...value]);
     }
     rows.push([], ui.edit?.error ? [[ST.red, `  ${ui.edit.error}`]] : [[ST.grey, `  ${fields[sel].help}`]]);
     const variants = Object.entries(app.tagVariants).map(([p, v]) => `${p}: ${v.join(', ') || 'none yet'}`).join('  ·  ');
@@ -373,10 +396,11 @@ export function startTui(app, actions) {
       }, true);
     }
     const cur = getPath(c, f.key);
+    if (f.type === 'list') return openExternal(CONFIG_PATH);
     if (f.type === 'bool') { setPath(c, f.key, !cur); return saved(); }
     if (f.type === 'enum') { setPath(c, f.key, f.values[(f.values.indexOf(cur) + 1) % f.values.length]); return saved(); }
     return startEdit(String(cur), v => {
-      if (!v) return 'Cannot be empty';
+      if (!v && !f.empty) return 'Cannot be empty';
       if (f.type === 'int') {
         const n = Number(v);
         if (!Number.isInteger(n) || n < f.min || n > f.max) return `Enter a whole number from ${f.min} to ${f.max}`;

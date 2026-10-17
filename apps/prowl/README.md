@@ -111,6 +111,29 @@ Settings live in `~/.prowl/config.json`. The Config view (`3`) edits the same fi
 | `dryRun` | `false` | Log what would be reviewed without touching tags or starting reviews |
 | `autoUpdate` | `true` | Install a newer Prowl release before launching |
 
+### Fix my PRs
+
+Off by default. Turn on `fix.enabled` (Config, **Fix my PRs**) and, when a review asks for changes on PRs you authored, Prowl fixes them and sends the ticket back for a re-review, until it's ready to merge or needs you. See [Fix my PRs](#fix-my-prs-1) for how a round runs. Every `fix.*` row but the switch is hidden in the Config view while it's off.
+
+| Key | Config label | Default | Meaning |
+|---|---|---|---|
+| `fix.enabled` | Fix my PRs | `false` | The switch. With `reviewOwnPrs` off, your Prowl never reviews your PRs, so rounds start only on tickets you watch (`w` in History, or `prowl --watch <ticket>`) |
+| `fix.from` | Fix comments from | `everyone` | Whose unresolved review threads a fix takes on: `prowl` (threads carrying Prowl's marker), `prowl+bots` (plus bots such as Copilot), `everyone` (plus people) |
+| `fix.maxRounds` | Fix rounds per ticket | `3` | Fix-and-re-review rounds; then the ticket goes to Needs you. The review round cap (`maxReviewRounds`) also ends the loop |
+| `fix.maxBudgetUsd` | Spend cap per fix ($) | `25` | Per fix session (`--max-budget-usd`). `0` = no cap |
+| `fix.maxTurns` | Turn cap per fix | `0` | Per fix session (`--max-turns`). `0` = no cap |
+| `fix.timeoutMinutes` | Fix time limit (min) | `60` | Stops a fix session running longer than this. `0` = no limit. A session stopped by any cap goes to Needs you and isn't retried |
+| `fix.ticketBudgetUsd` | Spend cap per ticket ($) | `0` | Reviews plus fixes for a ticket since its loop started. `0` = no cap |
+| `fix.dailyBudgetUsd` | Spend cap per day ($) | `0` | Fix sessions since local midnight. `0` = no cap. At 70% of either cap, Prowl warns once |
+| `fix.waitForChecksMinutes` | Wait for CI (min) | `30` | After a push, how long to wait for the PR's required checks before re-tagging anyway. `0` = re-tag at once |
+| `fix.maxChangedLines` | Max lines changed per round | `1000` | A fix changing more lines than this isn't pushed |
+| `fix.protectedPaths` | Paths that need a person | `[".github/workflows/**"]` | Globs. A fix that changes one isn't pushed. Edited in `config.json`; Config shows the count |
+| `fix.protectedBranches` | Branches never pushed | `["main", "master", "release/*"]` | Globs, plus each repo's default branch. Edited in `config.json` |
+| `fix.maxConcurrent` | Max parallel fixes | `1` | Fix sessions at once, apart from `maxConcurrentReviews` |
+| `fix.model` | Fix model | `""` | Model for fix sessions; empty uses `claude.model` |
+| `fix.effort` | Fix effort | `medium` | Reasoning effort for fix sessions |
+| `fix.notify` | Desktop notifications | `false` | A notification when a ticket is ready to merge or needs you (macOS, Linux with `notify-send`, Windows) |
+
 **The Jira API token** is never in the config file. Create one at <https://id.atlassian.com/manage-profile/security/api-tokens> and give it to `prowl --setup` or the Config view. It is kept in the macOS Keychain, in a file encrypted with your Windows login, or in the Linux keyring (`secret-tool`). On a machine without a keyring (a server, WSL), set the `JIRA_API_TOKEN` environment variable instead.
 
 ## Review config
