@@ -133,7 +133,7 @@ export function updateNotes(appDir) {
   const added = fresh ? [] : newSettings();
   if (added.length) {
     saveConfig(loadConfig()); // writes the new settings with their defaults, so they are announced once
-    files.push({ text: `New setting${added.length > 1 ? 's' : ''}: ${added.join(', ')}. Change ${added.length > 1 ? 'them' : 'it'} in Config (3)`, path: CONFIG_PATH });
+    files.push({ text: `New setting${added.length > 1 ? 's' : ''}: ${added.join(', ')}. Change ${added.length > 1 ? 'them' : 'it'} in Config (4)`, path: CONFIG_PATH });
   }
   const versions = fresh ? [] : changelog(read(path.join(appDir, 'CHANGELOG.md')) || '')
     .filter(e => newer(e.version, seen?.version || '0') && !newer(e.version, version));

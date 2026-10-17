@@ -7,7 +7,7 @@ export const CONFIG_PATH = path.join(HOME, 'config.json');
 export const CONFIG_DIR = path.join(HOME, 'config'); // the user's copies of prowl-review's config files
 export const CHECKS_PATH = path.join(CONFIG_DIR, 'checks.json'); // the user's own checks to run before a fix is pushed
 
-// Every setting and its default. CONFIG_PATH overrides these; the Config view (3) edits that file.
+// Every setting and its default. CONFIG_PATH overrides these; the Config view (4) edits that file.
 const DEFAULTS = {
   taskBoard: 'ado', // 'ado' (Azure DevOps) or 'jira' (Jira Cloud): where tickets are watched
   ado: {

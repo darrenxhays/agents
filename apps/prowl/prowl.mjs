@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Prowl: polls Azure DevOps or Jira boards for tickets tagged for review and runs Claude Code's
 // prowl-review skill on their open GitHub PRs. See README.md. Run it from your projects folder:
-//   node /path/to/prowl.mjs [--setup] [--dry-run] [--once] [--self-test]
+//   node /path/to/prowl.mjs [--setup] [--dry-run] [--once] [--self-test] [--watch <ticket>]
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
@@ -12,6 +12,7 @@ if (Number(process.versions.node.split('.')[0]) < 18) {
   process.exit(1);
 }
 const args = new Set(process.argv.slice(2));
+const watchKey = process.argv[process.argv.indexOf('--watch') + 1] || ''; // with --watch: the ticket to watch for Fix my PRs
 if (args.has('--self-test')) {
   await import('./src/self-test.mjs');
   process.exit(0);
@@ -21,13 +22,14 @@ if (args.has('--setup')) {
   process.exit(await setup(process.argv.slice(2)));
 }
 
-const { HOME, loadConfig, saveConfig } = await import('./src/config.mjs');
+const { CHECKS_PATH, HOME, loadConfig, saveConfig, writeJson } = await import('./src/config.mjs');
 const TRACKERS = { ado: await import('./src/ado.mjs'), jira: await import('./src/jira.mjs') };
 const github = await import('./src/github.mjs');
 const secrets = await import('./src/secrets.mjs');
 const { norm, tagMatches } = await import('./src/match.mjs');
 const rv = await import('./src/reviews.mjs');
 const { isAlive } = await import('./src/proc.mjs');
+const { createFixer } = await import('./src/fixes.mjs');
 const update = await import('./src/update.mjs');
 
 const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url)); // this folder is also the plugin with prowl-review
@@ -91,22 +93,25 @@ function hoot(text, mood) {
 const ours = t => [app.cfg.tags.inProgress, app.cfg.tags.done].some(x => norm(x) === norm(t));
 const isTrigger = t => !ours(t) && tagMatches(t, app.cfg.tags.trigger, app.cfg.tagMatchMaxTypos);
 
+// Fix my PRs: plans fix rounds after reviews, and runs them from poll and tick.
+const fixer = createFixer(app, { log, hoot, applyTag, appDir: PLUGIN_DIR, trackers: TRACKERS });
+
 async function poll() {
   app.polling = true;
   app.lastError = '';
   try {
     try { app.cfg = loadConfig(); } catch (e) { log('error', `${e.message} (keeping the previous config)`, 'config'); }
-    const pruned = rv.tidyLogs(app.cfg.logRetentionDays, app.running()); // on launch, then once per poll
+    const pruned = rv.tidyLogs(app.cfg.logRetentionDays, [...app.running(), ...fixer.running()]); // on launch, then once per poll
     if (pruned) log('info', `Deleted ${pruned} review log file${pruned > 1 ? 's' : ''} older than ${app.cfg.logRetentionDays} days`);
     app.me ||= await github.me();
     const tracker = app.tracker();
     const boards = app.boards();
     if (!boards.length) {
-      if (log('warn', `No ${tracker.name} boards configured: add one in Config (3).`, 'boards')) hoot(`I have no ${tracker.name} boards to watch yet. Add one in Config (3).`);
+      if (log('warn', `No ${tracker.name} boards configured: add one in Config (4).`, 'boards')) hoot(`I have no ${tracker.name} boards to watch yet. Add one in Config (4).`);
       return undefined;
     }
     if (!app.cfg.githubOwner) {
-      if (log('warn', 'No GitHub org configured: set it in Config (3).', 'boards')) hoot('I need a GitHub org to search for PRs. Set it in Config (3).');
+      if (log('warn', 'No GitHub org configured: set it in Config (4).', 'boards')) hoot('I need a GitHub org to search for PRs. Set it in Config (4).');
       return undefined;
     }
     hoot(`Checking ${boards.length > 1 ? 'the boards' : 'the board'} for new review tasks...`);
@@ -134,6 +139,7 @@ async function poll() {
     for (const t of untagged) delete app.state.capped[t];
     if (untagged.length) rv.saveState(app.state);
     await checkHumanApprovals();
+    await fixer.poll();
   } catch (e) {
     app.lastError = e.message;
     log('error', e.message, 'poll');
@@ -149,6 +155,7 @@ async function consider(tracker, ticket) {
   const { cfg, state } = app;
   const key = `ticket:${ticket.key}`;
   if (app.running().some(r => r.ticket === ticket.key)) return; // re-tagged mid-review: re-reviewed once this one ends
+  if (fixer.busy(ticket.key)) return log('info', `${ticket.key}: waiting, Prowl is fixing its PRs`, key);
   if (app.running().length >= cfg.maxConcurrentReviews) {
     log('info', `${ticket.key}: waiting, ${cfg.maxConcurrentReviews} reviews already running`, key);
     return;
@@ -288,6 +295,7 @@ async function applyTag(run) {
     await TRACKERS[run.tracker].retag(app.cfg, run.ref, ours, run.pendingTag);
     run.pendingTag = null;
     rv.saveState(app.state);
+    if (run.status === 'done') fixer.afterReview(run); // once its done tag has landed
   } catch (e) {
     run._tagRetryAt = Date.now() + 60_000;
     log('error', `${run.ticket}: couldn't update the ticket's tags yet (${e.message}); retrying every minute`, `tag:${run.id}`);
@@ -320,7 +328,8 @@ function tick() {
       checkPosted(run).finally(() => { run._checking = false; });
     }
   }
-  for (const run of app.state.runs) {
+  fixer.tick();
+  for (const run of [...app.state.runs, ...Object.values(app.state.loops || {})]) { // a fix loop re-tags its ticket too
     const ended = run.status !== 'running' && run.status !== 'stopping';
     if (ended && run.pendingTag != null && !run._tagging && Date.now() >= (run._tagRetryAt || 0)) applyTag(run);
   }
@@ -355,6 +364,22 @@ if (app.cfg.autoUpdate && !process.env.PROWL_UPDATED) {
 fs.writeFileSync(LOCK, String(process.pid));
 process.on('exit', () => { try { if (Number(fs.readFileSync(LOCK, 'utf8')) === process.pid) fs.unlinkSync(LOCK); } catch { /* gone */ } });
 
+if (args.has('--watch')) {
+  // Fix my PRs only: rounds then also start for this ticket's reviews done by anyone. w in History does the same.
+  if (!app.cfg.fix.enabled) {
+    console.error('--watch is for Fix my PRs: turn it on in Config (4) first.');
+    process.exit(1);
+  }
+  try {
+    const t = await app.tracker().lookup(app.cfg, watchKey);
+    fixer.watch({ ticket: t.key, tracker: app.cfg.taskBoard, ref: t.ref, title: t.title, ticketUrl: t.url });
+    console.log(`Watching ${t.key} "${t.title}" for Fix my PRs.`);
+  } catch (e) {
+    console.error(`Couldn't watch ${watchKey || '(no ticket given)'}: ${e.message}`);
+    process.exit(1);
+  }
+}
+
 try {
   app.notes = update.updateNotes(PLUGIN_DIR); // shown once, on the first launch after an update
 } catch (e) {
@@ -386,8 +411,21 @@ const { startTui } = await import('./src/tui.mjs');
 tui = startTui(app, {
   pollNow: () => { app.nextPoll = 0; },
   togglePause: () => { app.paused = !app.paused; },
-  stop: run => { rv.stopReview(run); rv.saveState(app.state); log('warn', `${run.ticket}: stopping the review`); },
-  saveConfig: () => saveConfig(app.cfg),
+  stop: run => {
+    if (run.pr) return fixer.stop(run); // a fix session
+    rv.stopReview(run);
+    rv.saveState(app.state);
+    return log('warn', `${run.ticket}: stopping the review`);
+  },
+  watch: run => (fixer.watch({ ticket: run.ticket, tracker: run.tracker, ref: run.ref, title: run.title, ticketUrl: run.ticketUrl })),
+  answer: (item, text) => fixer.answer(item, text),
+  skip: item => fixer.skip(item),
+  takeOver: ticket => fixer.takeOver(ticket),
+  fixing: () => fixer.running(),
+  saveConfig: () => {
+    saveConfig(app.cfg);
+    if (app.cfg.fix.enabled && !fs.existsSync(CHECKS_PATH)) writeJson(CHECKS_PATH, {}); // the Checks before push file to fill in
+  },
   saveToken: token => {
     try { secrets.saveToken(app.cfg.jira.email, token); } catch (e) { return e.message; }
     app._tokenFor = null;

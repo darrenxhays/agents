@@ -15,6 +15,8 @@ import { createMascot, wrap } from './mascot.mjs';
 import { changelog, newer, syncConfigFiles } from './update.mjs';
 import { DISALLOWED, fenceDecision, fenceSettings } from './fence.mjs';
 import { checksState, detailsFromBodies, threadsFrom } from './github.mjs';
+import { actionable, buildBrief, daySpend, fill, fixArgs, fixEnv, globRe, guardFailures, matchChecks, needItem, parkedUrls, pastAnswers, refusal,
+  repliesToPost, runChecks, runCommand, SECRET_PATTERNS, spendLevel, stripParked, template, ticketSpend, validateResult, wantsRound } from './fixes.mjs';
 
 const T = 'Ready for Review';
 for (const t of ['Ready for Review', 'ready for review', 'Ready-For-Review', 'READY  FOR REVIEW', 'ReadyForReview', 'Ready for Reveiw', 'Redy for Review', 'Ready fro Reviw']) {
@@ -313,5 +315,131 @@ assert.equal(checksState([]), 'green', 'no required checks');
 assert.equal(checksState([{ bucket: 'pass' }, { bucket: 'skipping' }]), 'green');
 assert.equal(checksState([{ bucket: 'pass' }, { bucket: 'pending' }]), 'pending');
 assert.equal(checksState([{ bucket: 'pending' }, { bucket: 'fail' }]), 'failing');
+
+// Fix my PRs. Off by default: no setting changes the review prompt, and the details-file line appears only when on.
+assert.equal(buildPrompt({ ...promptCases.first, detailsDir: '' }), fixture('first.prompt.md'), 'Fix my PRs off: the 2.7.0 prompt');
+assert.ok(buildPrompt({ ...promptCases.first, detailsDir: '/home/.prowl/reports/AB42-r1' }).includes(`Also copy each PR's details file (\`details/<repo>-<n>.md\` in your run folder) to /home/.prowl/reports/AB42-r1${path.sep}<repo>-<n>.md`));
+
+// Round planning: which threads a round takes on, by Fix comments from, and whether a PR needs a round at all.
+const parked = parkedUrls(details);
+assert.deepEqual(parked, ['https://github.com/acme/api/pull/12#discussion_r1005']);
+const ids = (from, p = []) => actionable(threads, from, p).map(t => t.id);
+assert.deepEqual(ids('prowl'), ['PRRT_owl1', 'PRRT_parked1'], "Prowl's own threads; never resolved ones, nor one Prowl answered last");
+assert.deepEqual(ids('prowl+bots'), ['PRRT_owl1', 'PRRT_bot1', 'PRRT_parked1']);
+assert.deepEqual(ids('everyone', parked), ['PRRT_owl1', 'PRRT_bot1', 'PRRT_person1'], 'everyone, less the parked finding');
+assert.ok(wantsRound({ approved: false }), 'the review asked for changes');
+assert.ok(wantsRound({ approved: true, threads: actionable(threads, 'prowl+bots') }), 'approved, but a bot thread is open');
+assert.ok(!wantsRound({ approved: true, threads: [] }) && !wantsRound({}), 'approved, nothing open: no round');
+assert.ok(wantsRound({ reviewDecision: 'CHANGES_REQUESTED' }), "a teammate's review asked for changes (watched ticket)");
+assert.ok(!stripParked(details).includes('## Parked') && stripParked(details).includes('### F-01'));
+// Refusals: only the user's own PR, never a fork or a protected branch.
+const facts = { author: 'me', fork: false, headBranch: 'feature/save', defaultBranch: 'develop' };
+const pr12 = { url: 'https://github.com/acme/api/pull/12', repo: 'acme/api', number: 12, title: 'Add saving', author: 'me' };
+assert.equal(refusal(facts, pr12, 'Me', ['main', 'release/*']), '');
+assert.match(refusal({ ...facts, author: 'lead' }, pr12, 'me', []), /isn't yours/);
+assert.match(refusal({ ...facts, fork: true }, pr12, 'me', []), /fork/);
+assert.match(refusal({ ...facts, headBranch: 'develop' }, pr12, 'me', []), /default branch/);
+assert.match(refusal({ ...facts, headBranch: 'release/2.1' }, pr12, 'me', ['release/*']), /Branches never pushed/);
+assert.ok(globRe('.github/workflows/**').test('.github/workflows/ci.yml') && globRe('**/secrets.json').test('secrets.json') && globRe('**/secrets.json').test('a/b/secrets.json'));
+assert.ok(!globRe('**/secrets.json').test('mysecrets.json') && !globRe('release/*').test('release/a/b'));
+
+// The brief: the details file, the threads, past answers, the round and the commit it starts from.
+const answersLog = [{ ts: '2026-09-01T10:00:00Z', ticket: 'AB#7', repo: 'acme/api', question: 'Should save await the first write before the second?', answer: 'Yes, always await.' },
+  { ts: '2026-09-02T10:00:00Z', ticket: 'AB#8', repo: 'acme/web', question: 'Should save await the first write?', answer: 'n/a' },
+  { ts: '2026-09-03T10:00:00Z', ticket: 'AB#9', repo: 'acme/api', question: 'Which colour is the button?', answer: 'Blue.' }];
+const past = pastAnswers(answersLog, `${details} ${threads.map(t => t.body).join(' ')}`, 'acme/api');
+assert.deepEqual(past.map(a => a.ticket), ['AB#7'], 'same repo, shared keywords only');
+const brief = buildBrief({ pr: pr12, ticket: { key: 'AB#42', title: 'Saving', url: 'https://dev.azure.com/o/p/_workitems/edit/42' }, round: 2, maxRounds: 3,
+  startSha: 'abc1234def', headBranch: 'feature/save', details: stripParked(details), threads: actionable(threads, 'everyone', parked), answers: past });
+assert.ok(brief.startsWith('# Fix brief: acme/api#12, round 2\n') && brief.includes('at its head, abc1234def (detached)') && brief.includes('Round 2 of at most 3.'));
+assert.ok(brief.includes('<details-file>\n# PR-Owl Review: acme/api#12') && !brief.includes('## Parked'));
+assert.ok(brief.includes('### Thread PRRT_bot1') && brief.includes('- Author: @copilot-pull-request-reviewer (bot)') && brief.includes('- Where: src/load.js:7') && brief.includes('> Consider handling a null response here.'));
+assert.ok(!brief.includes('PRRT_done1') && !brief.includes('<!-- prowl-review'), 'no resolved threads; markers stripped');
+assert.ok(brief.includes('A: Yes, always await.') && !brief.includes('Which colour'));
+assert.ok(buildBrief({ pr: pr12, ticket: { key: 'AB#42' }, round: 1, maxRounds: 3, startSha: 'a', headBranch: 'b', details: '', threads: [], answers: [] }).includes('No details file was found'));
+
+// The fix session's arguments and environment.
+const fixCfg = { claude: { ...claude, model: 'review-model', permissionMode: 'auto' }, fix: { model: '', effort: 'medium', maxBudgetUsd: 25, maxTurns: 0 }, allowMemoryWrites: true };
+const fa = fixArgs(fixCfg, '/app', '/b', '/b/settings.json', 'uuid-1');
+assert.deepEqual(fa.slice(0, 15), ['-p', '--plugin-dir', '/app', '--add-dir', '/b', '--add-dir', CONFIG_DIR, '--model', 'review-model', '--effort', 'medium', '--permission-mode', 'auto', '--session-id', 'uuid-1']);
+assert.deepEqual(fa.slice(15, 17), ['--max-budget-usd', '25']);
+assert.ok(!fa.includes('--max-turns') && fa.includes('Bash(git push *)') && fa[fa.indexOf('--settings') + 1] === '/b/settings.json' && fa.at(-1) === '--verbose');
+assert.ok(fixArgs({ ...fixCfg, fix: { ...fixCfg.fix, model: 'fix-model', maxTurns: 40 } }, '/app', '/b', '/s', 'u', true).join(' ').includes('--model fix-model --effort medium --permission-mode auto --resume u --max-budget-usd 25 --max-turns 40'));
+assert.deepEqual(fixEnv(fixCfg, ['/wt', '/b'], { PATH: '/bin' }), { PATH: '/bin', CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: '3600000', PROWL_SESSION: 'fix', PROWL_FIX_ROOTS: ['/wt', '/b'].join(path.delimiter) });
+
+// result.json: every status, and what makes one invalid (an ask without a Searched line is retried once).
+const fixedResult = JSON.parse(fixFixture('result-fixed.json'));
+assert.equal(validateResult(fixedResult), '');
+assert.equal(validateResult(JSON.parse(fixFixture('result-partial.json'))), '');
+assert.match(validateResult(JSON.parse(fixFixture('result-blocked.json'))), /has no Searched line/);
+assert.match(validateResult({ ...fixedResult, status: 'done' }), /status/);
+assert.match(validateResult({ ...fixedResult, items: [{ action: 'fixit' }] }), /no action/);
+assert.match(validateResult({ ...fixedResult, items: [{ thread: 'x', action: 'ask' }], questions: [] }), /ask item has no question/);
+assert.match(validateResult({ ...fixedResult, commit: 'not a sha' }), /commit/);
+assert.match(validateResult([]), /not a JSON object/);
+
+// Replies: one per thread fixed (once pushed) or disputed, and none already posted, by its marker.
+const fixRec = { ticket: 'AB#42', round: 2, pushedSha: '3f2a1c9d0e', result: fixedResult, threads: actionable(threads, 'everyone', parked).map(t => ({ id: t.id, commentId: t.commentId })) };
+const todo = repliesToPost(fixRec, []);
+assert.deepEqual(todo.map(r => [r.thread, r.what, r.commentId]), [['PRRT_owl1', 'fixed', 1001], ['PRRT_bot1', 'fixed', 1002], ['PRRT_person1', 'disputed', 1003]]);
+assert.equal(todo[0].marker, '<!-- prowl-fix AB#42 r2 PRRT_owl1 fixed -->');
+assert.deepEqual(repliesToPost(fixRec, [`Fixed in 3f2a1c9\n${todo[0].marker}`, `x\n${todo[2].marker}`]).map(r => r.thread), ['PRRT_bot1'], 'a restart posts nothing twice');
+assert.deepEqual(repliesToPost({ ...fixRec, pushedSha: null }, []).map(r => r.what), ['disputed'], "nothing pushed: no 'fixed' replies");
+const outputMd = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'skills', 'prowl-review', 'config', 'output.md'), 'utf8');
+assert.equal(fill(template(outputMd, 'Fix reply'), { 'comment prefix': template(outputMd, 'Comment prefix'), sha: '3f2a1c9', note: 'save() awaits.' }), '🦉 **PR-Owl Review** · Fixed in 3f2a1c9: save() awaits.');
+assert.equal(template('# x\n\n## Fix reply\n\nno fence\n\n## Next\n```\nnot this\n```\n', 'Fix reply'), null, 'a section without a template');
+assert.equal(template('', 'Fix reply'), null);
+// Prowl never resolves a thread: the only GraphQL its fix code sends is the threads query.
+for (const f of ['github.mjs', 'fixes.mjs', 'fence.mjs']) {
+  const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), f), 'utf8');
+  assert.ok(!/resolveReviewThread|mutation\s*[({]/.test(src), `${f} builds no GraphQL mutation`);
+}
+
+// Checks before push: the first matching repo glob, setup then run, the output tail, and the timeout.
+const checksCfg = JSON.parse(fixFixture('checks.json'));
+assert.deepEqual(matchChecks(checksCfg, 'acme/web').run, ['make test'], 'first match wins');
+assert.equal(matchChecks(checksCfg, 'ACME/api').timeoutMinutes, 1, 'owner/* wildcard, any case');
+assert.ok(matchChecks(checksCfg, 'other/thing').run[0].includes('boom'));
+assert.equal(matchChecks({}, 'acme/api'), null, 'nothing matches: no checks');
+const checkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'prowl-test-'));
+assert.deepEqual(await runChecks(matchChecks(checksCfg, 'acme/api'), checkDir), { ok: true }, 'setup ran before run, in the worktree');
+const failedCheck = await runChecks(matchChecks(checksCfg, 'other/x'), checkDir);
+assert.ok(!failedCheck.ok && failedCheck.tail.includes('lint ok') && failedCheck.tail.includes('boom'), 'a failure keeps the output tail');
+const slow = await runCommand('node -e "setTimeout(() => {}, 10000)"', checkDir, {}, 300);
+assert.ok(!slow.ok && slow.timedOut, 'a check past its timeout is stopped');
+fs.rmSync(checkDir, { recursive: true });
+
+// Guards before a push.
+const okGuard = { base: 'aaa1111', head: 'bbb2222', ancestor: true, remote: 'aaa1111', numstat: '10\t2\tsrc/save.js\n-\t-\tlogo.png\n', diff: '+++ b/src/save.js\n+await save(a);\n' };
+const limits = { maxChangedLines: 1000, protectedPaths: ['.github/workflows/**'] };
+assert.deepEqual(guardFailures(okGuard, limits), []);
+assert.deepEqual(guardFailures({ ...okGuard, remote: 'ccc3333' }, limits).map(g => g.kind), ['moved'], 'the remote moved: drop the round');
+assert.match(guardFailures({ ...okGuard, ancestor: false }, limits)[0].text, /history was rewritten/);
+assert.match(guardFailures({ ...okGuard, head: 'aaa1111' }, limits)[0].text, /no new commit/);
+assert.match(guardFailures({ ...okGuard, numstat: '900\t200\tsrc/big.js' }, limits)[0].text, /1100 lines/);
+assert.match(guardFailures({ ...okGuard, numstat: '1\t0\t.github/workflows/ci.yml' }, limits)[0].text, /\.github\/workflows\/ci\.yml/);
+assert.match(guardFailures({ ...okGuard, numstat: '1\t0\t{src => .github/workflows}/ci.yml' }, limits)[0].text, /Paths that need a person/, 'a rename into a protected path');
+for (const [line, what] of [['-----BEGIN RSA PRIVATE KEY-----', 'a private key'], ['key = "AKIAABCDEFGHIJKLMNOP"', 'an AWS access key'],
+  [`token: ghp_${'a'.repeat(36)}`, 'a GitHub token'], ['password = "hunter22"', 'a password or secret'], ['DB_PASSWORD=s3cretvalue', 'a password or secret']]) {
+  assert.match(guardFailures({ ...okGuard, diff: `+${line}\n` }, limits)[0].text, new RegExp(what), `secret scan: ${what}`);
+}
+for (const line of ['password = getPassword()', 'const secret = process.env.SECRET', 'PASSWORD=${DB_PASSWORD}', '-password = "removed"']) {
+  assert.deepEqual(guardFailures({ ...okGuard, diff: `+${line}\n`.replace('+-', '-') }, limits), [], `not a secret: ${line}`);
+}
+assert.ok(SECRET_PATTERNS.length >= 10);
+
+// Spend: reviews plus fixes per ticket since its loop started, fixes per day, and the 70% warning.
+const now = Date.now();
+const spendState = { runs: [{ ticket: 'AB#42', startedAt: now - 1000, costUsd: 4 }, { ticket: 'AB#42', startedAt: now - 99e6, costUsd: 50 }, { ticket: 'AB#9', startedAt: now, costUsd: 7 }],
+  fixes: [{ ticket: 'AB#42', createdAt: now - 500, startedAt: now - 500, costUsd: 3.5 }, { ticket: 'AB#9', createdAt: now, startedAt: now, costUsd: 1 }, { ticket: 'AB#1', createdAt: 0, startedAt: 0, costUsd: 9 }] };
+assert.equal(ticketSpend(spendState, 'AB#42', now - 5000), 7.5, 'since the loop started only');
+assert.equal(daySpend(spendState, now), 4.5, 'fix sessions since midnight');
+assert.deepEqual([spendLevel(6, 10), spendLevel(7, 10), spendLevel(10, 10), spendLevel(1e6, 0)], ['', 'warn', 'over', ''], '70% warns; 0 = no cap');
+
+// Needs-you items, for each stop reason.
+for (const kind of ['question', 'cap', 'checks', 'guard', 'conflict', 'failed']) {
+  const item = needItem(kind, { ticket: 'AB#42', pr: pr12.url, question: `${kind}?`, context: ['a', 'b', 'c', 'd'] });
+  assert.ok(item.id.startsWith('AB#42:') && item.kind === kind && item.context.length === 3 && Array.isArray(item.options));
+}
 
 console.log('self-test passed');

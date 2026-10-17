@@ -1,0 +1,8 @@
+{
+  "status": "blocked",
+  "commit": "",
+  "summary": "Nothing could be fixed without an answer.",
+  "items": [{ "thread": "PRRT_person1", "finding": "", "action": "ask", "note": "Question 1." }],
+  "questions": [{ "text": "Which name should the API use?", "context": "", "options": [], "recommended": "", "searched": "" }],
+  "testsRun": []
+}

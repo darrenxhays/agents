@@ -1,0 +1,5 @@
+{
+  "acme/web": { "run": ["make test"] },
+  "acme/*": { "setup": ["node -e \"require('fs').writeFileSync('setup-ran', 'x')\""], "run": ["node -e \"process.exit(require('fs').existsSync('setup-ran') ? 0 : 1)\""], "timeoutMinutes": 1 },
+  "*": { "run": ["node -e \"console.log('lint ok'); console.error('boom'); process.exit(3)\""] }
+}

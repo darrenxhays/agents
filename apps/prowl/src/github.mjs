@@ -117,6 +117,12 @@ export async function detailsFromGitHub(pr) {
   return detailsFromBodies(reviews, comments, `${pr.repo.split('/')[1]}-${pr.number}`);
 }
 
+/** When the PR's latest review was submitted (ms; 0 if none), leaving out bare thread replies, which GitHub also files as reviews. */
+export async function lastReviewAt(pr) {
+  const out = await run('gh', ['api', `repos/${pr.repo}/pulls/${pr.number}/reviews`, '--paginate', '--jq', '.[] | select(.body != "" or .state != "COMMENTED") | .submitted_at']);
+  return Math.max(0, ...out.split('\n').filter(Boolean).map(Date.parse).filter(Number.isFinite));
+}
+
 /** The bodies of every review comment on the PR (thread comments and replies). */
 export async function prCommentBodies(pr) {
   return jsonLines(await run('gh', ['api', `repos/${pr.repo}/pulls/${pr.number}/comments`, '--paginate', '--jq', '.[] | {body}'])).map(c => c.body || '');

@@ -80,7 +80,9 @@ export function startReview(cfg, pluginDir, { tracker, ticket, prs, approvedPrs 
   if (prior) {
     try { priorReport = fs.readFileSync(prior.reportPath, 'utf8'); } catch { priorReport = '(the previous report file is missing)'; }
   }
-  fs.writeFileSync(run.promptPath, buildPrompt({ ...run, prior, priorReport, approvals: cfg.approvals, reReviewScope: cfg.reReviewScope, heads, parkHumanOnly: cfg.parkHumanOnly, ticketText }));
+  // Fix my PRs briefs each fix session with its PR's details file, copied here by the review.
+  const detailsDir = cfg.fix?.enabled ? detailsDirOf(run) : '';
+  fs.writeFileSync(run.promptPath, buildPrompt({ ...run, prior, priorReport, approvals: cfg.approvals, reReviewScope: cfg.reReviewScope, heads, parkHumanOnly: cfg.parkHumanOnly, ticketText, detailsDir }));
 
   const stdin = fs.openSync(run.promptPath, 'r');
   const log = fs.openSync(run.logPath, 'a');
@@ -89,14 +91,22 @@ export function startReview(cfg, pluginDir, { tracker, ticket, prs, approvedPrs 
   });
   fs.closeSync(stdin);
   fs.closeSync(log);
+  track(run, child, cfg);
+  return run;
+}
+
+/** Follows a detached session this process spawned for `run` (a review or a fix), so alive() knows when it exits. */
+export function track(run, child, cfg) {
   run.pid = child.pid;
   run._spawned = true;
   if (cfg.caffeinate) keepAwake(child.pid); // a sleeping Mac stalls the session's streams and stretches the review
   child.on('error', e => { run.spawnError = e.message; exited.add(child.pid); });
   child.on('exit', () => exited.add(child.pid));
   child.unref();
-  return run;
 }
+
+/** Where a review copies each PR's details file, as <repo name>-<n>.md, for Fix my PRs. */
+export const detailsDirOf = run => path.join(REPORTS_DIR, run.id);
 
 /** The `claude` arguments for a review session. */
 export function reviewArgs(cfg, pluginDir) {
@@ -243,7 +253,7 @@ export function finalize(run) {
 }
 
 /** The prompt (the agent's brief): the PR list for prowl-review, the ticket, the re-review brief and the report spec. */
-export function buildPrompt({ ticket, title, ticketUrl, prs, contextPrs = [], reviewNo, reportPath, prior, priorReport, approvals = true, reReviewScope = 'full', heads = {}, parkHumanOnly = false, ticketText = '' }) {
+export function buildPrompt({ ticket, title, ticketUrl, prs, contextPrs = [], reviewNo, reportPath, prior, priorReport, approvals = true, reReviewScope = 'full', heads = {}, parkHumanOnly = false, ticketText = '', detailsDir = '' }) {
   const lines = [
     `/prowl:prowl-review ${[...prs, ...contextPrs].map(p => p.url).join(' ')}`,
     '',
@@ -265,6 +275,7 @@ export function buildPrompt({ ticket, title, ticketUrl, prs, contextPrs = [], re
   if (prior && reReviewScope === 'delta' && prior.reviewedHeads) lines.push('', ...deltaBrief(prior, priorReport, prs, heads, steps));
   else if (prior) lines.push('', ...reReviewBrief(prior, priorReport, steps));
   lines.push('', ...reportSpec(ticket, reviewNo, reportPath, Boolean(prior)));
+  if (detailsDir) lines.push(`Also copy each PR's details file (\`details/<repo>-<n>.md\` in your run folder) to ${detailsDir}${path.sep}<repo>-<n>.md, where <repo> is the repository's name without its owner: Prowl's Fix my PRs works from it.`);
   return `${lines.join('\n')}\n`;
 }
 

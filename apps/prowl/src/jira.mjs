@@ -10,7 +10,7 @@ const boardIds = new Map(); // board name -> id
 const siteOf = cfg => cfg.jira.site.replace(/\/+$/, '');
 
 async function api(cfg, route, { method = 'GET', body } = {}) {
-  if (!/^https:\/\/\S+$/.test(cfg.jira.site) || !cfg.jira.email) throw new Error('Jira is not set up: run prowl --setup, or fill in the Jira site and email in Config (3)');
+  if (!/^https:\/\/\S+$/.test(cfg.jira.site) || !cfg.jira.email) throw new Error('Jira is not set up: run prowl --setup, or fill in the Jira site and email in Config (4)');
   if (tokenFor !== cfg.jira.email) forgetToken();
   tokenFor = cfg.jira.email;
   token ||= readToken(cfg.jira.email);
@@ -109,6 +109,12 @@ export function claimEntry(histories, removed) {
     const to = new Set((it.toString || '').split(' '));
     return from.some(l => gone.has(l) && !to.has(l));
   })).at(-1) || null;
+}
+
+/** The issue for a key (PROJ-123), for prowl --watch. */
+export async function lookup(cfg, key) {
+  const issue = await api(cfg, `/rest/api/3/issue/${enc(key)}?fields=summary`);
+  return { key: issue.key, title: issue.fields.summary || '', url: ticketUrl(cfg, issue.key), ref: { site: siteOf(cfg), key: issue.key } };
 }
 
 /** Swaps the trigger label for the in-progress one; throws if another poller claimed the ticket first. */
