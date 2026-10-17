@@ -1,0 +1,13 @@
+{
+  "status": "fixed",
+  "commit": "3f2a1c9d0e",
+  "summary": "Awaited the first save and handled a null response.",
+  "items": [
+    { "thread": "PRRT_owl1", "finding": "F-01", "action": "fix", "note": "save() now awaits the first write before the second." },
+    { "thread": "PRRT_bot1", "finding": "", "action": "fix", "note": "load() returns [] on a null response." },
+    { "thread": "PRRT_person1", "finding": "", "action": "dispute", "note": "save is the name the ticket uses (AB#42), and src/api.js:12 exports it." },
+    { "thread": "", "finding": "F-02", "action": "parked", "note": "Listed under Parked." }
+  ],
+  "questions": [],
+  "testsRun": ["npm test (pass)"]
+}

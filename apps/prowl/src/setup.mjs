@@ -156,7 +156,7 @@ async function firstBoard(cfg) {
   const boards = cfg[name].boards;
   step('Boards');
   if (boards.length) {
-    ok(`watching ${boards.map(tracker.boardLabel).join(', ')}. Add more in Config (3).`);
+    ok(`watching ${boards.map(tracker.boardLabel).join(', ')}. Add more in Config (4).`);
     return;
   }
   for (;;) {

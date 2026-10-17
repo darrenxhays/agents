@@ -70,10 +70,12 @@ On Windows, use Windows Terminal. Reviews run in the **Projects Directory** from
 
 | Key | Action |
 |---|---|
-| `←` `→`, `1`–`4`, `tab` | Running · History · Config · Log |
+| `←` `→`, `1`–`5`, `tab` | Running · History · Needs you · Config · Log |
 | `↑` `↓` | Select |
-| `s` | Stop the selected review (Running) |
-| `enter` | Open the report (History) · edit a setting or open a config file (Config) |
+| `s` | Stop the selected review or fix session (Running) · skip the selected item (Needs you) |
+| `enter` | Open the report or fix brief (History) · answer the selected item (Needs you) · edit a setting or open a config file (Config) |
+| `w` | Watch the selected ticket for Fix my PRs, or stop watching it (History) |
+| `t` | Take the selected item's ticket over: Prowl stops fixing it (Needs you) |
 | `o` / `a` | Open the PRs / the ticket in the browser |
 | `a` / `d` | Add / delete a board (Config) |
 | `r` | Poll now |
@@ -82,7 +84,7 @@ On Windows, use Windows Terminal. Reviews run in the **Projects Directory** from
 
 ## Config
 
-Settings live in `~/.prowl/config.json`. The Config view (`3`) edits the same file, and changes apply from the next poll.
+Settings live in `~/.prowl/config.json`. The Config view (`4`) edits the same file, and changes apply from the next poll.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -111,17 +113,72 @@ Settings live in `~/.prowl/config.json`. The Config view (`3`) edits the same fi
 | `dryRun` | `false` | Log what would be reviewed without touching tags or starting reviews |
 | `autoUpdate` | `true` | Install a newer Prowl release before launching |
 
+### Fix my PRs
+
+Off by default. Turn on `fix.enabled` (Config, **Fix my PRs**) and, when a review asks for changes on PRs you authored, Prowl fixes them and sends the ticket back for a re-review, until it's ready to merge or needs you. See [Fix my PRs](#fix-my-prs-1) for how a round runs. Every `fix.*` row but the switch is hidden in the Config view while it's off.
+
+| Key | Config label | Default | Meaning |
+|---|---|---|---|
+| `fix.enabled` | Fix my PRs | `false` | The switch. With `reviewOwnPrs` off, your Prowl never reviews your PRs, so rounds start only on tickets you watch (`w` in History, or `prowl --watch <ticket>`) |
+| `fix.from` | Fix comments from | `everyone` | Whose unresolved review threads a fix takes on: `prowl` (threads carrying Prowl's marker), `prowl+bots` (plus bots such as Copilot), `everyone` (plus people) |
+| `fix.maxRounds` | Fix rounds per ticket | `3` | Fix-and-re-review rounds; then the ticket goes to Needs you. The review round cap (`maxReviewRounds`) also ends the loop |
+| `fix.maxBudgetUsd` | Spend cap per fix ($) | `25` | Per fix session (`--max-budget-usd`). `0` = no cap |
+| `fix.maxTurns` | Turn cap per fix | `0` | Per fix session (`--max-turns`). `0` = no cap |
+| `fix.timeoutMinutes` | Fix time limit (min) | `60` | Stops a fix session running longer than this. `0` = no limit. A session stopped by any cap goes to Needs you and isn't retried |
+| `fix.ticketBudgetUsd` | Spend cap per ticket ($) | `0` | Reviews plus fixes for a ticket since its loop started. `0` = no cap |
+| `fix.dailyBudgetUsd` | Spend cap per day ($) | `0` | Fix sessions since local midnight. `0` = no cap. At 70% of either cap, Prowl warns once |
+| `fix.waitForChecksMinutes` | Wait for CI (min) | `30` | After a push, how long to wait for the PR's required checks before re-tagging anyway. `0` = re-tag at once |
+| `fix.maxChangedLines` | Max lines changed per round | `1000` | A fix changing more lines than this isn't pushed |
+| `fix.protectedPaths` | Paths that need a person | `[".github/workflows/**"]` | Globs. A fix that changes one isn't pushed. Edited in `config.json`; Config shows the count |
+| `fix.protectedBranches` | Branches never pushed | `["main", "master", "release/*"]` | Globs, plus each repo's default branch. Edited in `config.json` |
+| `fix.maxConcurrent` | Max parallel fixes | `1` | Fix sessions at once, apart from `maxConcurrentReviews` |
+| `fix.model` | Fix model | `""` | Model for fix sessions; empty uses `claude.model` |
+| `fix.effort` | Fix effort | `medium` | Reasoning effort for fix sessions |
+| `fix.notify` | Desktop notifications | `false` | A notification when a ticket is ready to merge or needs you (macOS, Linux with `notify-send`, Windows) |
+
 **The Jira API token** is never in the config file. Create one at <https://id.atlassian.com/manage-profile/security/api-tokens> and give it to `prowl --setup` or the Config view. It is kept in the macOS Keychain, in a file encrypted with your Windows login, or in the Linux keyring (`secret-tool`). On a machine without a keyring (a server, WSL), set the `JIRA_API_TOKEN` environment variable instead.
+
+## Fix my PRs
+
+Off by default ([settings](#fix-my-prs)). With `fix.enabled` on, when a review asks for changes on PRs **you** authored, Prowl fixes them and sends the ticket back for a re-review, round after round, until it's ready to merge or needs you.
+
+**When a round starts.** After Prowl's own review of a ticket finishes, for each of your PRs whose verdict is REQUEST CHANGES or BLOCK, or that has an unresolved review thread `fix.from` covers. With `reviewOwnPrs` off your Prowl never reviews your PRs, so watch the ticket instead: `w` on it in History, or `prowl --watch AB#123`. Then rounds also start after reviews by a teammate's Prowl, or by people. A round never starts while the ticket's review is running, and no review starts while a round is.
+
+**A round, per PR:**
+
+1. **Collect.** Prowl reads the review's details file (the review copies it to `reports/<review id>/`; for a review by someone else's Prowl, it is read from the PR-Owl review on GitHub), the PR's unresolved review threads, and your past answers to similar questions. Parked findings are left out.
+2. **Worktree.** It clones the repo into the Projects Directory if needed, and checks out the PR's head commit in `<Projects Directory>/.prowl-worktrees/<repo>-<n>`, detached, so your own clone and branches are never touched. The worktree is reused each round and removed once the PR is merged or closed.
+3. **Fix.** A Claude Code session runs the `prowl-fix` skill there with the brief, capped by `fix.maxBudgetUsd`, `fix.maxTurns` and `fix.timeoutMinutes`. It sorts each finding and thread into fix, dispute, ask you, or park (`fix.md`), fixes in severity order with tests, runs the repo's own tests, and commits once. It can't push, post on GitHub or edit outside the worktree: a hook only fix sessions load denies all of that.
+4. **Check.** Prowl runs your checks from `checks.json` in the worktree. A failure gets one more fix session, briefed with the output; a second one goes to Needs you.
+5. **Guard.** Before any push: the new commit sits on top of the PR's head (no rewritten history), the remote branch hasn't moved since (if it has, the round is dropped until the next review), the change is within `fix.maxChangedLines`, touches no `fix.protectedPaths`, and adds nothing that looks like a secret.
+6. **Push and reply.** `git push` to the PR's branch, never forced. Then one reply on each thread the session fixed or disputed, from the *Fix reply* and *Dispute reply* templates in `output.md`. Prowl never resolves a thread: the next review resolves the ones it verifies.
+7. **Wait for CI** (`fix.waitForChecksMinutes`). A failing required check gets one more fix session, briefed with the failed job's log. Then Prowl puts the trigger tag back, and the ticket is re-reviewed.
+
+**How it ends.** History flags a ticket **⚑ ready to merge** once every PR's latest review approves it, no review thread is open and the required checks are green; merging stays with you. A new thread after that starts another round. A ticket goes to **Needs you** (tab `3`) when a fix session asks you something, hits a cap, its checks keep failing, a guard stops a push, a PR is closed or isn't yours, or `fix.maxRounds`, `maxReviewRounds` or a spend cap is reached. Answer with `enter` (type the answer, or an option's number): a question's answer resumes the same session and is kept in `answers.jsonl` for later fixes; any other item is cleared, and the next review restarts the loop. `s` skips, and `t` takes the ticket over, so Prowl stops fixing it until you watch it again.
+
+### checks.json
+
+Your checks before a push, in `~/.prowl/config/checks.json` (Config, **Checks before push**). Prowl creates it as `{}` the first time Fix my PRs is on and never overwrites it. Keys are repos as `owner/name`, with `*` wildcards; the first match wins, and a repo nothing matches gets no checks from Prowl (the fix session still runs the repo's own tests). Each command runs in the worktree through your shell:
+
+```json
+{
+  "my-org/web": { "setup": ["npm ci"], "run": ["npm test", "npm run lint"], "timeoutMinutes": 20 },
+  "my-org/*": { "run": ["make test"], "env": { "CI": "1" } }
+}
+```
+
+Keep team-specific steps in your own scripts and have `checks.json` call them, so the file stays a list of commands.
 
 ## Review config
 
-How each PR is reviewed and what Prowl posts are set by three files. Prowl keeps your copy of each in `~/.prowl/config/`, and the Config view (`3`) links to all of them, along with `config.json` (`enter` opens one):
+How each PR is reviewed and what Prowl posts are set by these files. Prowl keeps your copy of each in `~/.prowl/config/`, and the Config view (`4`) links to all of them, along with `config.json` (`enter` opens one):
 
 | File | Sets |
 |---|---|
 | `review.md` | The reviewer's stance, the severity definitions, and the verdict rules (highest severity → verdict → APPROVE / REQUEST_CHANGES / COMMENT) |
 | `review-axis-catalog.md` | What reviewers check: the review axes and their checklists. An axis marked ALWAYS INCLUDED is in every PR's review |
-| `output.md` | Templates for everything posted on GitHub: the review banner, comment prefix, the short review body, the details file collapsed at its bottom (the full write-up of every finding, for a coding agent to fix from), inline comments, replies on existing threads, and the *No blocking issues* comment used when `approvals` is off |
+| `output.md` | Templates for everything posted on GitHub: the review banner, comment prefix, the short review body, the details file collapsed at its bottom (the full write-up of every finding, for a coding agent to fix from), inline comments, replies on existing threads, and the *No blocking issues* comment used when `approvals` is off. With Fix my PRs on, also the *Fix reply* and *Dispute reply* Prowl posts after a fix, and the *Fix commit message* |
+| `fix.md` | Fix my PRs only: how a fix session sorts each finding and thread (fix, dispute, ask you, or park) and what it leaves alone |
 
 Edit your copy. Changes apply from the next review. The defaults ship in [`skills/prowl-review/config/`](skills/prowl-review/config/), and on each launch Prowl compares them with your copies:
 
@@ -133,8 +190,8 @@ Keep the five severity names (Critical, High, Medium, Low, Nit): reports count t
 
 ## Flags and files
 
-- `--setup`: sign in and pick boards. `--dry-run`: dry run for this launch only. `--once`: a single poll without the UI. `--self-test`: checks the matching and tagging logic and changes nothing.
-- Everything lives in `~/.prowl/` (override with `PROWL_HOME`): `config.json`, `state.json` (review history; `capped` maps each ticket at the round cap, still tagged for review, to the reviews it has had, e.g. `"capped": { "AB#123": 3 }`), `config/` (your review config), `seen.json` (the last version launched, for the Update Notes), `reports/`, `logs/` (each review's prompt and session log) and `poller.log`.
+- `--setup`: sign in and pick boards. `--dry-run`: dry run for this launch only. `--once`: a single poll without the UI. `--self-test`: checks the matching and tagging logic and changes nothing. `--watch <ticket>`: watch a ticket for Fix my PRs (like `w` in History), then start as usual. Fix rounds move on while Prowl runs in its UI; `--once` only plans them.
+- Everything lives in `~/.prowl/` (override with `PROWL_HOME`): `config.json`, `state.json` (review history; `capped` maps each ticket at the round cap, still tagged for review, to the reviews it has had, e.g. `"capped": { "AB#123": 3 }`), `config/` (your review config), `seen.json` (the last version launched, for the Update Notes), `reports/`, `logs/` (each review's prompt and session log) and `poller.log`. With Fix my PRs on, also `checks.json` in `config/`, `fixes/` (each fix session's brief folder: `brief.md`, `result.json`, any check output, the replies it posted), `answers.jsonl` (your answers to fix sessions' questions, one JSON object per line: `ts`, `ticket`, `repo`, `question`, `answer`), and in the Projects Directory, `.prowl-worktrees/`. `state.json` then also holds `fixes` (each fix: its PR, round, session, status, cost, pushed commit, replies and checks), `loops` (per ticket: `round`, `phase` (`idle`, `collecting`, `fixing`, `checking`, `pushing`, `waiting-ci`, `re-tagged`, `ready`, `needs-you` or `stopped`), `since`, `spentUsd`, `watched`, `needs`) and `needs` (the open Needs-you items).
 - Only one instance runs per user.
-- `skills/prowl-review` is Prowl's batch review skill, and only Prowl uses it: each review session loads it with `--plugin-dir` as `/prowl:prowl-review`. It isn't in the plugin marketplace and is never added to your own Claude Code skills.
+- `skills/prowl-review` is Prowl's batch review skill, and `skills/prowl-fix` its fix skill. Only Prowl uses them: each session loads them with `--plugin-dir` as `/prowl:prowl-review` and `/prowl:prowl-fix`. They aren't in the plugin marketplace and are never added to your own Claude Code skills.
 - Prowl's version is `version` in `.claude-plugin/plugin.json`. Raising it on `main` releases it: every installed copy updates on its next launch, and shows that version's `CHANGELOG.md` section as its Update Notes.

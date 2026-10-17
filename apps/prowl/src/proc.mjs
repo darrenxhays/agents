@@ -27,7 +27,15 @@ function windowsExe(cmd) {
 }
 
 /** Runs a CLI to completion and resolves with its stdout. */
-export function run(cmd, args) {
+export async function run(cmd, args) {
+  const { code, out, err } = await runFull(cmd, args);
+  if (code === 0) return out;
+  const why = (err || out).trim().split('\n')[0].slice(0, 240);
+  throw new Error(`${cmd} ${args.slice(0, 2).join(' ')} failed: ${why}`);
+}
+
+/** Runs a CLI to completion and resolves with its exit code, stdout and stderr, whatever the code. */
+export function runFull(cmd, args) {
   return new Promise((resolve, reject) => {
     const p = spawnCli(cmd, args);
     let out = '';
@@ -35,11 +43,7 @@ export function run(cmd, args) {
     p.stdout.on('data', d => (out += d));
     p.stderr.on('data', d => (err += d));
     p.on('error', e => reject(new Error(e.code === 'ENOENT' ? `${cmd} is not installed or not on PATH` : e.message)));
-    p.on('close', code => {
-      if (code === 0) return resolve(out);
-      const why = (err || out).trim().split('\n')[0].slice(0, 240);
-      reject(new Error(`${cmd} ${args.slice(0, 2).join(' ')} failed: ${why}`));
-    });
+    p.on('close', code => resolve({ code, out, err }));
     p.stdin.end();
   });
 }
@@ -94,5 +98,28 @@ export function openExternal(target) {
     process.platform === 'darwin' ? ['open', [target]]
       : WIN ? ['rundll32', ['url.dll,FileProtocolHandler', target]] // no cmd.exe, so & in URLs is safe
         : ['xdg-open', [target]];
+  spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true }).on('error', () => {}).unref();
+}
+
+/** Shows a desktop notification, best effort: any failure is ignored. `title` and `text` may come from other people. */
+export function notifyDesktop(title, text) {
+  const tidy = s => String(s).replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 200);
+  const [t, b] = [tidy(title), tidy(text)];
+  let cmd;
+  let args;
+  if (process.platform === 'darwin') {
+    const as = s => `"${s.replace(/[\\"]/g, '\\$&')}"`; // an AppleScript string
+    [cmd, args] = ['osascript', ['-e', `display notification ${as(b)} with title ${as(t)}`]];
+  } else if (WIN) {
+    const ps = s => `'${s.replace(/'/g, "''")}'`; // a PowerShell string
+    const script = '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null;'
+      + '$x = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02);'
+      + `$n = $x.GetElementsByTagName('text'); $n.Item(0).AppendChild($x.CreateTextNode(${ps(t)})) > $null; $n.Item(1).AppendChild($x.CreateTextNode(${ps(b)})) > $null;`
+      + "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show([Windows.UI.Notifications.ToastNotification]::new($x))";
+    // Encoded, so nothing in the text is parsed by a shell on the way in.
+    [cmd, args] = ['powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')]];
+  } else {
+    [cmd, args] = ['notify-send', ['--', t, b]]; // -- so a title starting with - isn't read as an option
+  }
   spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true }).on('error', () => {}).unref();
 }

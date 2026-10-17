@@ -1,0 +1,14 @@
+{
+  "status": "partial",
+  "commit": "3f2a1c9d0e",
+  "summary": "Fixed the save bug; the rename waits for an answer.",
+  "items": [
+    { "thread": "PRRT_owl1", "finding": "F-01", "action": "fix", "note": "save() now awaits the first write." },
+    { "thread": "PRRT_person1", "finding": "", "action": "ask", "note": "Question 1." }
+  ],
+  "questions": [
+    { "text": "Rename save to saveAll across the API?", "context": "The lead asked for saveAll.\nThe ticket says save.", "options": ["Keep save", "Rename to saveAll"], "recommended": "Keep save",
+      "searched": "the ticket, the details file, the threads, past answers, src/api.js" }
+  ],
+  "testsRun": []
+}

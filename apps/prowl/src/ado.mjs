@@ -75,6 +75,16 @@ export async function findTickets(cfg, board, isTrigger) {
   return { tickets, variants };
 }
 
+/** The work item for a key (AB#123 or 123), for prowl --watch. */
+export async function lookup(cfg, key) {
+  if (!cfg.ado.org) throw new Error('Azure DevOps is not set up: run prowl --setup');
+  const id = Number(String(key).replace(/^AB#/i, ''));
+  if (!Number.isInteger(id) || id <= 0) throw new Error(`${key} isn't an Azure DevOps work item: use AB#123`);
+  const { fields } = await api(cfg.ado.org, `_apis/wit/workitems/${id}?fields=System.Title,System.TeamProject&api-version=7.1`);
+  const project = fields['System.TeamProject'];
+  return { key: `AB#${id}`, title: fields['System.Title'] || '', url: workItemUrl(cfg.ado.org, project, id), ref: { org: cfg.ado.org, project, id } };
+}
+
 /** Swaps the trigger tag for the in-progress one; the revision check makes it fail if anyone got there first. */
 export const claim = (cfg, ticket, drop, add) =>
   setTags(ticket.ref.org, ticket.ref.project, ticket.ref.id, ticket.rev, swapTags(ticket.tags, drop, add));

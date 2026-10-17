@@ -1,0 +1,22 @@
+{
+  "data": { "repository": { "pullRequest": { "reviewThreads": { "nodes": [
+    { "id": "PRRT_owl1", "isResolved": false, "path": "src/save.js", "line": 42,
+      "first": { "nodes": [{ "databaseId": 1001, "author": { "login": "teammate", "__typename": "User" }, "body": "🦉 **PR-Owl Review** · Saving twice loses the first write.\n\n**Fix:** await the first save.\n<!-- prowl-review rb-20261016-save F-01 -->", "url": "https://github.com/acme/api/pull/12#discussion_r1001" }] },
+      "last": { "nodes": [{ "author": { "login": "teammate" }, "body": "🦉 **PR-Owl Review** · Saving twice loses the first write." }] } },
+    { "id": "PRRT_bot1", "isResolved": false, "path": "src/load.js", "line": 7,
+      "first": { "nodes": [{ "databaseId": 1002, "author": { "login": "copilot-pull-request-reviewer", "__typename": "Bot" }, "body": "Consider handling a null response here.", "url": "https://github.com/acme/api/pull/12#discussion_r1002" }] },
+      "last": { "nodes": [{ "author": { "login": "copilot-pull-request-reviewer" }, "body": "Consider handling a null response here." }] } },
+    { "id": "PRRT_person1", "isResolved": false, "path": "README.md", "line": 3,
+      "first": { "nodes": [{ "databaseId": 1003, "author": { "login": "lead", "__typename": "User" }, "body": "Can we name this saveAll instead?", "url": "https://github.com/acme/api/pull/12#discussion_r1003" }] },
+      "last": { "nodes": [{ "author": { "login": "lead" }, "body": "Can we name this saveAll instead?" }] } },
+    { "id": "PRRT_done1", "isResolved": true, "path": "src/old.js", "line": 1,
+      "first": { "nodes": [{ "databaseId": 1004, "author": { "login": "lead", "__typename": "User" }, "body": "Typo.", "url": "https://github.com/acme/api/pull/12#discussion_r1004" }] },
+      "last": { "nodes": [{ "author": { "login": "me" }, "body": "Fixed." }] } },
+    { "id": "PRRT_parked1", "isResolved": false, "path": ".github/workflows/ci.yml", "line": null,
+      "first": { "nodes": [{ "databaseId": 1005, "author": { "login": "teammate", "__typename": "User" }, "body": "🦉 **PR-Owl Review** · No CI pipeline runs these tests.\n<!-- prowl-review rb-20261016-save F-02 -->", "url": "https://github.com/acme/api/pull/12#discussion_r1005" }] },
+      "last": { "nodes": [{ "author": { "login": "teammate" }, "body": "🦉 **PR-Owl Review** · No CI pipeline runs these tests." }] } },
+    { "id": "PRRT_replied1", "isResolved": false, "path": "src/x.js", "line": 9,
+      "first": { "nodes": [{ "databaseId": 1006, "author": { "login": "lead", "__typename": "User" }, "body": "Off by one?", "url": "https://github.com/acme/api/pull/12#discussion_r1006" }] },
+      "last": { "nodes": [{ "author": { "login": "me" }, "body": "🦉 **PR-Owl Review** · Fixed in 3f2a1c9: loop now stops at length.\n<!-- prowl-fix AB#42 r1 PRRT_replied1 fixed -->" }] } }
+  ] } } } }
+}

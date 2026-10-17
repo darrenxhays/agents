@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { CONFIG_DIR, CONFIG_PATH } from './config.mjs';
+import { CHECKS_PATH, CONFIG_DIR, CONFIG_PATH } from './config.mjs';
 import { createMascot, wrap } from './mascot.mjs';
 import { openExternal } from './proc.mjs';
 import { awaitingHuman, isOwn } from './reviews.mjs';
@@ -13,12 +13,14 @@ const ST = {
 };
 const LEVEL = { ok: ST.green, info: ST.grey, warn: ST.yellow, error: ST.red };
 const SPIN = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
-const TABS = ['Running', 'History', 'Config', 'Log'];
+const TABS = ['Running', 'History', 'Needs you', 'Config', 'Log'];
+const [RUNNING, HISTORY, NEEDS, CONFIG] = [0, 1, 2, 3];
 
 const isDir = p => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
 const https = v => /^https:\/\/\S+$/.test(v) || 'must be an https:// URL';
 const ADO = c => c.taskBoard === 'ado';
 const JIRA = c => c.taskBoard === 'jira';
+const FIX = c => c.fix?.enabled;
 const opens = 'enter opens it. Updates never overwrite your edits.';
 const FIELDS = [
   // The user's config files: enter opens one in its default app.
@@ -60,9 +62,29 @@ const FIELDS = [
   { key: 'caffeinate', label: 'Keep Mac awake', type: 'bool', when: () => process.platform === 'darwin', help: "on: the Mac doesn't idle-sleep while a review runs (caffeinate), since sleep stalls a review and stretches it out. Closing the lid still sleeps it." },
   { key: 'logRetentionDays', label: 'Keep logs (days)', type: 'int', min: 0, max: 3650, help: 'Review logs older than this are deleted, and poller.log rolls over to poller.log.1 past 5 MB. Reports are always kept. 0 = keep everything.' },
   { key: 'ticketContext', label: 'Ticket text in reviews', type: 'bool', help: "on: the ticket's description (and, on Azure DevOps, its acceptance criteria) is added to the review's brief, so reviewers know the goal without signing in to the tracker. Up to about 6 KB." },
+  { key: 'fix.enabled', label: 'Fix my PRs', type: 'bool', help: "on: when a review asks for changes on your own PRs, Prowl fixes them, runs your checks, pushes, replies on the threads and re-tags for a re-review. With Review my own PRs off, Prowl never reviews your PRs, so rounds start only on tickets you watch (w in History)." },
+  { file: path.join(CONFIG_DIR, 'fix.md'), label: 'Fix rules', when: FIX, help: `How fix sessions work through findings and threads: what they fix, dispute or ask you. Applies from the next fix. ${opens}` },
+  { file: CHECKS_PATH, label: 'Checks before push', when: FIX, help: 'Commands run in the fix worktree before a push, per repo, e.g. { "my-org/*": { "run": ["npm test"] } }. Nothing matches: no checks. Never overwritten. enter opens it.' },
+  { key: 'fix.from', label: 'Fix comments from', type: 'enum', values: ['prowl', 'prowl+bots', 'everyone'], when: FIX, help: "Whose unresolved threads fix sessions take on: Prowl's own, Prowl's plus bots', or everyone's. enter cycles." },
+  { key: 'fix.maxRounds', label: 'Fix rounds per ticket', type: 'int', min: 1, max: 20, when: FIX, help: 'Fix-and-re-review rounds per ticket. Then the ticket goes to Needs you.' },
+  { key: 'fix.maxBudgetUsd', label: 'Spend cap per fix ($)', type: 'int', min: 0, max: 100000, when: FIX, help: "Stops a fix session once it has spent this much. It goes to Needs you and isn't retried. 0 = no cap." },
+  { key: 'fix.maxTurns', label: 'Turn cap per fix', type: 'int', min: 0, max: 100000, when: FIX, help: "Stops a fix session after this many turns. It goes to Needs you and isn't retried. 0 = no cap." },
+  { key: 'fix.timeoutMinutes', label: 'Fix time limit (min)', type: 'int', min: 0, max: 10080, when: FIX, help: "Stops a fix session that runs longer than this. It goes to Needs you and isn't retried. 0 = no limit." },
+  { key: 'fix.ticketBudgetUsd', label: 'Spend cap per ticket ($)', type: 'int', min: 0, max: 100000, when: FIX, help: 'Reviews plus fixes for one ticket, since its loop started. At the cap no new fix starts and the ticket goes to Needs you. 0 = no cap.' },
+  { key: 'fix.dailyBudgetUsd', label: 'Spend cap per day ($)', type: 'int', min: 0, max: 100000, when: FIX, help: 'Fix sessions since midnight. At the cap no new fix starts until tomorrow. 0 = no cap.' },
+  { key: 'fix.waitForChecksMinutes', label: 'Wait for CI (min)', type: 'int', min: 0, max: 1440, when: FIX, help: "After a push, how long to wait for the PR's required checks before re-tagging anyway. A failing check gets one more fix. 0 = re-tag at once." },
+  { key: 'fix.maxChangedLines', label: 'Max lines changed per round', type: 'int', min: 1, max: 1000000, when: FIX, help: 'A fix that changes more lines than this is not pushed; it goes to Needs you.' },
+  { key: 'fix.protectedPaths', label: 'Paths that need a person', type: 'list', when: FIX, help: 'Globs, e.g. .github/workflows/**. A fix that changes one is not pushed; it goes to Needs you. Edit them in the settings file: enter opens it.' },
+  { key: 'fix.protectedBranches', label: 'Branches never pushed', type: 'list', when: FIX, help: "Globs, e.g. release/*. Prowl never pushes to these, nor to a repo's default branch. Edit them in the settings file: enter opens it." },
+  { key: 'fix.maxConcurrent', label: 'Max parallel fixes', type: 'int', min: 1, max: 10, when: FIX, help: 'Fix sessions at once. Separate from Max parallel reviews.' },
+  { key: 'fix.model', label: 'Fix model', type: 'text', empty: true, when: FIX, help: 'Model for fix sessions. Empty: the review Model.' },
+  { key: 'fix.effort', label: 'Fix effort', type: 'enum', values: ['low', 'medium', 'high', 'xhigh', 'max'], when: FIX, help: 'Reasoning effort for fix sessions. enter cycles.' },
+  { key: 'fix.notify', label: 'Desktop notifications', type: 'bool', when: FIX, help: 'on: a desktop notification when a ticket is ready to merge or needs you.' },
   { key: 'dryRun', label: 'Dry run', type: 'bool', help: 'Log what would be reviewed without changing tags or starting reviews.' },
   { key: 'autoUpdate', label: 'Auto-update', type: 'bool', help: 'Install a newer Prowl release before launching. It waits while reviews from an earlier launch are still running.' },
 ];
+
+const LABEL_W = Math.max(...FIELDS.map(f => f.label?.length || 0)) + 2; // the Config view's label column
 
 // Control characters (ESC included) are stripped from everything shown: titles, PR text and agent output
 // come from other people, and raw escape sequences would let them drive this terminal. Wide characters
@@ -74,6 +96,7 @@ const width = segs => segs.reduce((n, s) => n + clean(s[1]).length, 0);
 const trunc = (s, n) => { s = clean(s); return s.length > n ? `${s.slice(0, Math.max(0, n - 1))}…` : s; };
 const spread = (left, right, W) => [...left, ['', ' '.repeat(Math.max(1, W - width(left) - width(right)))], ...right];
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+const prName = p => `${p.repo.split('/')[1]}#${p.number}`;
 const pad2 = n => String(n).padStart(2, '0');
 const clock = ms => { const s = Math.max(0, Math.ceil(ms / 1000)); return `${Math.floor(s / 60)}:${pad2(s % 60)}`; };
 const dur = ms => { const s = Math.floor(ms / 1000); const h = Math.floor(s / 3600); const m = Math.floor((s % 3600) / 60); return h ? `${h}h${pad2(m)}m` : `${m}m${pad2(s % 60)}s`; };
@@ -124,20 +147,28 @@ function* keys(data) {
 }
 
 /**
- * Full-screen terminal UI. `app` is read every frame; `actions` = { pollNow, togglePause, stop, saveConfig, saveToken, quit }.
+ * Full-screen terminal UI. `app` is read every frame; `actions` = { pollNow, togglePause, stop, saveConfig, saveToken, quit,
+ * and for Fix my PRs: fixing, watch, answer, skip, takeOver }.
  */
 export function startTui(app, actions) {
   const out = process.stdout;
   const owl = createMascot();
-  const ui = { tab: 0, sel: [0, 0, 0, 0], edit: null, confirm: null, flash: '', flashUntil: 0, notes: app.notes ? { scroll: 0 } : null };
+  const ui = { tab: 0, sel: TABS.map(() => 0), edit: null, confirm: null, flash: '', flashUntil: 0, notes: app.notes ? { scroll: 0 } : null };
   const flash = text => { ui.flash = text; ui.flashUntil = Date.now() + 4000; };
   const clampSel = (tab, n) => (ui.sel[tab] = Math.max(0, Math.min(ui.sel[tab], n - 1)));
+
+  // Reviews and fix sessions, live.
+  const live = () => [...app.running(), ...actions.fixing()];
+  // Finished reviews and fixes that aren't a running session, newest first.
+  const history = () => [...app.finished(), ...(app.state.fixes || []).filter(f => !['fixing', 'stopping'].includes(f.status))]
+    .sort((a, b) => (b.endedAt || b.startedAt || b.createdAt) - (a.endedAt || a.startedAt || a.createdAt));
+  const needs = () => app.state.needs || [];
 
   // Hoot sleeps unless something is happening: a poll, a running review, or something he has to say.
   function mood(said) {
     if (said?.mood) return said.mood;
     if (app.polling) return 'poll';
-    if (app.running().length) return 'review';
+    if (live().length) return 'review';
     return said ? 'idle' : 'sleep';
   }
 
@@ -155,30 +186,31 @@ export function startTui(app, actions) {
   }
 
   function tabBar() {
-    const counts = [app.running().length, app.finished().length];
+    const counts = [live().length, history().length, needs().length];
     const segs = [['', ' ']];
     TABS.forEach((t, i) => segs.push([i === ui.tab ? ST.tabOn : ST.tabOff, ` ${i + 1} ${t}${counts[i] != null ? ` (${counts[i]})` : ''} `], ['', ' ']));
     return segs;
   }
 
   function runningView(W, H) {
-    const runs = app.running();
+    const runs = live();
     if (!runs.length) {
       const n = app.boards().length;
       return [[], [[ST.grey, n
         ? `  No reviews running. Watching ${plural(n, 'board')} for '${app.cfg.tags.trigger}'.`
-        : '  No boards configured yet: press 3 for Config, then a to add one.']]];
+        : '  No boards configured yet: press 4 for Config, then a to add one.']]];
     }
-    const sel = clampSel(0, runs.length);
+    const sel = clampSel(RUNNING, runs.length);
     const rows = windowed(runs, sel, Math.min(runs.length, Math.max(3, Math.floor(H / 3)))).map(({ item: r, i }) => {
       const stopping = r.status === 'stopping';
-      const left = [cursor(i === sel), [stopping ? ST.red : ST.yellow, `${stopping ? '■' : spin()} `], [ST.bold, `${r.ticket}  `]];
-      const right = [[ST.grey, `  ${plural(r.prs.length, 'PR')} · ${r.reviewNo > 1 ? `re-review #${r.reviewNo}` : 'first review'} · ${dur(Date.now() - r.startedAt)} `]];
+      const left = [cursor(i === sel), [stopping ? ST.red : r.pr ? ST.cyan : ST.yellow, `${stopping ? '■' : spin()} `], [ST.bold, `${r.ticket}  `]];
+      const what = r.pr ? `fix r${r.round} · ${prName(r.pr)}` : `${plural(r.prs.length, 'PR')} · ${r.reviewNo > 1 ? `re-review #${r.reviewNo}` : 'first review'}`;
+      const right = [[ST.grey, `  ${what} · ${dur(Date.now() - r.startedAt)} `]];
       const title = trunc(stopping ? `stopping… ${r.title}` : r.title, W - width(left) - width(right) - 1);
       return spread([...left, ['', title]], right, W);
     });
     const r = runs[sel];
-    rows.push(rule(W), [[ST.bold, ` Activity · ${r.ticket}  `], [ST.grey, r.prs.map(p => `${p.repo.split('/')[1]}#${p.number}`).join('  ')]]);
+    rows.push(rule(W), [[ST.bold, ` Activity · ${r.ticket}  `], [ST.grey, prsOf(r).map(prName).join('  ')]]);
     const acts = (r._activity || []).slice(-Math.max(1, H - rows.length));
     if (!acts.length) rows.push([[ST.grey, '  starting…']]);
     for (const a of acts) {
@@ -198,8 +230,39 @@ export function startTui(app, actions) {
 
   // PRs given Prowl's stamp with Approve PRs off or on your own PR, flagged on the ticket's latest review until it is reviewed again.
   const waiting = r => (app.finished().find(x => x.ticket === r.ticket && x.status === 'done') === r ? awaitingHuman(r, app.cfg.approvals) : []);
-  // The review's PRs, plus earlier-approved ones it carried over that still await a human.
-  const prsOf = r => [...r.prs, ...(r.contextPrs || []).filter(p => waiting(r).includes(p.url))];
+  // The review's PRs, plus earlier-approved ones it carried over that still await a human; a fix's one PR.
+  const prsOf = r => (r.pr ? [r.pr] : [...r.prs, ...(r.contextPrs || []).filter(p => waiting(r).includes(p.url))]);
+  // Fix my PRs flags, on the ticket's newest row in History.
+  const loopFlags = r => {
+    const loop = app.state.loops?.[r.ticket];
+    if (!loop || history().find(x => x.ticket === r.ticket) !== r) return [];
+    return [
+      ...(loop.phase === 'ready' ? [[ST.green, '⚑ ready to merge  ']] : []),
+      ...(loop.phase === 'needs-you' ? [[ST.yellow, '⚑ needs you  ']] : []),
+      ...(loop.watched && loop.phase !== 'stopped' ? [[ST.grey, '◉ watched  ']] : []),
+    ];
+  };
+
+  /** Where a fix stands, for History. */
+  function fixStatus(f) {
+    const sha = f.pushedSha ? ` ${f.pushedSha.slice(0, 7)}` : '';
+    if (f.status === 'waiting-ci') return [ST.yellow, `pushed${sha} · waiting for CI`];
+    if (f.status === 'done') return [ST.green, f.pushedSha ? `pushed${sha}${f.checks ? ` · ${f.checks}` : ''}` : `replied on ${plural(f.replies?.length || 0, 'thread')}`];
+    if (f.status === 'failed') return [ST.red, `failed: ${f.error}`];
+    const doing = { queued: 'queued', collecting: 'collecting', checking: 'running checks', pushing: 'pushing', replying: 'replying', asking: 'waiting for your answer' }[f.status];
+    return doing ? [ST.yellow, doing] : [ST.grey, `${f.status}${f.note ? `: ${f.note}` : ''}`];
+  }
+
+  function fixDetails(f) {
+    const label = t => [ST.grey, `  ${t.padEnd(8)}`];
+    return [
+      f.briefDir ? [label('Brief'), [ST.link, f.briefDir, pathToFileURL(f.briefDir).href]] : [label('Brief'), [ST.grey, '(none yet)']],
+      [label('Ticket'), [ST.link, f.ticketUrl || '', f.ticketUrl]],
+      [label('PR'), [ST.link, f.pr.url, f.pr.url], [ST.grey, `  ${f.pr.title || ''}`]],
+      [label('Replies'), [ST.grey, `${f.replies?.length || 0}${f.checks ? ` · checks: ${f.checks}` : ''}${f.result?.summary ? ` · ${f.result.summary}` : ''}`]],
+      [label('Status'), fixStatus(f), [ST.grey, f.costUsd ? `  · $${f.costUsd.toFixed(2)}` : '']],
+    ];
+  }
 
   function details(r) {
     const label = t => [ST.grey, `  ${t.padEnd(8)}`];
@@ -221,11 +284,16 @@ export function startTui(app, actions) {
   }
 
   function historyView(W, H) {
-    const runs = app.finished();
+    const runs = history();
     if (!runs.length) return [[], [[ST.grey, '  No finished reviews yet.']]];
-    const sel = clampSel(1, runs.length);
-    const detail = details(runs[sel]);
+    const sel = clampSel(HISTORY, runs.length);
+    const detail = runs[sel].pr ? fixDetails(runs[sel]) : details(runs[sel]);
     const rows = windowed(runs, sel, Math.max(1, H - detail.length - 1)).map(({ item: r, i }) => {
+      if (r.pr) {
+        const head = [cursor(i === sel), [ST.grey, `${stamp(r.endedAt || r.startedAt || r.createdAt)}  `], [ST.bold, r.ticket.padEnd(11)],
+          [ST.cyan, `FIX r${r.round}`.padEnd(18)], [ST.grey, `${prName(r.pr)} · `], fixStatus(r), ['', '  '], ...loopFlags(r)];
+        return [...head, ['', trunc(r.title, W - width(head))]];
+      }
       const s = r.summary || {};
       const [vs, vt] = verdict(r);
       const counts = r.status !== 'done' ? []
@@ -236,6 +304,7 @@ export function startTui(app, actions) {
         [ST.grey, `${r.reviewNo > 1 ? `· fixed ${s.fixed ?? '?'} · re-review #${r.reviewNo}` : ''}  `],
         ...(waiting(r).length ? [[ST.yellow, `⚑ ${plural(waiting(r).length, 'PR')} to approve  `]] : []),
         ...(app.state.capped?.[r.ticket] && app.finished().find(x => x.ticket === r.ticket) === r ? [[ST.yellow, '⚑ round cap reached  ']] : []),
+        ...loopFlags(r),
       ];
       return [...head, ['', trunc(r.title, W - width(head))]];
     });
@@ -261,21 +330,54 @@ export function startTui(app, actions) {
     if (f.addBoard) return '';
     if (f.type === 'secret') return app.hasToken() ? 'saved ••••••••' : 'not set: enter to add';
     if (f.type === 'bool') return getPath(c, f.key) ? 'on' : 'off';
+    if (f.type === 'list') return plural(getPath(c, f.key)?.length || 0, 'pattern');
+    if (f.empty && !getPath(c, f.key)) return '(same as Model)';
     if (f.names) return f.names[getPath(c, f.key)] || String(getPath(c, f.key));
     return String(getPath(c, f.key));
   }
 
+  /** Fix my PRs' Needs you items: what only you can answer or decide. */
+  function needsView(W, H) {
+    const items = needs();
+    if (!items.length) {
+      return [[], [[ST.grey, app.cfg.fix?.enabled
+        ? '  Nothing needs you. Questions from fix sessions, and fixes Prowl stopped, show up here.'
+        : '  Fix my PRs is off (Config, 4). With it on, questions only you can answer show up here.']]];
+    }
+    const sel = clampSel(NEEDS, items.length);
+    const it = items[sel];
+    const label = t => [ST.grey, `  ${t.padEnd(9)}`];
+    const detail = [
+      [label('Ticket'), [ST.bold, it.ticket], ...(it.pr ? [['', '  '], [ST.link, it.pr, it.pr]] : [])],
+      ...wrap(clean(it.question), W - 12, 4).map((l, i) => [label(i ? '' : it.kind === 'question' ? 'Question' : 'Stopped'), ['', l]]),
+      ...it.context.map(c => [label(''), [ST.grey, trunc(c, W - 12)]]),
+      ...it.options.map((o, i) => [label(i ? '' : 'Options'), [ST.yellow, `${i + 1}. `], ['', trunc(o, W - 30)], [ST.green, o === it.recommended ? '  (recommended)' : '']]),
+      ...(it.blocked ? [[label('Blocked'), [ST.grey, trunc(it.blocked, W - 12)]]] : []),
+      ...(it.searched ? [[label('Searched'), [ST.grey, trunc(it.searched, W - 12)]]] : []),
+    ];
+    if (ui.edit) detail.push([], [label('Answer'), ...editSegs()]);
+    const rows = windowed(items, sel, Math.max(1, H - detail.length - 1)).map(({ item: x, i }) => {
+      const head = [cursor(i === sel), [ST.grey, `${stamp(x.createdAt)}  `], [ST.bold, x.ticket.padEnd(11)], [x.kind === 'question' ? ST.yellow : ST.red, x.kind.padEnd(10)]];
+      return [...head, ['', trunc(x.question, W - width(head))]];
+    });
+    return [...rows, rule(W), ...detail];
+  }
+
+  /** The text being typed, with its cursor. */
+  function editSegs() {
+    const e = ui.edit;
+    const v = e.secret ? '•'.repeat(e.value.length) : e.value;
+    return [[ST.yellow, v.slice(0, e.cursor)], [ST.cursor, v[e.cursor] || ' '], [ST.yellow, v.slice(e.cursor + 1)]];
+  }
+
   function configView(W, H) {
     const fields = configRows();
-    const sel = clampSel(2, fields.length);
+    const sel = clampSel(CONFIG, fields.length);
     const rows = [[[ST.grey, '  Saved to '], [ST.link, CONFIG_PATH, pathToFileURL(CONFIG_PATH).href], [ST.grey, ' on every change. The next poll uses it.']], []];
     for (const { item: f, i } of windowed(fields, sel, Math.max(1, H - 6))) {
-      const e = i === sel && ui.edit;
-      const v = e && e.secret ? '•'.repeat(e.value.length) : e?.value;
-      const value = e
-        ? [[ST.yellow, v.slice(0, e.cursor)], [ST.cursor, v[e.cursor] || ' '], [ST.yellow, v.slice(e.cursor + 1)]]
+      const value = i === sel && ui.edit ? editSegs()
         : f.file ? [[ST.link, f.file, pathToFileURL(f.file).href]] : [['', shown(f)]];
-      rows.push([cursor(i === sel), [f.addBoard ? ST.green : ST.grey, f.label.padEnd(24)], ...value]);
+      rows.push([cursor(i === sel), [f.addBoard ? ST.green : ST.grey, f.label.padEnd(LABEL_W)], ...value]);
     }
     rows.push([], ui.edit?.error ? [[ST.red, `  ${ui.edit.error}`]] : [[ST.grey, `  ${fields[sel].help}`]]);
     const variants = Object.entries(app.tagVariants).map(([p, v]) => `${p}: ${v.join(', ') || 'none yet'}`).join('  ·  ');
@@ -304,7 +406,8 @@ export function startTui(app, actions) {
     if (ui.confirm) return [[ST.title, ` ${ui.confirm.text} `], [ST.grey, ' y yes · n no']];
     if (ui.edit) return [[ST.grey, ' enter save · esc cancel · ←→ move']];
     if (Date.now() < ui.flashUntil) return [[ST.green, ` ${ui.flash}`]];
-    const hints = [' ↑↓ select · s stop · o open all PRs · a open ticket', ' ↑↓ select · enter open report · o open all PRs · a open ticket', ' ↑↓ select · enter edit · a add board · d delete board', ''];
+    const hints = [' ↑↓ select · s stop · o open all PRs · a open ticket', ` ↑↓ select · enter open report · o open all PRs · a open ticket${app.cfg.fix?.enabled ? ' · w watch' : ''}`,
+      ' ↑↓ select · enter answer · s skip · t take over · o open PR', ' ↑↓ select · enter edit · a add board · d delete board', ''];
     return spread([[ST.grey, hints[ui.tab]]], [[ST.grey, '←→ views · r poll now · p pause · q quit ']], W);
   }
 
@@ -318,7 +421,7 @@ export function startTui(app, actions) {
     }
     rows.push(tabBar(), rule(W));
     const bodyH = H - rows.length - 1;
-    const body = (ui.notes ? notesView : [runningView, historyView, configView, logView][ui.tab])(W, bodyH).slice(0, bodyH);
+    const body = (ui.notes ? notesView : [runningView, historyView, needsView, configView, logView][ui.tab])(W, bodyH).slice(0, bodyH);
     while (body.length < bodyH) body.push([]);
     rows.push(...body, footer(W));
     out.write(`\x1b[?2026h\x1b[H${rows.map(r => draw(r, W)).join('\r\n')}\x1b[?2026l`);
@@ -338,7 +441,7 @@ export function startTui(app, actions) {
 
   function editBoard(index) {
     const boards = app.boards();
-    if (index == null) ui.sel[2] = configRows().findIndex(f => f.addBoard);
+    if (index == null) ui.sel[CONFIG] = configRows().findIndex(f => f.addBoard);
     startEdit(index == null ? '' : app.tracker().boardLabel(boards[index]), v => {
       const b = parseBoard(v);
       if (typeof b === 'string') return b;
@@ -350,7 +453,7 @@ export function startTui(app, actions) {
   }
 
   function configKey(k) {
-    const f = configRows()[ui.sel[2]];
+    const f = configRows()[ui.sel[CONFIG]];
     const c = app.cfg;
     if (k === 'a') return editBoard(null);
     if (f.file) return k === 'enter' ? openExternal(f.file) : undefined;
@@ -373,10 +476,11 @@ export function startTui(app, actions) {
       }, true);
     }
     const cur = getPath(c, f.key);
+    if (f.type === 'list') return openExternal(CONFIG_PATH);
     if (f.type === 'bool') { setPath(c, f.key, !cur); return saved(); }
     if (f.type === 'enum') { setPath(c, f.key, f.values[(f.values.indexOf(cur) + 1) % f.values.length]); return saved(); }
     return startEdit(String(cur), v => {
-      if (!v) return 'Cannot be empty';
+      if (!v && !f.empty) return 'Cannot be empty';
       if (f.type === 'int') {
         const n = Number(v);
         if (!Number.isInteger(n) || n < f.min || n > f.max) return `Enter a whole number from ${f.min} to ${f.max}`;
@@ -389,6 +493,28 @@ export function startTui(app, actions) {
       saved();
       return '';
     });
+  }
+
+  function needsKey(k) {
+    const it = needs()[ui.sel[NEEDS]];
+    if (!it) return undefined;
+    if (k === 'o' && it.pr) openExternal(it.pr);
+    else if (k === 'enter') {
+      startEdit('', v => {
+        const n = Number(v);
+        const text = Number.isInteger(n) && it.options[n - 1] ? it.options[n - 1] : v;
+        if (!text && it.kind === 'question') return 'Type an answer, or an option number';
+        actions.answer(it, text);
+        flash(it.kind === 'question' ? 'Answered: the fix session picks up from here.' : 'Cleared: the next review restarts the loop.');
+        return '';
+      });
+    } else if (k === 's') {
+      actions.skip(it);
+      flash(it.kind === 'question' ? 'Skipped: the fix session leaves that item to you.' : 'Cleared.');
+    } else if (k === 't') {
+      ui.confirm = { text: `Take ${it.ticket} over? Prowl stops fixing it until you watch it again (w in History).`, yes: () => actions.takeOver(it.ticket) };
+    }
+    return undefined;
   }
 
   function editKey(k) {
@@ -417,27 +543,34 @@ export function startTui(app, actions) {
       return undefined;
     }
     if (ui.edit) return editKey(k);
-    if (k.length === 1 && k >= '1' && k <= '4') { ui.tab = Number(k) - 1; return undefined; }
+    if (k.length === 1 && k >= '1' && k <= String(TABS.length)) { ui.tab = Number(k) - 1; return undefined; }
     if (k === 'tab' || k === 'right') { ui.tab = (ui.tab + 1) % TABS.length; return undefined; }
     if (k === 'left') { ui.tab = (ui.tab + TABS.length - 1) % TABS.length; return undefined; }
     if (k === 'up') { ui.sel[ui.tab] = Math.max(0, ui.sel[ui.tab] - 1); return undefined; }
     if (k === 'down') { ui.sel[ui.tab]++; return undefined; }
     if (k === 'q') {
-      const n = app.running().length;
+      const n = live().length;
       if (!n) return actions.quit();
-      ui.confirm = { text: `${plural(n, 'review')} still running. They keep going in the background and reappear next launch. Quit?`, yes: actions.quit };
+      ui.confirm = { text: `${plural(n, 'session')} still running. They keep going in the background and reappear next launch. Quit?`, yes: actions.quit };
       return undefined;
     }
     if (k === 'r') { actions.pollNow(); flash('Polling now.'); return undefined; }
     if (k === 'p') { actions.togglePause(); flash(app.paused ? 'Paused: running reviews carry on, no new ones start.' : 'Resumed.'); return undefined; }
-    if (ui.tab === 2) return configKey(k);
-    const r = (ui.tab === 0 ? app.running() : ui.tab === 1 ? app.finished() : [])[ui.sel[ui.tab]];
+    if (ui.tab === CONFIG) return configKey(k);
+    if (ui.tab === NEEDS) return needsKey(k);
+    const r = (ui.tab === RUNNING ? live() : ui.tab === HISTORY ? history() : [])[ui.sel[ui.tab]];
     if (!r) return undefined;
     if (k === 'o') prsOf(r).forEach(p => openExternal(p.url));
-    else if (k === 'a') openExternal(r.ticketUrl);
-    else if (k === 'enter' && ui.tab === 1 && r.status === 'done') openExternal(r.reportPath);
-    else if (k === 's' && ui.tab === 0 && r.status === 'running') {
+    else if (k === 'a' && r.ticketUrl) openExternal(r.ticketUrl);
+    else if (k === 'enter' && ui.tab === HISTORY && r.pr) openExternal(r.briefDir || r.pr.url);
+    else if (k === 'enter' && ui.tab === HISTORY && r.status === 'done') openExternal(r.reportPath);
+    else if (k === 's' && ui.tab === RUNNING && r.pr && r.status === 'fixing') {
+      ui.confirm = { text: `Stop the fix session on ${prName(r.pr)}? Nothing is pushed; the next review restarts the loop.`, yes: () => actions.stop(r) };
+    } else if (k === 's' && ui.tab === RUNNING && r.status === 'running') {
       ui.confirm = { text: `Stop the review of ${r.ticket}? Its '${app.cfg.tags.inProgress}' tag is removed; re-tag to run it again.`, yes: () => actions.stop(r) };
+    } else if (k === 'w' && ui.tab === HISTORY) {
+      if (!app.cfg.fix?.enabled) return flash('w watches a ticket for Fix my PRs: turn it on in Config (4) first.');
+      flash(actions.watch(r) ? `Watching ${r.ticket}: Prowl fixes your PRs after reviews by anyone.` : `Stopped watching ${r.ticket}.`);
     }
     return undefined;
   }
