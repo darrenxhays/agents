@@ -14,6 +14,7 @@ import { processStart } from './proc.mjs';
 import { createMascot, wrap } from './mascot.mjs';
 import { changelog, newer, syncConfigFiles } from './update.mjs';
 import { DISALLOWED, fenceDecision, fenceSettings } from './fence.mjs';
+import { checksState, detailsFromBodies, threadsFrom } from './github.mjs';
 
 const T = 'Ready for Review';
 for (const t of ['Ready for Review', 'ready for review', 'Ready-For-Review', 'READY  FOR REVIEW', 'ReadyForReview', 'Ready for Reveiw', 'Redy for Review', 'Ready fro Reviw']) {
@@ -293,5 +294,24 @@ assert.equal(denied.status, 0);
 assert.equal(JSON.parse(denied.stdout).hookSpecificOutput.permissionDecision, 'deny');
 assert.equal(hook({ tool_name: 'Bash', tool_input: { command: 'git push' } }, {}).stdout, '', 'not a fix session: no output');
 fs.rmSync(fenceHome, { recursive: true });
+
+// Fix rounds read a PR's threads, and a details file from a PR-Owl review posted by someone else's Prowl.
+const fixFixture = name => fixture(path.join('fix', name));
+const threads = threadsFrom(JSON.parse(fixFixture('threads.json')));
+assert.equal(threads.length, 6);
+assert.deepEqual(threads[1], { id: 'PRRT_bot1', resolved: false, path: 'src/load.js', line: 7, commentId: 1002, author: 'copilot-pull-request-reviewer', bot: true,
+  body: 'Consider handling a null response here.', url: 'https://github.com/acme/api/pull/12#discussion_r1002', lastAuthor: 'copilot-pull-request-reviewer', lastBody: 'Consider handling a null response here.' });
+assert.ok(threads[3].resolved && !threads[2].bot);
+const reviewBody = fixFixture('review-body.md');
+const details = detailsFromBodies([{ body: 'LGTM', at: '2026-10-16T12:00:00Z' }, { body: reviewBody, at: '2026-10-16T10:00:00Z' }], [{ body: 'thanks' }, { body: fixFixture('part2.md') }], 'api-12');
+assert.ok(details.startsWith('# PR-Owl Review: acme/api#12') && details.includes('```js\nsave(a); save(b);\n```') && details.includes('## Parked'), 'the fenced details file, inner fences kept');
+assert.ok(details.endsWith('- Correctness & Logic') && !details.includes('Continued in part 2'), 'joined with part 2');
+assert.equal(detailsFromBodies([{ body: reviewBody, at: '2026-10-16T10:00:00Z' }], [], 'api-1'), '', 'another PR: none');
+assert.equal(detailsFromBodies([{ body: '<summary>prowl-review-x-api-12.md</summary> no fence', at: '' }], [], 'api-12'), '', 'unparseable: none');
+assert.equal(detailsFromBodies([{ body: reviewBody, at: '' }], [], 'api-12').includes('Coverage'), false, 'part 1 alone when there is no part 2');
+assert.equal(checksState([]), 'green', 'no required checks');
+assert.equal(checksState([{ bucket: 'pass' }, { bucket: 'skipping' }]), 'green');
+assert.equal(checksState([{ bucket: 'pass' }, { bucket: 'pending' }]), 'pending');
+assert.equal(checksState([{ bucket: 'pending' }, { bucket: 'fail' }]), 'failing');
 
 console.log('self-test passed');

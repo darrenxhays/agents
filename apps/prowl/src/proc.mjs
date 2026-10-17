@@ -27,7 +27,15 @@ function windowsExe(cmd) {
 }
 
 /** Runs a CLI to completion and resolves with its stdout. */
-export function run(cmd, args) {
+export async function run(cmd, args) {
+  const { code, out, err } = await runFull(cmd, args);
+  if (code === 0) return out;
+  const why = (err || out).trim().split('\n')[0].slice(0, 240);
+  throw new Error(`${cmd} ${args.slice(0, 2).join(' ')} failed: ${why}`);
+}
+
+/** Runs a CLI to completion and resolves with its exit code, stdout and stderr, whatever the code. */
+export function runFull(cmd, args) {
   return new Promise((resolve, reject) => {
     const p = spawnCli(cmd, args);
     let out = '';
@@ -35,11 +43,7 @@ export function run(cmd, args) {
     p.stdout.on('data', d => (out += d));
     p.stderr.on('data', d => (err += d));
     p.on('error', e => reject(new Error(e.code === 'ENOENT' ? `${cmd} is not installed or not on PATH` : e.message)));
-    p.on('close', code => {
-      if (code === 0) return resolve(out);
-      const why = (err || out).trim().split('\n')[0].slice(0, 240);
-      reject(new Error(`${cmd} ${args.slice(0, 2).join(' ')} failed: ${why}`));
-    });
+    p.on('close', code => resolve({ code, out, err }));
     p.stdin.end();
   });
 }
