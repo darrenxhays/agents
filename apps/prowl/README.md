@@ -105,6 +105,7 @@ Settings live in `~/.prowl/config.json`. The Config view (`3`) edits the same fi
 | `parkHumanOnly` | `false` | **Park human-only findings**: a re-review classifies an earlier finding that only a person can fix outside the code (creating a CI pipeline, tracker or permissions config, a product decision) as *Parked*. It gets no new comment, is listed under *Parked* in the details file, and doesn't count toward the verdict, so it can't hold a PR at REQUEST CHANGES round after round |
 | `reReviewScope` | `full` | **Re-review scope**. `full`: a re-review reads each PR whole and gets the whole previous report. `delta`: it reviews only the commits since the previous review, plus that review's still-open findings, and gets only the previous report's front matter and findings. A re-review of a review from before 2.8.0 is always `full` |
 | `allowMemoryWrites` | `true` | **Reviews use memory**. Off: review sessions run with Claude Code's auto-memory off (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`), so they don't add their outcome to the memory index that loads into your later sessions. They don't read your memory either |
+| `caffeinate` | `false` | **Keep Mac awake** (macOS only): while a review runs, `caffeinate -i` keeps the Mac from idle-sleeping, which stalls a review and stretches it out. It exits with the review. Closing the lid still sleeps the Mac |
 | `dryRun` | `false` | Log what would be reviewed without touching tags or starting reviews |
 | `autoUpdate` | `true` | Install a newer Prowl release before launching |
 

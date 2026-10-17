@@ -82,6 +82,12 @@ export function killTree(pid) {
   }
 }
 
+/** macOS: keeps the Mac from idle-sleeping until process `pid` exits; caffeinate exits with it. Elsewhere it does nothing. */
+export function keepAwake(pid) {
+  if (process.platform !== 'darwin' || !pid) return;
+  spawn('caffeinate', ['-i', '-w', String(pid)], { detached: true, stdio: 'ignore' }).on('error', () => {}).unref();
+}
+
 /** Opens a URL or file with the OS default handler. */
 export function openExternal(target) {
   const [cmd, args] =

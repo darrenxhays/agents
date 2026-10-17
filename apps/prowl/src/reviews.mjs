@@ -3,7 +3,7 @@ import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { CONFIG_DIR, HOME, writeJson } from './config.mjs';
 import { frontMatter } from './match.mjs';
-import { spawnCli, isAlive, killTree, processStart } from './proc.mjs';
+import { spawnCli, isAlive, keepAwake, killTree, processStart } from './proc.mjs';
 
 export const REPORTS_DIR = path.join(HOME, 'reports');
 const LOGS_DIR = path.join(HOME, 'logs');
@@ -91,6 +91,7 @@ export function startReview(cfg, pluginDir, { tracker, ticket, prs, approvedPrs 
   fs.closeSync(log);
   run.pid = child.pid;
   run._spawned = true;
+  if (cfg.caffeinate) keepAwake(child.pid); // a sleeping Mac stalls the session's streams and stretches the review
   child.on('error', e => { run.spawnError = e.message; exited.add(child.pid); });
   child.on('exit', () => exited.add(child.pid));
   child.unref();
