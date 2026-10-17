@@ -37,6 +37,7 @@ const DEFAULTS = {
   approvals: true, // approve PRs with no blocking findings; off: comment that there are none and leave approving to a human
   allowMemoryWrites: true, // off: review sessions run with Claude Code's auto-memory off, so they don't add to your memory files
   caffeinate: false, // macOS: keep the Mac from idle-sleeping while a review runs (caffeinate -i)
+  logRetentionDays: 0, // delete review logs older than this, and roll poller.log over past 5 MB; 0 = keep everything. Reports are always kept
   dryRun: false,
   autoUpdate: true, // install a newer released version before launching
 };

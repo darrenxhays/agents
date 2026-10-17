@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CONFIG_DIR } from './config.mjs';
-import { alive, awaitingHuman, buildPrompt, finalize, findingsOnly, isOwn, overdue, REPORTS_DIR, retryFailed, reviewArgs, reviewEnv, roundCapped } from './reviews.mjs';
+import { alive, awaitingHuman, buildPrompt, finalize, findingsOnly, isOwn, overdue, REPORTS_DIR, retryFailed, reviewArgs, reviewEnv, roundCapped, tidyLogs } from './reviews.mjs';
 import { processStart } from './proc.mjs';
 import { createMascot, wrap } from './mascot.mjs';
 import { changelog, newer, syncConfigFiles } from './update.mjs';
@@ -102,6 +102,25 @@ assert.ok(!buildPrompt(promptCases.reReview).includes('Parked'), 'off by default
 // Memory: by default the session's environment is 2.7.0's; off sets Claude Code's switch for auto-memory.
 assert.deepEqual(reviewEnv({ allowMemoryWrites: true }, { PATH: '/bin' }), { PATH: '/bin', CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: '3600000' }, 'golden environment');
 assert.equal(reviewEnv({ allowMemoryWrites: false }, {}).CLAUDE_CODE_DISABLE_AUTO_MEMORY, '1');
+
+// Log retention: old review logs go, except a running review's; poller.log rolls over past 5 MB; reports stay.
+const logHome = fs.mkdtempSync(path.join(os.tmpdir(), 'prowl-test-'));
+const logDir = path.join(logHome, 'logs');
+fs.mkdirSync(logDir);
+fs.mkdirSync(path.join(logHome, 'reports'));
+const old = (file, days = 40) => { fs.writeFileSync(file, 'x'); const t = new Date(Date.now() - days * 86_400_000); fs.utimesSync(file, t, t); };
+for (const f of ['AB1-r1.ndjson', 'AB1-r1.prompt.md', 'AB2-r1.ndjson', 'AB2-r10.ndjson']) old(path.join(logDir, f));
+old(path.join(logDir, 'AB3-r1.ndjson'), 2);
+old(path.join(logHome, 'reports', 'AB1-r1.md'));
+fs.writeFileSync(path.join(logHome, 'poller.log'), Buffer.alloc(5 * 1024 * 1024 + 1));
+fs.writeFileSync(path.join(logHome, 'poller.log.1'), 'older');
+assert.equal(tidyLogs(0, [], logHome), 0, 'off by default');
+assert.equal(fs.readdirSync(logDir).length, 5);
+assert.equal(tidyLogs(30, [{ id: 'AB2-r1' }], logHome), 3);
+assert.deepEqual(fs.readdirSync(logDir).sort(), ['AB2-r1.ndjson', 'AB3-r1.ndjson'], "spares the running review's files and recent ones");
+assert.ok(fs.existsSync(path.join(logHome, 'reports', 'AB1-r1.md')), 'reports are never pruned');
+assert.ok(!fs.existsSync(path.join(logHome, 'poller.log')) && fs.statSync(path.join(logHome, 'poller.log.1')).size > 5 * 1024 * 1024, 'poller.log rolled over');
+fs.rmSync(logHome, { recursive: true });
 
 // Run caps: passed only when set; a capped review fails with the cap named and isn't retried.
 const capped = reviewArgs({ claude: { ...claude, maxBudgetUsd: 50, maxTurns: 200 } }, '/plugin');

@@ -96,6 +96,8 @@ async function poll() {
   app.lastError = '';
   try {
     try { app.cfg = loadConfig(); } catch (e) { log('error', `${e.message} (keeping the previous config)`, 'config'); }
+    const pruned = rv.tidyLogs(app.cfg.logRetentionDays, app.running()); // on launch, then once per poll
+    if (pruned) log('info', `Deleted ${pruned} review log file${pruned > 1 ? 's' : ''} older than ${app.cfg.logRetentionDays} days`);
     app.me ||= await github.me();
     const tracker = app.tracker();
     const boards = app.boards();

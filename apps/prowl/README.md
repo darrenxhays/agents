@@ -106,6 +106,7 @@ Settings live in `~/.prowl/config.json`. The Config view (`3`) edits the same fi
 | `reReviewScope` | `full` | **Re-review scope**. `full`: a re-review reads each PR whole and gets the whole previous report. `delta`: it reviews only the commits since the previous review, plus that review's still-open findings, and gets only the previous report's front matter and findings. A re-review of a review from before 2.8.0 is always `full` |
 | `allowMemoryWrites` | `true` | **Reviews use memory**. Off: review sessions run with Claude Code's auto-memory off (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`), so they don't add their outcome to the memory index that loads into your later sessions. They don't read your memory either |
 | `caffeinate` | `false` | **Keep Mac awake** (macOS only): while a review runs, `caffeinate -i` keeps the Mac from idle-sleeping, which stalls a review and stretches it out. It exits with the review. Closing the lid still sleeps the Mac |
+| `logRetentionDays` | `0` | **Keep logs (days)**: on launch and each poll, review logs in `logs/` older than this are deleted (never a running review's), and `poller.log` past 5 MB is renamed `poller.log.1`, replacing the older one. Reports are always kept. `0` = keep everything |
 | `dryRun` | `false` | Log what would be reviewed without touching tags or starting reviews |
 | `autoUpdate` | `true` | Install a newer Prowl release before launching |
 

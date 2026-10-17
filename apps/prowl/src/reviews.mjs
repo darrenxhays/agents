@@ -138,6 +138,31 @@ export function stopReview(run) {
   if (alive(run)) killTree(run.pid);
 }
 
+/**
+ * With `days` above 0: deletes the review logs in logs/ older than that, never a running review's, and rolls
+ * poller.log over to poller.log.1 once it passes 5 MB. Reports are never pruned. Returns how many files it deleted.
+ */
+export function tidyLogs(days, running, home = HOME) {
+  if (!(days > 0)) return 0;
+  const dir = path.join(home, 'logs');
+  const cutoff = Date.now() - days * 86_400_000;
+  let deleted = 0;
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch { /* no logs yet */ }
+  for (const name of names) {
+    if (running.some(r => name.startsWith(`${r.id}.`))) continue;
+    try {
+      const file = path.join(dir, name);
+      if (fs.statSync(file).mtimeMs < cutoff) { fs.unlinkSync(file); deleted++; }
+    } catch { /* gone already, or held open on Windows: next time */ }
+  }
+  const poller = path.join(home, 'poller.log');
+  try {
+    if (fs.statSync(poller).size > 5 * 1024 * 1024) fs.renameSync(poller, `${poller}.1`); // replaces an older .1
+  } catch { /* none yet */ }
+  return deleted;
+}
+
 /** Reads new output from a review's log into run._activity; returns its final `result` event once present. */
 export function readActivity(run) {
   run._activity ??= [];

@@ -58,6 +58,7 @@ const FIELDS = [
   { key: 'reReviewScope', label: 'Re-review scope', type: 'enum', values: ['full', 'delta'], help: "full: a re-review reads each PR whole, with the whole last report. delta: only the commits since the last review, plus its still-open findings; the rest of the PR is context. enter switches." },
   { key: 'allowMemoryWrites', label: 'Reviews use memory', type: 'bool', help: "on: review sessions use Claude Code's auto-memory like any session, and can add what they did to your memory files. off: reviews run with auto-memory off, so they neither read nor write it." },
   { key: 'caffeinate', label: 'Keep Mac awake', type: 'bool', when: () => process.platform === 'darwin', help: "on: the Mac doesn't idle-sleep while a review runs (caffeinate), since sleep stalls a review and stretches it out. Closing the lid still sleeps it." },
+  { key: 'logRetentionDays', label: 'Keep logs (days)', type: 'int', min: 0, max: 3650, help: 'Review logs older than this are deleted, and poller.log rolls over to poller.log.1 past 5 MB. Reports are always kept. 0 = keep everything.' },
   { key: 'dryRun', label: 'Dry run', type: 'bool', help: 'Log what would be reviewed without changing tags or starting reviews.' },
   { key: 'autoUpdate', label: 'Auto-update', type: 'bool', help: 'Install a newer Prowl release before launching. It waits while reviews from an earlier launch are still running.' },
 ];
