@@ -77,6 +77,7 @@ export async function findTickets(cfg, board, isTrigger) {
 
 /** The work item for a key (AB#123 or 123), for prowl --watch. */
 export async function lookup(cfg, key) {
+  if (!cfg.ado.org) throw new Error('Azure DevOps is not set up: run prowl --setup');
   const id = Number(String(key).replace(/^AB#/i, ''));
   if (!Number.isInteger(id) || id <= 0) throw new Error(`${key} isn't an Azure DevOps work item: use AB#123`);
   const { fields } = await api(cfg.ado.org, `_apis/wit/workitems/${id}?fields=System.Title,System.TeamProject&api-version=7.1`);
