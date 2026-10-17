@@ -35,6 +35,7 @@ const DEFAULTS = {
   reviewTimeoutMinutes: 0, // stop a review running longer than this; 0 = no limit. A review stopped by a cap fails and isn't retried
   reviewOwnPrs: false, // review tickets with PRs you authored; your own PRs get a comment review, as GitHub won't let you approve them
   approvals: true, // approve PRs with no blocking findings; off: comment that there are none and leave approving to a human
+  allowMemoryWrites: true, // off: review sessions run with Claude Code's auto-memory off, so they don't add to your memory files
   dryRun: false,
   autoUpdate: true, // install a newer released version before launching
 };

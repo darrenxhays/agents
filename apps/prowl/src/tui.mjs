@@ -56,6 +56,7 @@ const FIELDS = [
   { key: 'maxReviewRounds', label: 'Max review rounds', type: 'int', min: 0, max: 100, help: 'Reviews per ticket. Once a ticket has had this many, Prowl leaves it tagged and unclaimed for a person, and History flags it with ⚑ round cap reached. 0 = no cap.' },
   { key: 'parkHumanOnly', label: 'Park human-only findings', type: 'bool', help: "on: a re-review parks an earlier finding that only a person can fix outside the code (a CI pipeline, tracker or permissions config, a product decision). It isn't re-posted, is listed under Parked in the details file, and doesn't hold up the verdict." },
   { key: 'reReviewScope', label: 'Re-review scope', type: 'enum', values: ['full', 'delta'], help: "full: a re-review reads each PR whole, with the whole last report. delta: only the commits since the last review, plus its still-open findings; the rest of the PR is context. enter switches." },
+  { key: 'allowMemoryWrites', label: 'Reviews use memory', type: 'bool', help: "on: review sessions use Claude Code's auto-memory like any session, and can add what they did to your memory files. off: reviews run with auto-memory off, so they neither read nor write it." },
   { key: 'dryRun', label: 'Dry run', type: 'bool', help: 'Log what would be reviewed without changing tags or starting reviews.' },
   { key: 'autoUpdate', label: 'Auto-update', type: 'bool', help: 'Install a newer Prowl release before launching. It waits while reviews from an earlier launch are still running.' },
 ];

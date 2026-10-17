@@ -85,14 +85,7 @@ export function startReview(cfg, pluginDir, { tracker, ticket, prs, approvedPrs 
   const stdin = fs.openSync(run.promptPath, 'r');
   const log = fs.openSync(run.logPath, 'a');
   const child = spawnCli('claude', reviewArgs(cfg, pluginDir), {
-    cwd: cfg.workDir, detached: true, stdio: [stdin, log, log],
-    // prowl-review runs its reviewers as background subagents and ends its turn while they work. `claude -p`
-    // stops background tasks still running 10 minutes after the last turn, which kills a large batch's
-    // reviewers before anything is posted. Each finished subagent starts a new turn, so this is the longest
-    // stretch with no subagent finishing.
-    // optimization-note: a hung background command (e.g. a test runner in watch mode) holds the review open
-    // for up to this long after its report is written; Stop ends it sooner.
-    env: { ...process.env, CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: String(60 * 60_000) },
+    cwd: cfg.workDir, detached: true, stdio: [stdin, log, log], env: reviewEnv(cfg),
   });
   fs.closeSync(stdin);
   fs.closeSync(log);
@@ -115,6 +108,20 @@ export function reviewArgs(cfg, pluginDir) {
     '--output-format', 'stream-json', '--verbose',
   ];
 }
+
+/** The environment for a review session. */
+export const reviewEnv = (cfg, env = process.env) => ({
+  ...env,
+  // prowl-review runs its reviewers as background subagents and ends its turn while they work. `claude -p`
+  // stops background tasks still running 10 minutes after the last turn, which kills a large batch's
+  // reviewers before anything is posted. Each finished subagent starts a new turn, so this is the longest
+  // stretch with no subagent finishing.
+  // optimization-note: a hung background command (e.g. a test runner in watch mode) holds the review open
+  // for up to this long after its report is written; Stop ends it sooner.
+  CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: String(60 * 60_000),
+  // Headless reviews otherwise add their outcome to the project's memory index, which loads into every later session.
+  ...(cfg.allowMemoryWrites === false && { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' }),
+});
 
 /** True once a running review has run past the Review time limit; it is then stopped, and fails with the cap named. */
 export const overdue = (run, cfg) => cfg.reviewTimeoutMinutes > 0 && run.status === 'running' && Date.now() - run.startedAt > cfg.reviewTimeoutMinutes * 60_000;

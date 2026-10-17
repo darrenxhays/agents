@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CONFIG_DIR } from './config.mjs';
-import { alive, awaitingHuman, buildPrompt, finalize, findingsOnly, isOwn, overdue, REPORTS_DIR, retryFailed, reviewArgs, roundCapped } from './reviews.mjs';
+import { alive, awaitingHuman, buildPrompt, finalize, findingsOnly, isOwn, overdue, REPORTS_DIR, retryFailed, reviewArgs, reviewEnv, roundCapped } from './reviews.mjs';
 import { processStart } from './proc.mjs';
 import { createMascot, wrap } from './mascot.mjs';
 import { changelog, newer, syncConfigFiles } from './update.mjs';
@@ -98,6 +98,10 @@ const parks = c => buildPrompt({ ...c, parkHumanOnly: true }).includes('Classify
 assert.ok(parks(promptCases.reReview) && parks({ ...promptCases.reReview, prior: priorRun, reReviewScope: 'delta' }) && !parks(promptCases.first));
 assert.ok(buildPrompt({ ...promptCases.reReview, parkHumanOnly: true }).includes('\n5. Park a prior finding'), 'numbered after the four prior-finding steps');
 assert.ok(!buildPrompt(promptCases.reReview).includes('Parked'), 'off by default');
+
+// Memory: by default the session's environment is 2.7.0's; off sets Claude Code's switch for auto-memory.
+assert.deepEqual(reviewEnv({ allowMemoryWrites: true }, { PATH: '/bin' }), { PATH: '/bin', CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: '3600000' }, 'golden environment');
+assert.equal(reviewEnv({ allowMemoryWrites: false }, {}).CLAUDE_CODE_DISABLE_AUTO_MEMORY, '1');
 
 // Run caps: passed only when set; a capped review fails with the cap named and isn't retried.
 const capped = reviewArgs({ claude: { ...claude, maxBudgetUsd: 50, maxTurns: 200 } }, '/plugin');
