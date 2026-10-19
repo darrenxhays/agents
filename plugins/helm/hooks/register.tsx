@@ -7,6 +7,7 @@ import {
   cacheSessionStart,
   cacheTurnComplete,
   cacheTurnStart,
+  cacheTurnStep,
   registerCache,
 } from './cache'
 import {
@@ -16,6 +17,7 @@ import {
   stepsSessionStart,
   stepsTurnComplete,
   stepsTurnStart,
+  stepsTurnStep,
 } from './next-steps'
 import { optionsSessionStart } from './options'
 import { settings } from './settings'
@@ -58,6 +60,13 @@ export const register: Register = (on, options) => {
     stepsTurnStart(e)
 
     return next(e)
+  })
+
+  on('turn.step', async function* ($, e, next) {
+    const ended = stepsTurnStep(e)
+    if (ended !== undefined) return ended
+
+    return yield* cacheTurnStep($, e, next)
   })
 
   on('turn.complete', async ($, e, next) => {

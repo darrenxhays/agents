@@ -149,6 +149,33 @@ test('the result line under the row is hidden', async ($, on) => {
   await ui.unmount()
 })
 
+test('the step after the steps are shown ends the turn without asking the model', async ($, on) => {
+  engineBand(on)
+  const asked: number[] = []
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('turn.step', async function* (_$, e) {
+    asked.push(e.index)
+    return { turnId: e.turnId, index: e.index, answer: 'again', toolUses: [], stopReason: 'end_turn' as const, usage: null }
+  })
+
+  const step = async (index: number) => {
+    const it = $.turn.step({ turnId: 't1', index, model: 'claude-opus-5-5', messageCount: 1 })
+    let at = await it.next()
+    while (at.done !== true) at = await it.next()
+
+    return at.value
+  }
+
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+  await suggest($)
+  expect((await step(1)).answer).toBe('')
+  expect(asked).toEqual([])
+
+  await $.turn.start({ text: 'and now?', turnId: 't2' })
+  expect((await step(0)).answer).toBe('again')
+  expect(asked).toEqual([0])
+})
+
 test('show full prompts expands each step', async ($, on) => {
   engineBand(on)
   const id = await suggest($)

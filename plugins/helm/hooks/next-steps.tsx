@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { ConfigRow, EngineInterface, EventName, Hook, On, ResolveInput } from 'claude-code'
+import type { ConfigRow, EngineInterface, EventName, Hook, On, ResolveInput, TurnStepResult } from 'claude-code'
 
 import type { NextStep } from '../types'
 import { forkRefreshed, resetKeepWarm } from './cache'
@@ -347,6 +347,15 @@ export function stepsTurnStart(e: In<'turn.start'>) {
     changesInTurn = 0
     isSuggestedInTurn = false
   }
+}
+
+// The step after the steps went on screen, answered without asking the model:
+// asked, it ends with an empty reply, the engine nudges it for visible output,
+// and it writes its summary a second time.
+export function stepsTurnStep(e: In<'turn.step'>): TurnStepResult | undefined {
+  if (e.agentId !== undefined || !isSuggestedInTurn) return undefined
+
+  return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: null }
 }
 
 // After the turn ends: a turn that changed things without suggesting asks the

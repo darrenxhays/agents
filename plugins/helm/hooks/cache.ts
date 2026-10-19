@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, EventName, Hook, ModelUsage, On } from 'claude-code'
+import type { EngineInterface, EventName, Hook, ModelUsage, On, StreamNext } from 'claude-code'
 
 import type { Cache, Handoff, KeepWarm, Limit, Meter } from '../types'
 import type { Settings } from './settings'
@@ -475,6 +475,29 @@ export async function cacheSessionEnd($: EngineInterface, e: In<'session.end'>) 
   }
 }
 
+// Every main-thread response refreshes the cache entry and the context fill;
+// the TTL counts from when the request started.
+export async function* cacheTurnStep($: EngineInterface, e: In<'turn.step'>, next: StreamNext<'turn.step'>) {
+  const startedAt = await $.clock.now()
+  const result = yield* next(e)
+  if (e.agentId === undefined && result.usage !== null) {
+    const u = result.usage
+    await update($, cache, () => ({
+      lastAt: startedAt,
+      readTokens: u.cache_read_input_tokens,
+      writeTokens: u.cache_creation_input_tokens,
+    }))
+    const endedAt = await $.clock.now()
+    await update($, now, () => endedAt)
+    const tokens = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
+    await update($, meter, m =>
+      m === null ? m : { ...m, tokens, percent: Math.round((tokens / m.window) * 100) },
+    )
+  }
+
+  return result
+}
+
 // The events only the cache hooks.
 export function registerCache(on: On) {
   on('session.measure', async ($, e, next) => {
@@ -482,29 +505,6 @@ export function registerCache(on: On) {
     await update($, limits, () => e.rateLimits.map(r => ({ kind: r.kind, percentUsed: r.percentUsed, resetsAt: r.resetsAt })))
 
     return next(e)
-  })
-
-  // Every main-thread response refreshes the cache entry and the context fill;
-  // the TTL counts from when the request started.
-  on('turn.step', async function* ($, e, next) {
-    const startedAt = await $.clock.now()
-    const result = yield* next(e)
-    if (e.agentId === undefined && result.usage !== null) {
-      const u = result.usage
-      await update($, cache, () => ({
-        lastAt: startedAt,
-        readTokens: u.cache_read_input_tokens,
-        writeTokens: u.cache_creation_input_tokens,
-      }))
-      const endedAt = await $.clock.now()
-      await update($, now, () => endedAt)
-      const tokens = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
-      await update($, meter, m =>
-        m === null ? m : { ...m, tokens, percent: Math.round((tokens / m.window) * 100) },
-      )
-    }
-
-    return result
   })
 
   // Any compaction of the main conversation (/compact, auto, ours) resets the
