@@ -82,3 +82,23 @@ date rules), so diffs were longer than the baseline's but all three scored.
 
 Total 60/60; cost $2.33; mean 21s per run. No run loaded the skill (the old delivery loaded it in
 every run), and runs took fewer turns.
+
+## Final: old vs new
+
+pragmatic-engineer (Opus, 3 runs per task; the final SKILL.md and hook are the Part 2 run above):
+
+| Task | Old score | New score | Old src lines | New src lines | Old skill loads | New skill loads |
+|---|---|---|---|---|---|---|
+| a-shared-helper-bug | 9/9 | 9/9 | 2/2/3 | 2/2/2 | 1/1/1 | 0/0/0 |
+| b-existing-helper | 12/12 | 12/12 | 5/5/5 | 5/5/5 | 1/1/1 | 0/0/0 |
+| c-stdlib | 11/12 | 12/12 | 4/12/4 | 11/8/8 | 1/1/1 | 0/0/0 |
+| d-ambiguous | 8/9 | 9/9 | 9/0/0 | 0/0/0 | 1/1/1 | 0/0/0 |
+| e-refactor | 9/9 | 9/9 | 25/25/25 | 25/25/25 | 1/1/1 | 0/0/0 |
+| f-one-line | 9/9 | 9/9 | 2/2/2 | 2/2/2 | 1/1/1 | 0/0/0 |
+
+Total 58/60 → 60/60; cost $2.61 → $2.33; mean 26s → 21s per run. The one place the new
+version writes more is c, where it adds a format check alongside the standard-library parser.
+
+build (static): before, `run-codex.test.sh` passed and every named path existed. After,
+`prepare.test.sh` and `run-codex.test.sh` pass and every path SKILL.md and the reference
+files name exists.

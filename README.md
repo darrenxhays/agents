@@ -52,9 +52,30 @@ Used automatically for planning and coding tasks (unless turned off in the plugi
 
 ### build
 
-`/darrenxhays:build <request | path/to/request.md | ticket link>`: ticket to PR. Takes a link from Jira, Azure DevOps, GitHub, or any board the session can reach. Claude creates a branch and writes a plan to the output directory (`zz/` by default) for you to review and approve, then splits the work into subtasks built in parallel, reviews them, runs one fix pass, and asks before committing, pushing, and opening a PR. For a Jira or Azure DevOps ticket, it moves the ticket to in progress once you approve the plan and to in review once the PR is open, using the statuses the ticket's workflow allows and never moving a ticket backward. Each subtask gets the latest model and the reasoning effort its complexity needs. Subtasks run on Codex when the `codex` CLI is installed, otherwise on Claude subagents. Output files stay local and are never committed; output directories inside the repository are ignored through `.git/info/exclude`. Claude Code only.
+`/darrenxhays:build <request | path/to/request.md | ticket link>`: ticket to PR. Takes a link from Jira, Azure DevOps, GitHub, or any board the session can reach. Claude Code only.
 
-Set `BUILD_OUTPUT_DIR` before starting Claude to change the output directory, for example `BUILD_OUTPUT_DIR=.build-output claude`. You can also specify an output directory in your build request. Relative paths resolve from the repository root; absolute paths are supported. Choose a dedicated directory for plans, specs, reviews, and run reports. The same setting applies to both Codex helper scripts.
+1. Claude creates a branch named the way your repository names them (from recent merged PRs, remote branches, or git-flow config; `<ticket-id>-<slug>` when there's no convention) and prepares the output directory.
+2. It writes one plan for you to approve. The plan lists the **decisions that need your sign-off**, anything that crosses a boundary such as permissions, billing or usage, a public API, stored data, or infrastructure, including choices the ticket itself made, so you confirm them before any code exists. Nothing is built until you approve.
+3. Codex implements the plan when the `codex` CLI is installed; otherwise Claude does. Each Codex run gets a current model from the Codex catalog and the lowest reasoning effort that fits.
+4. Claude runs the project's checks, and a fresh-context reviewer checks the diff against your original request. One fix pass runs only when the review asks for changes.
+5. Claude asks before committing, pushing, and opening a PR against the branch your PRs usually target.
+
+For a Jira or Azure DevOps ticket, it moves the ticket to in progress once you approve the plan and to in review once the PR is open, using the statuses the ticket's workflow allows and never moving a ticket backward.
+
+Output files stay local and are never committed; an output directory inside the repository is ignored through `.git/info/exclude`. Each run's files share a run id (`YYYYMMDD-HHMMSS`):
+
+```
+zz/
+  plans/<run-id>-<slug>.md      the plan, with its subtasks added after approval
+  reviews/<run-id>-<slug>.md    the review
+  runs/<run-id>-worktree.txt    staged, unstaged and untracked files before the build
+  runs/<run-id>-S1-build.md     the implementer's final report (Codex)
+  runs/<run-id>-fix.md          the fix pass's final report, when there is one
+```
+
+Set `BUILD_OUTPUT_DIR` before starting Claude to change the output directory, for example `BUILD_OUTPUT_DIR=.build-output claude`. You can also name an output directory in your build request. Relative paths resolve from the repository root; absolute paths are supported. Use a dedicated directory: the repository root, `.git`, or a directory with tracked files is refused.
+
+**Checks that need a network or a local service.** Codex's sandbox blocks network access, including local services such as a database or a container runtime, so the plan splits checks into ones Codex can run and ones Claude runs after it finishes. To let Codex run them too, start Claude with `BUILD_CODEX_NETWORK=true`. Codex then runs with `sandbox_workspace_write.network_access` on, which also opens the internet to it. Off by default.
 
 ## Plugins
 
