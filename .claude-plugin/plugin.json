@@ -5,13 +5,13 @@
     "auto_use": {
       "type": "boolean",
       "title": "Use pragmatic-engineer automatically",
-      "description": "Tell every Claude session and ~/.codex/AGENTS.md to use pragmatic-engineer for planning and coding. Off: call it yourself with /darrenxhays:pragmatic-engineer. A project can override this for its Claude sessions with PRAGMATIC_ENGINEER_AUTO_USE in its settings env (helm's CONFIG panel sets it). Takes effect in new sessions.",
+      "description": "Give every Claude session pragmatic-engineer's instructions, and tell Codex (in ~/.codex/AGENTS.md) to use it, for planning and coding. Off: call it yourself with /darrenxhays:pragmatic-engineer. A project can override this for its Claude sessions with PRAGMATIC_ENGINEER_AUTO_USE in its settings env (helm's CONFIG panel sets it). Takes effect in new sessions.",
       "default": true
     }
   },
   "hooks": {
     "SessionStart": [
-      { "hooks": [{ "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh\"" }] }
+      { "matcher": "startup|clear|compact", "hooks": [{ "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh\"" }] }
     ]
   }
 }

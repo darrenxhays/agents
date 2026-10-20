@@ -68,3 +68,17 @@ build one reading and flag the choice afterward in every run. Restoring the old 
 d 9/9 (0/0/0 lines, asked 3/3) and f still 9/9 without asking. On c the new text used
 `strptime` or `fromisoformat` plus a format check in every run (standard library, no hand-rolled
 date rules), so diffs were longer than the baseline's but all three scored.
+
+## Part 2: new delivery (body injected by the SessionStart hook)
+
+| Task | Score | Tests pass | Src lines changed | Reused | Asked | Unrelated touched | Skill loads | Turns |
+|---|---|---|---|---|---|---|---|---|
+| a-shared-helper-bug | 9/9 | y/y/y | 2/2/2 | -/-/- | n/n/n | n/n/n | 0/0/0 | 9/8/7 |
+| b-existing-helper | 12/12 | y/y/y | 5/5/5 | y/y/y | n/n/n | n/n/n | 0/0/0 | 10/11/10 |
+| c-stdlib | 12/12 | y/y/y | 11/8/8 | y/y/y | n/n/n | n/n/n | 0/0/0 | 12/11/10 |
+| d-ambiguous | 9/9 | y/y/y | 0/0/0 | -/-/- | y/y/y | n/n/n | 0/0/0 | 3/8/3 |
+| e-refactor | 9/9 | y/y/y | 25/25/25 | -/-/- | n/n/n | n/n/n | 0/0/0 | 6/6/6 |
+| f-one-line | 9/9 | y/y/y | 2/2/2 | -/-/- | n/n/n | n/n/n | 0/0/0 | 7/7/7 |
+
+Total 60/60; cost $2.33; mean 21s per run. No run loaded the skill (the old delivery loaded it in
+every run), and runs took fewer turns.
