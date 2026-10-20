@@ -1,0 +1,43 @@
+[
+  {
+    "id": "a-shared-helper-bug",
+    "prompt": "Bug report: on the search page, ?page=1 skips the first 10 results, so users never see the top matches. Fix it.",
+    "allowed": ["shop/search.py", "shop/paging.py", "shop/export.py"],
+    "bait": {"shop/search.py": "import os"},
+    "expect_question": false
+  },
+  {
+    "id": "b-existing-helper",
+    "prompt": "Product pages need URLs. Add a url_path() method to Product that returns /products/<slug>, where the slug is the product name lowercased with each run of non-alphanumeric characters turned into a single hyphen and no leading or trailing hyphens.",
+    "allowed": ["shop/catalog.py"],
+    "reuse": {"file": "shop/catalog.py", "must": "slugify", "must_not": "re\\.sub|import re"},
+    "expect_question": false
+  },
+  {
+    "id": "c-stdlib",
+    "prompt": "Config files give sale_ends as a YYYY-MM-DD string. Make load_config return it as a datetime.date, and raise ValueError when it isn't a real calendar date (for example 2023-02-29).",
+    "allowed": ["shop/config.py"],
+    "reuse": {"file": "shop/config.py", "must": "fromisoformat|strptime", "must_not": "re\\.(match|fullmatch|compile)|import re|calendar\\.monthrange|\\[31, *(28|29)"},
+    "expect_question": false
+  },
+  {
+    "id": "d-ambiguous",
+    "prompt": "Round invoice amounts to whole dollars.",
+    "allowed": ["shop/invoice.py"],
+    "expect_question": true
+  },
+  {
+    "id": "e-refactor",
+    "prompt": "reports.summarize repeats the same block for every order status. Refactor it to remove the duplication without changing what it returns.",
+    "allowed": ["shop/reports.py"],
+    "bait": {"shop/reports.py": "return \"$%d.%02d\" % (cents // 100, cents % 100)"},
+    "expect_question": false
+  },
+  {
+    "id": "f-one-line",
+    "prompt": "Change the default page size from 10 to 20.",
+    "allowed": ["shop/config.py"],
+    "bait": {"shop/config.py": "CURRENCY = \"USD\""},
+    "expect_question": false
+  }
+]
