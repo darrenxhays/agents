@@ -48,3 +48,23 @@ Total 58/60; cost $2.61; mean 26s per run. Misses: on c, one run added a regex f
 next to `date.fromisoformat`; on d, one run picked a reading, stated it, and built it.
 
 build: `run-codex.test.sh` passes; every path SKILL.md names exists.
+
+## Part 1: pragmatic-engineer rewrite (old delivery)
+
+Same suite, Opus, 3 runs per task. First draft of the new SKILL.md:
+
+| Task | Score | Src lines changed | Asked |
+|---|---|---|---|
+| a-shared-helper-bug | 9/9 | 2/2/2 | n/n/n |
+| b-existing-helper | 12/12 | 5/5/5 | n/n/n |
+| c-stdlib | 12/12 | 8/14/11 | n/n/n |
+| d-ambiguous | 6/9 | 8/9/9 | n/n/n |
+| e-refactor | 9/9 | 25/25/25 | n/n/n |
+| f-one-line | 9/9 | 2/2/2 | n/n/n |
+
+Total 57/60. It lost on d: "otherwise state the assumption in one line and proceed" led it to
+build one reading and flag the choice afterward in every run. Restoring the old rule's substance
+("present the readings and ask before writing code; don't pick one silently") fixed it:
+d 9/9 (0/0/0 lines, asked 3/3) and f still 9/9 without asking. On c the new text used
+`strptime` or `fromisoformat` plus a format check in every run (standard library, no hand-rolled
+date rules), so diffs were longer than the baseline's but all three scored.
