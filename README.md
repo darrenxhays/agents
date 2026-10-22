@@ -77,6 +77,14 @@ Set `BUILD_OUTPUT_DIR` before starting Claude to change the output directory, fo
 
 **Checks that need a network or a local service.** Codex's sandbox blocks network access, including local services such as a database or a container runtime, so the plan splits checks into ones Codex can run and ones Claude runs after it finishes. To let Codex run them too, start Claude with `BUILD_CODEX_NETWORK=true`. Codex then runs with `sandbox_workspace_write.network_access` on, which also opens the internet to it. Off by default.
 
+### message
+
+`/darrenxhays:message <what the message is about>`, or used automatically: when you ask for a Teams or Slack message, a reply, a status update or anything else to send, or when Claude is about to hand you a message to send, Claude writes it with this skill instead of printing it in the reply. Claude Code on macOS only.
+
+Claude writes a short message that leads with the point, with real links and no greeting, and puts it on your clipboard as rich text with a plain-text fallback. One paste works in both Teams and Slack, because the message uses only formatting both apps render the same way (bold, italic, strikethrough, code, links and lists), Unicode emoji instead of `:shortcodes:`, and no Slack-only syntax. Type @-mentions and channel pings yourself after pasting. Nothing is posted for you.
+
+Claude's reply links a preview page with a **Copy** button for copying the message again. Preview pages go to `~/.claude/messages/`, and only the latest is kept: each new message deletes the previous page.
+
 ## Plugins
 
 ### helm (Claude Code)
