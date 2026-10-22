@@ -98,7 +98,7 @@ export type Cell = { ch: string; fg?: string; bg?: string; bold?: boolean }
 type BarSpec = {
   width: number
   fraction: number
-  color: (at: number) => Rgb
+  color: Rgb
   label: string
   track?: string
   marker?: number
@@ -107,19 +107,19 @@ type BarSpec = {
 
 const PARTIALS = ['', '▏', '▎', '▍', '▌', '▋', '▊', '▉']
 
-// One full-width bar: a fill colored by position, with sub-cell precision at
-// its edge, an optional marker, the label inside.
+// One full-width bar: a solid fill with sub-cell precision at its edge, an
+// optional marker, the label inside.
 export const barCells = ({ width, fraction, color, label, track = TRACK, marker, right }: BarSpec): Cell[] => {
   const exact = Math.min(1, Math.max(0, fraction)) * width
   const full = Math.min(width, Math.floor(exact))
   const eighths = Math.floor((exact - full) * 8)
+  const base = hex(color)
   const cells: Cell[] = []
   for (let i = 0; i < width; i++) {
-    const base = color(((i + 0.5) / width) * 100)
     if (i < full) {
-      cells.push({ ch: ' ', bg: hex(base) })
+      cells.push({ ch: ' ', bg: base })
     } else if (i === full && eighths > 0) {
-      cells.push({ ch: PARTIALS[eighths]!, fg: hex(base), bg: track })
+      cells.push({ ch: PARTIALS[eighths]!, fg: base, bg: track })
     } else {
       cells.push({ ch: ' ', bg: track })
     }

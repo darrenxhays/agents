@@ -35,6 +35,7 @@ const optionNote = atom({ plugin: 'helm', key: 'optionNote' } as const, '')
 type Band = Extract<Parameters<Hook<'ui.render'>>[1], { component: 'AbovePrompt' }>
 
 // The band above the prompt, top to bottom:
+// - a blank line, between it and the conversation;
 // - the context bar, with the cache countdown at its right end;
 // - COMPACT, HANDOFF, USAGE and CONFIG, always in the same place;
 // - the 5-hour and weekly usage bars while USAGE is open, or helm's options
@@ -136,12 +137,12 @@ export async function drawBand($: EngineInterface, e: Band, config: Settings, be
     // The engine's own node may sit under no Box with a width, so what follows
     // goes beside helm's rows, not inside them.
     <Box flexDirection="column">
-      <Box flexDirection="column" width={width}>
+      <Box flexDirection="column" width={width} marginTop={1}>
         {draw(
             barCells({
               width,
               fraction: (pct ?? 0) / 100,
-              color: () => heat(pct ?? 0),
+              color: heat(pct ?? 0),
               label: contextLabel,
               right: cacheRight,
             }),
@@ -164,7 +165,7 @@ export async function drawBand($: EngineInterface, e: Band, config: Settings, be
                     : undefined
                 const usage = `${w.kind === 'seven_day' ? '▣' : '◷'} ${name} ${w.percentUsed}%${resetLabel(w.resetsAt, w.kind === 'seven_day')}`
 
-                return draw(barCells({ width, fraction: w.percentUsed / 100, color: heat, label: usage, marker: pace }))
+                return draw(barCells({ width, fraction: w.percentUsed / 100, color: heat(w.percentUsed), label: usage, marker: pace }))
               })}
             </Box>
           ))}
