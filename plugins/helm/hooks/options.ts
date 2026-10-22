@@ -11,7 +11,8 @@ import type { OptionRow } from '../types'
 // pragmatic-engineer switch for all projects, and this project's override:
 // PRAGMATIC_ENGINEER_AUTO_USE in .claude/settings.local.json's env, which its
 // session-start hook reads. Claude Code reads plugin options from user
-// settings only, so the override can't be a plugin option.
+// settings only, so the override can't be a plugin option. It also shows that
+// plugin's switch for using the message skill automatically.
 const showConfig = atom({ plugin: 'helm', key: 'showConfig' } as const, false)
 const showUsage = atom({ plugin: 'helm', key: 'showUsage' } as const, false)
 const optionRows = atom({ plugin: 'helm', key: 'optionRows' } as const, [] as OptionRow[])
@@ -27,6 +28,7 @@ export function isOwnRow(row: ConfigRow, name: string): boolean {
 const isPanelRow = (row: ConfigRow) => !row.key.endsWith('.contextBand')
 
 const isAutoUseRow = (row: ConfigRow) => isOwnRow(row, 'darrenxhays') && row.key.endsWith('.auto_use')
+const isMessageRow = (row: ConfigRow) => isOwnRow(row, 'darrenxhays') && row.key.endsWith('.message_auto_use')
 
 // The panel's own row for this project's override; not a /config key.
 export const PROJECT_AUTO_USE = 'project.autoUseHere'
@@ -82,6 +84,10 @@ export async function loadOptions($: EngineInterface) {
         ? { key: PROJECT_AUTO_USE, label: 'This project', kind: 'text', value: 'settings.local.json unreadable', isLocked: true }
         : { key: PROJECT_AUTO_USE, label: 'This project', kind: 'choice', value: here, choices: PROJECT_CHOICES, isLocked: false },
     )
+  }
+  const message = all.find(isMessageRow)
+  if (message !== undefined) {
+    rows.push({ key: message.key, label: 'All projects', kind: message.kind, value: message.value, isLocked: message.isLocked })
   }
   await update($, optionRows, () => rows)
 }

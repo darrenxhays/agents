@@ -198,13 +198,14 @@ const SECTIONS = [
     fields: ['cacheTtl', 'autoKeepWarm', 'keepWarmCount', 'leadSeconds', 'idleAction', 'handoffPercent'],
   },
   { title: 'Next steps', fields: ['nextSteps', 'clickAction', 'autoFallback'] },
-  // The darrenxhays plugin's switch, and this project's override of it.
+  // The darrenxhays plugin's switches: pragmatic-engineer with this project's override of it, and message.
   { title: 'Use pragmatic-engineer automatically', fields: ['auto_use', 'autoUseHere'] },
+  { title: 'Use message automatically', fields: ['message_auto_use'] },
 ]
 
 const fieldOf = (row: OptionRow) => row.key.slice(row.key.lastIndexOf('.') + 1)
 
-// The CONFIG panel: helm's /config rows (and pragmatic-engineer's, see
+// The CONFIG panel: helm's /config rows (and darrenxhays', see
 // options.ts) under a heading for each part, each with its label and its control. A change reloads helm with the new value.
 async function drawOptions($: EngineInterface, e: Band, width: number) {
   const ui = $.ui.resolve(e)

@@ -85,6 +85,8 @@ Claude writes a short message that leads with the point, with real links and no 
 
 Claude's reply links a preview page with a **Copy** button for copying the message again. Preview pages go to `~/.claude/messages/`, and only the latest is kept: each new message deletes the previous page.
 
+To stop Claude using it on its own, turn off **Use message automatically** in helm's CONFIG panel or in `/plugin configure darrenxhays`. It takes effect from the next session. While off, messages Claude writes stay in its reply, and `/darrenxhays:message` still works.
+
 ## Plugins
 
 ### helm (Claude Code)
@@ -94,7 +96,7 @@ A band above the prompt:
 - **Context and cache:** a context-usage bar with a prompt-cache countdown, COMPACT, HANDOFF, USAGE and CONFIG, and an idle keep-warm that refreshes the cache, then compacts or hands off to a fresh session.
 - **Next steps:** when Claude finishes a task it suggests 2-5 next steps as numbered buttons in a card in the conversation. Click one to run it, type its number in the prompt (with a note if you like), or tick several to run them together. `/next-steps` shows the last ones again, `/next-steps suggest` asks for new ones, `/next-steps on|off` turns them on or off.
 
-CONFIG opens helm's options below the buttons to change in place. All of them, including hiding the context band itself, are also under `/plugin configure helm`. With the darrenxhays plugin installed, CONFIG also has **Use pragmatic-engineer automatically**: a switch for all projects, and **This project** (default, on or off) to override it here (see [Skills](#skills-darrenxhays-plugin)).
+CONFIG opens helm's options below the buttons to change in place. All of them, including hiding the context band itself, are also under `/plugin configure helm`. With the darrenxhays plugin installed, CONFIG also has **Use pragmatic-engineer automatically**: a switch for all projects, and **This project** (default, on or off) to override it here (see [Skills](#skills-darrenxhays-plugin)); and **Use message automatically**, a switch for all projects (see [message](#message)).
 
 Install, at a Claude Code prompt (no clone needed):
 
