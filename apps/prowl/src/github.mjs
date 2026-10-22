@@ -55,6 +55,7 @@ export async function cloneMissing(prs, dir) {
 }
 
 // Fix my PRs: what a fix round reads from a PR, and the one thing it writes (a reply on a thread).
+// postComment is the poller's Review started comment.
 
 const THREADS = 'query($owner:String!,$repo:String!,$n:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$n){reviewThreads(first:100){nodes{'
   + 'id isResolved path line first:comments(first:1){nodes{databaseId author{login __typename} body url}} last:comments(last:1){nodes{author{login} body}}}}}}}';
@@ -131,6 +132,11 @@ export async function prCommentBodies(pr) {
 /** Replies on the review thread whose first comment is `commentId`; the body is read from `bodyFile` ({ "body": … }). */
 export async function postReply(pr, commentId, bodyFile) {
   return (await run('gh', ['api', '-X', 'POST', `repos/${pr.repo}/pulls/${pr.number}/comments/${commentId}/replies`, '--input', bodyFile, '--jq', '.html_url'])).trim();
+}
+
+/** Posts a conversation comment on the PR; the body is read from `bodyFile` ({ "body": … }). Resolves with its URL. */
+export async function postComment(pr, bodyFile) {
+  return (await run('gh', ['api', '-X', 'POST', `repos/${pr.repo}/issues/${pr.number}/comments`, '--input', bodyFile, '--jq', '.html_url'])).trim();
 }
 
 /** 'green', 'failing' or 'pending' for a PR's required checks ([{ name, bucket }]); no required checks is green. */

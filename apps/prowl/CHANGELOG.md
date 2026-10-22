@@ -2,6 +2,11 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.10.0
+- When Prowl starts reviewing a PR, it now posts a one-line comment on it (🦉 PR-Owl is reviewing this PR, with a link to the ticket), so teammates can see a review is under way before they pick the PR up themselves. It stays on the PR after the review is posted.
+- The comment is the new *Review started* section of output.md (Config, Output templates): edit its text there. If you edited your copy in ~/.prowl/config/, it stays as it is, and Prowl uses the default's *Review started* until you copy that section in.
+- Jira: two copies of Prowl signed in as the same Atlassian account (on two machines, say) can no longer both claim the same ticket. Each claim briefly adds a one-off prowl-claim-… label, so the ticket's history shows whose claim came first; Prowl takes it off again straight away. Azure DevOps already rejected the second claim, and still does.
+
 ## 2.9.0
 - Fix my PRs (Config, 4), off by default: reviews run just as before until you turn it on. When a review asks for changes on PRs you authored, Prowl fixes them in a worktree, runs your checks, pushes, replies on each thread it fixed or disputed, waits for CI and re-tags the ticket for a re-review, round after round, until it's ready to merge or needs you. It never force-pushes, resolves, approves or merges.
 - With Review my own PRs off, Prowl doesn't review your PRs, so fix rounds start only on tickets you watch: press w on one in History, or run prowl --watch AB#123. Rounds then also follow reviews by a teammate's Prowl, or by people.

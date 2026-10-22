@@ -200,6 +200,12 @@ export function template(md, heading) {
   return null;
 }
 
+/** The template under `## heading` in the user's output.md, or in the default's when the user's copy doesn't have it yet. */
+export function outputTemplate(appDir, heading) {
+  return [path.join(CONFIG_DIR, 'output.md'), path.join(appDir, 'skills', 'prowl-review', 'config', 'output.md')]
+    .map(f => { try { return template(fs.readFileSync(f, 'utf8'), heading); } catch { return null; } }).find(t => t != null) ?? '';
+}
+
 /** `text` with each <name> filled in from `vars`; names it doesn't know are left as they are. */
 export const fill = (text, vars) => text.replace(/<([a-z][\w #/-]*)>/gi, (m, k) => vars[k] ?? m);
 
@@ -613,9 +619,7 @@ export function createFixer(app, { log, hoot, applyTag, appDir, trackers }) {
     const any = (fix.result?.items || []).some(it => it.action === 'dispute' || (it.action === 'fix' && fix.pushedSha));
     const todo = any ? repliesToPost(fix, await github.prCommentBodies(fix.pr)) : []; // a restart skips what it posted
     if (todo.length) {
-      // The user's output.md, with the default's template for any section it doesn't have yet.
-      const output = [path.join(CONFIG_DIR, 'output.md'), path.join(appDir, 'skills', 'prowl-review', 'config', 'output.md')].map(f => { try { return fs.readFileSync(f, 'utf8'); } catch { return ''; } });
-      const tpl = heading => output.map(md => template(md, heading)).find(t => t != null) ?? '';
+      const tpl = heading => outputTemplate(appDir, heading);
       for (const r of todo) {
         const body = `${fill(tpl(r.what === 'fixed' ? 'Fix reply' : 'Dispute reply'), { 'comment prefix': tpl('Comment prefix'), sha: short(fix.pushedSha), note: r.note })}\n${r.marker}`;
         const file = path.join(fix.briefDir, `reply-${r.thread.replace(/[^\w-]/g, '')}.json`);

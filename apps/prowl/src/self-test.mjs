@@ -1,7 +1,7 @@
 // node prowl.mjs --self-test: checks the logic that decides which tickets and PRs get touched.
 import assert from 'node:assert/strict';
 import { frontMatter, mentions, norm, swapTags, tagMatches } from './match.mjs';
-import { adfText, claimEntry, label } from './jira.mjs';
+import { addedLabel, adfText, claimEntry, label } from './jira.mjs';
 import { htmlText } from './ado.mjs';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -15,7 +15,7 @@ import { createMascot, wrap } from './mascot.mjs';
 import { changelog, newer, syncConfigFiles } from './update.mjs';
 import { DISALLOWED, fenceDecision, fenceSettings } from './fence.mjs';
 import { checksState, detailsFromBodies, threadsFrom } from './github.mjs';
-import { actionable, buildBrief, daySpend, fill, fixArgs, fixEnv, globRe, guardFailures, matchChecks, needItem, parkedUrls, pastAnswers, refusal,
+import { actionable, buildBrief, daySpend, fill, fixArgs, fixEnv, globRe, guardFailures, matchChecks, needItem, outputTemplate, parkedUrls, pastAnswers, refusal,
   repliesToPost, runChecks, runCommand, SECRET_PATTERNS, spendLevel, stripParked, template, ticketSpend, validateResult, wantsRound } from './fixes.mjs';
 
 const T = 'Ready for Review';
@@ -51,6 +51,12 @@ const entry = (who, from, to) => ({ author: { accountId: who }, items: [{ field:
 const log = [entry('alice', '', 'Ready-for-Review'), entry('bob', 'Ready-for-Review', 'In-Review'), entry('carol', 'In-Review', 'In-Review backend')];
 assert.equal(claimEntry(log, ['Ready-for-Review']).author.accountId, 'bob');
 assert.equal(claimEntry([entry('alice', 'x', 'x y')], ['Ready-for-Review']), null);
+// Two copies of Prowl signed in as the same account: each claim's one-off label says whose write won. The later
+// write only adds its own label, and when both writes removed the trigger at once, the last one wins for both.
+const twin = [entry('alice', 'Ready-for-Review', 'In-Review prowl-claim-aa'), entry('alice', 'In-Review prowl-claim-aa', 'In-Review prowl-claim-aa prowl-claim-bb')];
+assert.ok(addedLabel(claimEntry(twin, ['Ready-for-Review']), 'prowl-claim-aa') && !addedLabel(claimEntry(twin, ['Ready-for-Review']), 'prowl-claim-bb'));
+const atOnce = [entry('alice', 'Ready-for-Review', 'In-Review prowl-claim-aa'), entry('alice', 'Ready-for-Review', 'In-Review prowl-claim-bb')];
+assert.ok(addedLabel(claimEntry(atOnce, ['Ready-for-Review']), 'prowl-claim-bb') && !addedLabel(claimEntry(atOnce, ['Ready-for-Review']), 'prowl-claim-aa'));
 
 assert.deepEqual(frontMatter('---\nverdict: REQUEST CHANGES\nhigh: 2\nfixed: "3"\n---\n# x'), { verdict: 'REQUEST CHANGES', high: 2, fixed: '3' });
 assert.equal(frontMatter('# no front matter'), null);
@@ -387,6 +393,11 @@ assert.deepEqual(repliesToPost(fixRec, [`Fixed in 3f2a1c9\n${todo[0].marker}`, `
 assert.deepEqual(repliesToPost({ ...fixRec, pushedSha: null }, []).map(r => r.what), ['disputed'], "nothing pushed: no 'fixed' replies");
 const outputMd = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'skills', 'prowl-review', 'config', 'output.md'), 'utf8');
 assert.equal(fill(template(outputMd, 'Fix reply'), { 'comment prefix': template(outputMd, 'Comment prefix'), sha: '3f2a1c9', note: 'save() awaits.' }), '🦉 **PR-Owl Review** · Fixed in 3f2a1c9: save() awaits.');
+const started = fill(template(outputMd, 'Review started'), { ticket: 'AB#42', 'ticket link': 'https://dev.azure.com/o/p/_workitems/edit/42' });
+assert.equal(started, "🦉 **PR-Owl** is reviewing this PR for [AB#42](https://dev.azure.com/o/p/_workitems/edit/42). Its review lands here when it's done.", 'Review started');
+const appDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+assert.ok(outputTemplate(appDir, 'Review started'), "the user's template, or the default's when their output.md predates it");
+assert.equal(outputTemplate(appDir, 'No such section'), '');
 assert.equal(template('# x\n\n## Fix reply\n\nno fence\n\n## Next\n```\nnot this\n```\n', 'Fix reply'), null, 'a section without a template');
 assert.equal(template('', 'Fix reply'), null);
 // Prowl never resolves a thread: the only GraphQL its fix code sends is the threads query.
