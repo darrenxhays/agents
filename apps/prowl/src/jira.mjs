@@ -1,10 +1,10 @@
+import { randomBytes } from 'node:crypto';
 import { readToken } from './secrets.mjs';
 
 // Jira Cloud REST, signed in with your Atlassian email and an API token from the OS credential store.
 export const name = 'Jira';
 let token = '';
 let tokenFor = ''; // the email `token` belongs to
-let me = null; // { accountId, displayName }
 const boardIds = new Map(); // board name -> id
 
 const siteOf = cfg => cfg.jira.site.replace(/\/+$/, '');
@@ -36,10 +36,9 @@ async function api(cfg, route, { method = 'GET', body } = {}) {
 
 const enc = encodeURIComponent;
 
-/** Drops the cached token and identity, after a new token is saved. */
+/** Drops the cached token, after a new token is saved. */
 export function forgetToken() {
   token = '';
-  me = null;
 }
 
 /** Jira labels can't contain spaces, so a configured tag like "In Review" is written as In-Review. */
@@ -50,8 +49,7 @@ export const ticketUrl = (cfg, key) => `${siteOf(cfg)}/browse/${key}`;
 
 /** Checks the sign-in; resolves with your Jira display name. */
 export async function whoAmI(cfg) {
-  me = await api(cfg, '/rest/api/3/myself');
-  return me.displayName;
+  return (await api(cfg, '/rest/api/3/myself')).displayName;
 }
 
 async function boardId(cfg, board) {
@@ -90,16 +88,23 @@ export async function findTickets(cfg, board, isTrigger) {
   return { tickets, variants: [...new Set(tickets.flatMap(t => t.tags.filter(isTrigger)))] };
 }
 
+// `add`: a label, a list of them, or ''.
 const editLabels = (cfg, key, remove, add) => api(cfg, `/rest/api/3/issue/${enc(key)}`, {
   method: 'PUT',
   // add/remove operations rather than a new list, so a label someone else adds at the same moment survives.
-  body: { update: { labels: [...remove.map(l => ({ remove: l })), ...(add ? [{ add: label(add) }] : [])] } },
+  body: { update: { labels: [...remove.map(l => ({ remove: l })), ...[add].flat().filter(Boolean).map(l => ({ add: label(l) }))] } },
 });
+
+const CLAIM = /^prowl-claim-/; // the one-off label each claim adds; see claim()
+
+/** True when the changelog entry added label `l`. */
+export const addedLabel = (entry, l) => entry.items.some(it => it.field === 'labels'
+  && (it.toString || '').split(' ').includes(l) && !(it.fromString || '').split(' ').includes(l));
 
 /**
  * The changelog entry that last removed one of `removed` from the labels: whoever made it claimed the ticket.
- * Two pollers can send the same claim (Jira has no conditional update), but only the first write changes
- * anything, so only it shows up here.
+ * Two pollers can send the same claim (Jira has no conditional update), but only the first write removes
+ * the label, so only it shows up here.
  */
 export function claimEntry(histories, removed) {
   const gone = new Set(removed);
@@ -117,20 +122,31 @@ export async function lookup(cfg, key) {
   return { key: issue.key, title: issue.fields.summary || '', url: ticketUrl(cfg, issue.key), ref: { site: siteOf(cfg), key: issue.key } };
 }
 
-/** Swaps the trigger label for the in-progress one; throws if another poller claimed the ticket first. */
+/**
+ * Swaps the trigger label for the in-progress one; throws if another poller claimed the ticket first. The same write
+ * adds a one-off prowl-claim-… label, which marks the winning changelog entry as ours: the author can't, as two
+ * copies of Prowl can sign in as the same account. A later write still adds its own label, so it never looks like the winner.
+ */
 export async function claim(cfg, ticket, drop, add) {
   const remove = ticket.tags.filter(drop);
-  await editLabels(cfg, ticket.key, remove, add);
-  if (!me) await whoAmI(cfg);
-  const { total } = await api(cfg, `/rest/api/3/issue/${enc(ticket.key)}/changelog?maxResults=1`);
-  const recent = await api(cfg, `/rest/api/3/issue/${enc(ticket.key)}/changelog?startAt=${Math.max(0, total - 20)}&maxResults=20`);
-  const entry = claimEntry(recent.values, remove);
-  if (entry && entry.author?.accountId !== me.accountId) {
-    // Someone else's claim, or a person removed the trigger label by hand. In that case our in-progress
-    // label is the only one: take it back off.
-    const theirs = entry.items.some(it => it.field === 'labels' && (it.toString || '').split(' ').includes(label(add)));
-    if (!theirs) await editLabels(cfg, ticket.key, [label(add)], '');
-    throw new Error(`${entry.author?.displayName || 'someone else'} got there first`);
+  const mine = `prowl-claim-${randomBytes(4).toString('hex')}`;
+  await editLabels(cfg, ticket.key, remove, [add, mine]);
+  try {
+    await new Promise(r => setTimeout(r, 2000)); // two writes at the same moment: both are in the changelog by then
+    const { total } = await api(cfg, `/rest/api/3/issue/${enc(ticket.key)}/changelog?maxResults=1`);
+    const recent = await api(cfg, `/rest/api/3/issue/${enc(ticket.key)}/changelog?startAt=${Math.max(0, total - 20)}&maxResults=20`);
+    const entry = claimEntry(recent.values, remove);
+    if (entry && !addedLabel(entry, mine)) {
+      // Another Prowl's claim, or a person removed the trigger label by hand. In that case our in-progress
+      // label is the only one: take it back off.
+      const theirs = entry.items.some(it => it.field === 'labels' && (it.toString || '').split(' ').includes(label(add)));
+      if (!theirs) await editLabels(cfg, ticket.key, [label(add)], '');
+      const by = entry.author?.displayName;
+      const prowl = entry.items.some(it => it.field === 'labels' && (it.toString || '').split(' ').some(l => CLAIM.test(l)));
+      throw new Error(prowl ? `another copy of Prowl${by ? ` (signed in as ${by})` : ''} got there first` : `${by || 'someone else'} got there first`);
+    }
+  } finally {
+    await editLabels(cfg, ticket.key, [mine], '').catch(() => {}); // or retag() clears it when the review ends
   }
 }
 
@@ -156,5 +172,5 @@ export async function ticketText(cfg, ticket) {
 /** Replaces the labels Prowl owns (`drop`) with `add` ('' = none) on a ticket a review ran for. */
 export async function retag(cfg, ref, drop, add) {
   const issue = await api(cfg, `/rest/api/3/issue/${enc(ref.key)}?fields=labels`);
-  await editLabels(cfg, ref.key, (issue.fields.labels || []).filter(drop), add);
+  await editLabels(cfg, ref.key, (issue.fields.labels || []).filter(l => drop(l) || CLAIM.test(l)), add);
 }

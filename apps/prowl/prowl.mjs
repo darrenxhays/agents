@@ -29,7 +29,7 @@ const secrets = await import('./src/secrets.mjs');
 const { norm, tagMatches } = await import('./src/match.mjs');
 const rv = await import('./src/reviews.mjs');
 const { isAlive } = await import('./src/proc.mjs');
-const { createFixer } = await import('./src/fixes.mjs');
+const { createFixer, fill, outputTemplate } = await import('./src/fixes.mjs');
 const update = await import('./src/update.mjs');
 
 const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url)); // this folder is also the plugin with prowl-review
@@ -222,7 +222,23 @@ async function consider(tracker, ticket) {
   rv.saveState(state);
   lastByKey.delete(key);
   hoot(toReview.length > 1 ? `Starting a batch review of ${toReview.length} PRs` : `Starting a review of ${toReview[0].title}`);
-  return log('ok', `${ticket.key}: ${prior ? `re-review #${run.reviewNo}` : 'review'} started on ${toReview.length} PR${toReview.length > 1 ? 's' : ''}${skipped}`);
+  log('ok', `${ticket.key}: ${prior ? `re-review #${run.reviewNo}` : 'review'} started on ${toReview.length} PR${toReview.length > 1 ? 's' : ''}${skipped}`);
+  return announce(run);
+}
+
+/** Posts the Review started comment (output.md) on each PR under review, so people can see Prowl has it. */
+async function announce(run) {
+  // The prowl-review marker keeps prowl-review from counting it as someone else's comment.
+  const body = `${fill(outputTemplate(PLUGIN_DIR, 'Review started'), { ticket: run.ticket, 'ticket link': run.ticketUrl })}\n<!-- prowl-review ${run.id} started -->`;
+  const file = path.join(path.dirname(run.logPath), `${run.id}.started.json`);
+  writeJson(file, { body });
+  for (const pr of run.prs) {
+    try {
+      await github.postComment(pr, file);
+    } catch (e) {
+      log('warn', `${run.ticket}: couldn't post the review-started comment on ${pr.repo}#${pr.number} (${e.message})`);
+    }
+  }
 }
 
 /** Clears History's ⚑ flag on each PR a human has approved since Prowl gave it its stamp (Approve PRs off, or your own PR). */

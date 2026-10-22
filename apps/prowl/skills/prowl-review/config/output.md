@@ -1,6 +1,6 @@
 # PR-Owl Review — Output
 
-Templates for everything this skill posts on GitHub: the review banner, the review body, the details file collapsed at its bottom, inline comments, replies on existing threads, and the comment that stands in for an approval when approvals are off. With Fix my PRs on, it also templates the replies Prowl posts after fixing a PR, and the fix commits. Prowl keeps your copy of this file in `~/.prowl/config/` (or `$PROWL_HOME/config/`): edit that one. Updates never overwrite a copy you've edited; Prowl's Update Notes say when this default changes.
+Templates for everything this skill posts on GitHub: the comment Prowl posts when a review starts, the review banner, the review body, the details file collapsed at its bottom, inline comments, replies on existing threads, and the comment that stands in for an approval when approvals are off. With Fix my PRs on, it also templates the replies Prowl posts after fixing a PR, and the fix commits. Prowl keeps your copy of this file in `~/.prowl/config/` (or `$PROWL_HOME/config/`): edit that one. Updates never overwrite a copy you've edited; Prowl's Update Notes say when this default changes.
 
 Each template is a fenced block. Words in `<angle brackets>` are filled in for each post; everything else is posted as written. The hidden `<!-- prowl-review … -->` marker is added to every post whatever these templates say, because the re-run guard depends on it.
 
@@ -25,6 +25,14 @@ Every inline comment, and every reply on an existing thread, starts with this te
 
 ```text
 🦉 **PR-Owl Review** ·
+```
+
+## Review started
+
+Prowl posts this as a comment on each PR as soon as it starts reviewing it, so people can see a review is under way before they decide whether to review the PR themselves. `<ticket>` is the ticket key and `<ticket link>` its URL. It stays on the PR after the review is posted.
+
+```markdown
+🦉 **PR-Owl** is reviewing this PR for [<ticket>](<ticket link>). Its review lands here when it's done.
 ```
 
 ## Review body
@@ -125,7 +133,7 @@ PR-Owl gives this PR its stamp of approval. It is waiting on a human reviewer's 
 One per verified finding anchored to the diff. Write it the way a teammate would: one or two plain sentences saying what goes wrong and when, then the fix. No headings, labels, severity or jargon; the details file has the rest.
 
 ```markdown
-<comment prefix><one or two sentences: what goes wrong and when>
+<comment prefix> <one or two sentences: what goes wrong and when>
 
 **Fix:** <the fix, in a sentence>
 ```
@@ -141,7 +149,7 @@ Also raised by @<author>: <link>
 On an earlier thread (someone else's, resolved or outdated) whose problem is still in the code at head, or that understates it. Like an inline comment, keep it to a sentence or two; the details file has the rest:
 
 ```markdown
-<comment prefix>This is still happening at <short head sha>: <one or two sentences: what goes wrong and when><, now at file:line, if it moved>
+<comment prefix> This is still happening at <short head sha>: <one or two sentences: what goes wrong and when><, now at file:line, if it moved>
 
 **Fix:** <the fix, in a sentence>
 ```
@@ -151,13 +159,13 @@ On an earlier thread (someone else's, resolved or outdated) whose problem is sti
 On a re-review, on each thread from the previous review. **Verified fixed** (the thread is then resolved):
 
 ```text
-<comment prefix>Verified fixed in <sha>
+<comment prefix> Verified fixed in <sha>
 ```
 
 **Still open:**
 
 ```text
-<comment prefix>Still open as of <sha>: <one line why>
+<comment prefix> Still open as of <sha>: <one line why>
 ```
 
 ## Fix reply
@@ -165,7 +173,7 @@ On a re-review, on each thread from the previous review. **Verified fixed** (the
 With Prowl's **Fix my PRs** on, Prowl posts this on each thread a fix session fixed, after pushing the fix. `<sha>` is the pushed commit and `<note>` the session's one-line note on what it changed. Prowl never resolves the thread: the next review resolves it once it verifies the fix. Prowl adds a hidden `<!-- prowl-fix … -->` marker to each reply, so a restart never posts one twice.
 
 ```text
-<comment prefix>Fixed in <sha>: <note>
+<comment prefix> Fixed in <sha>: <note>
 ```
 
 ## Dispute reply
@@ -173,7 +181,7 @@ With Prowl's **Fix my PRs** on, Prowl posts this on each thread a fix session fi
 On each thread a fix session disputed instead of changing the code, with `<note>` its evidence:
 
 ```text
-<comment prefix>Not changed: <note>
+<comment prefix> Not changed: <note>
 ```
 
 ## Fix commit message
