@@ -23,18 +23,24 @@ const JIRA = c => c.taskBoard === 'jira';
 const FIX = c => c.fix?.enabled;
 const opens = 'enter opens it. Updates never overwrite your edits.';
 const FIELDS = [
+  // { heading } starts a section of the Config view: drawn above the rows that follow it, never selected.
+  { heading: 'Config files' },
   // The user's config files: enter opens one in its default app.
   { file: CONFIG_PATH, label: 'Settings file', help: `Every setting on this page, as JSON. ${opens}` },
   { file: path.join(CONFIG_DIR, 'review.md'), label: 'Review rules', help: `Reviewer stance, severity definitions, and the verdict each severity gives. Applies from the next review. ${opens}` },
   { file: path.join(CONFIG_DIR, 'review-axis-catalog.md'), label: 'Review checklists', help: `What reviewers check: the review axes and their checklists. Applies from the next review. ${opens}` },
   { file: path.join(CONFIG_DIR, 'output.md'), label: 'Output templates', help: `How everything posted on GitHub looks: review-started comment, banner, review body, details file, comments, replies, approvals-off comment. Applies from the next review. ${opens}` },
+  { heading: 'Task board' },
   { key: 'taskBoard', label: 'Task board', type: 'enum', values: ['ado', 'jira'], names: { ado: 'Azure DevOps', jira: 'Jira' }, help: 'Where tickets are watched: Azure DevOps or Jira Cloud. enter switches. Each keeps its own boards.' },
   { key: 'ado.org', label: 'Azure DevOps org', type: 'text', when: ADO, help: 'Organization URL, e.g. https://dev.azure.com/your-org. Signed in with az login.', valid: https },
   { key: 'jira.site', label: 'Jira site', type: 'text', when: JIRA, help: 'Your Jira Cloud URL, e.g. https://yourcompany.atlassian.net.', valid: v => https(v) === true ? true : 'must be an https:// URL, e.g. https://yourcompany.atlassian.net' },
   { key: 'jira.email', label: 'Jira email', type: 'text', when: JIRA, help: 'The email you sign in to Atlassian with.', valid: v => /^[^\s@"\\]+@[^\s@"\\]+$/.test(v) || 'must be an email address' },
   { key: 'jira.token', label: 'Jira API token', type: 'secret', when: JIRA, help: 'Create one at id.atlassian.com > Security > API tokens. Kept in your OS credential store, never in the config file.' },
   'boards',
+  { key: 'githubOwner', label: 'GitHub org', type: 'text', help: 'Open PRs whose title or description mentions the ticket (AB#123 or PROJ-123) are searched for here.' },
+  { key: 'pollSeconds', label: 'Poll every (seconds)', type: 'int', min: 30, max: 86400, help: 'How often the boards are checked. r polls now.' },
   // Jira calls tags labels: `jira` replaces the label and help shown when it is the task board.
+  { heading: 'Tags', jira: { heading: 'Labels' } },
   { key: 'tags.trigger', label: 'Trigger tag', type: 'text', help: 'Tickets carrying this tag, or a near-miss spelling of it, get reviewed.',
     jira: { label: 'Trigger label', help: 'Issues carrying this label, or a near-miss spelling of it, get reviewed.' } },
   { key: 'tags.inProgress', label: 'In-progress tag', type: 'text', help: 'Set when a review starts. Colour it yellow in board settings > Cards > Tag colors.',
@@ -43,8 +49,7 @@ const FIELDS = [
     jira: { label: 'Done label', help: 'Set when a review finishes. Spaces become dashes. Re-add the trigger label to ask for a re-review.' } },
   { key: 'tagMatchMaxTypos', label: 'Tag typo tolerance', type: 'int', min: 0, max: 3, help: 'Typos (wrong, missing, extra or swapped letters) still treated as the trigger tag. Case, spaces and punctuation are always ignored. 0 = exact.',
     jira: { label: 'Label typo tolerance', help: 'Typos (wrong, missing, extra or swapped letters) still treated as the trigger label. Case, spaces and punctuation are always ignored. 0 = exact.' } },
-  { key: 'githubOwner', label: 'GitHub org', type: 'text', help: 'Open PRs whose title or description mentions the ticket (AB#123 or PROJ-123) are searched for here.' },
-  { key: 'pollSeconds', label: 'Poll every (seconds)', type: 'int', min: 30, max: 86400, help: 'How often the boards are checked. r polls now.' },
+  { heading: 'Review sessions' },
   { key: 'maxConcurrentReviews', label: 'Max parallel reviews', type: 'int', min: 1, max: 10, help: "Extra tickets stay tagged until a slot frees, so a teammate's poller can take them." },
   { key: 'workDir', label: 'Projects Directory', type: 'text', help: 'Reviews run here and load its CLAUDE.md, e.g. your projects root. A PR repo not cloned here is cloned before its review.', valid: v => isDir(v) || 'folder not found' },
   { key: 'claude.model', label: 'Model', type: 'text', help: 'Model for review sessions.' },
@@ -53,15 +58,16 @@ const FIELDS = [
   { key: 'claude.maxBudgetUsd', label: 'Spend cap per review ($)', type: 'int', min: 0, max: 100000, help: "Stops a review once it has spent this much. It fails with the cap named and isn't retried, so a runaway review isn't paid for twice. 0 = no cap." },
   { key: 'claude.maxTurns', label: 'Turn cap per review', type: 'int', min: 0, max: 100000, help: "Stops a review after this many turns. It fails with the cap named and isn't retried. 0 = no cap." },
   { key: 'reviewTimeoutMinutes', label: 'Review time limit (min)', type: 'int', min: 0, max: 10080, help: "Stops a review that runs longer than this, counted from its start. It fails with the cap named and isn't retried. 0 = no limit." },
+  { key: 'ticketContext', label: 'Ticket text in reviews', type: 'bool', help: "on: the ticket's description (and, on Azure DevOps, its acceptance criteria) is added to the review's brief, so reviewers know the goal without signing in to the tracker. Up to about 6 KB." },
+  { key: 'allowMemoryWrites', label: 'Reviews use memory', type: 'bool', help: "on: review sessions use Claude Code's auto-memory like any session, and can add what they did to your memory files. off: reviews run with auto-memory off, so they neither read nor write it." },
+  { key: 'caffeinate', label: 'Keep Mac awake', type: 'bool', when: () => process.platform === 'darwin', help: "on: the Mac doesn't idle-sleep while a review runs (caffeinate), since sleep stalls a review and stretches it out. Closing the lid still sleeps it." },
+  { heading: 'Verdicts and rounds' },
   { key: 'reviewOwnPrs', label: 'Review my own PRs', type: 'bool', help: "off: a ticket with any PR you authored is left for a teammate. on: it is reviewed like any other; GitHub won't let you approve or request changes on your own PR, so those get a comment review with the verdict." },
   { key: 'approvals', label: 'Approve PRs', type: 'bool', help: 'on: a PR with no blocking findings gets a GitHub approval. off: Prowl comments that it found no blocking issues, and a human approves (text in Output templates); History flags those PRs with ⚑ until someone approves them.' },
   { key: 'maxReviewRounds', label: 'Max review rounds', type: 'int', min: 0, max: 100, help: 'Reviews per ticket. Once a ticket has had this many, Prowl leaves it tagged and unclaimed for a person, and History flags it with ⚑ round cap reached. 0 = no cap.' },
-  { key: 'parkHumanOnly', label: 'Park human-only findings', type: 'bool', help: "on: a re-review parks an earlier finding that only a person can fix outside the code (a CI pipeline, tracker or permissions config, a product decision). It isn't re-posted, is listed under Parked in the details file, and doesn't hold up the verdict." },
   { key: 'reReviewScope', label: 'Re-review scope', type: 'enum', values: ['full', 'delta'], help: "full: a re-review reads each PR whole, with the whole last report. delta: only the commits since the last review, plus its still-open findings; the rest of the PR is context. enter switches." },
-  { key: 'allowMemoryWrites', label: 'Reviews use memory', type: 'bool', help: "on: review sessions use Claude Code's auto-memory like any session, and can add what they did to your memory files. off: reviews run with auto-memory off, so they neither read nor write it." },
-  { key: 'caffeinate', label: 'Keep Mac awake', type: 'bool', when: () => process.platform === 'darwin', help: "on: the Mac doesn't idle-sleep while a review runs (caffeinate), since sleep stalls a review and stretches it out. Closing the lid still sleeps it." },
-  { key: 'logRetentionDays', label: 'Keep logs (days)', type: 'int', min: 0, max: 3650, help: 'Review logs older than this are deleted, and poller.log rolls over to poller.log.1 past 5 MB. Reports are always kept. 0 = keep everything.' },
-  { key: 'ticketContext', label: 'Ticket text in reviews', type: 'bool', help: "on: the ticket's description (and, on Azure DevOps, its acceptance criteria) is added to the review's brief, so reviewers know the goal without signing in to the tracker. Up to about 6 KB." },
+  { key: 'parkHumanOnly', label: 'Park human-only findings', type: 'bool', help: "on: a re-review parks an earlier finding that only a person can fix outside the code (a CI pipeline, tracker or permissions config, a product decision). It isn't re-posted, is listed under Parked in the details file, and doesn't hold up the verdict." },
+  { heading: 'Fix my PRs' },
   { key: 'fix.enabled', label: 'Fix my PRs', type: 'bool', help: "on: when a review asks for changes on your own PRs, Prowl fixes them, runs your checks, pushes, replies on the threads and re-tags for a re-review. With Review my own PRs off, Prowl never reviews your PRs, so rounds start only on tickets you watch (w in History)." },
   { file: path.join(CONFIG_DIR, 'fix.md'), label: 'Fix rules', when: FIX, help: `How fix sessions work through findings and threads: what they fix, dispute or ask you. Applies from the next fix. ${opens}` },
   { file: CHECKS_PATH, label: 'Checks before push', when: FIX, help: 'Commands run in the fix worktree before a push, per repo, e.g. { "my-org/*": { "run": ["npm test"] } }. Nothing matches: no checks. Never overwritten. enter opens it.' },
@@ -80,6 +86,8 @@ const FIELDS = [
   { key: 'fix.model', label: 'Fix model', type: 'text', empty: true, when: FIX, help: 'Model for fix sessions. Empty: the review Model.' },
   { key: 'fix.effort', label: 'Fix effort', type: 'enum', values: ['low', 'medium', 'high', 'xhigh', 'max'], when: FIX, help: 'Reasoning effort for fix sessions. enter cycles.' },
   { key: 'fix.notify', label: 'Desktop notifications', type: 'bool', when: FIX, help: 'on: a desktop notification when a ticket is ready to merge or needs you.' },
+  { heading: 'Prowl' },
+  { key: 'logRetentionDays', label: 'Keep logs (days)', type: 'int', min: 0, max: 3650, help: 'Review logs older than this are deleted, and poller.log rolls over to poller.log.1 past 5 MB. Reports are always kept. 0 = keep everything.' },
   { key: 'dryRun', label: 'Dry run', type: 'bool', help: 'Log what would be reviewed without changing tags or starting reviews.' },
   { key: 'autoUpdate', label: 'Auto-update', type: 'bool', help: 'Install a newer Prowl release before launching. It waits while reviews from an earlier launch are still running.' },
 ];
@@ -316,12 +324,18 @@ export function startTui(app, actions) {
     jira: ['A Jira board, by name or id: its open issues are polled.', 'Add a Jira board by its name (e.g. My Team board) or its id (the number in its URL).'],
   };
 
+  /** The Config view's selectable rows, each with the `section` heading it sits under. */
   function configRows() {
     const [one, add] = BOARD_HELP[app.cfg.taskBoard];
-    return FIELDS.filter(f => !f.when || f.when(app.cfg)).flatMap(f => (f !== 'boards' ? [JIRA(app.cfg) && f.jira ? { ...f, ...f.jira } : f] : [
-      ...app.boards().map((b, i) => ({ board: i, label: `Board ${i + 1}`, help: `${one} enter edits · d deletes.` })),
-      { addBoard: true, label: '+ Add board', help: add },
-    ]));
+    let section = '';
+    return FIELDS.filter(f => !f.when || f.when(app.cfg)).flatMap(f => {
+      f = JIRA(app.cfg) && f.jira ? { ...f, ...f.jira } : f;
+      if (f.heading) { section = f.heading; return []; }
+      return (f !== 'boards' ? [f] : [
+        ...app.boards().map((b, i) => ({ board: i, label: `Board ${i + 1}`, help: `${one} enter edits · d deletes.` })),
+        { addBoard: true, label: '+ Add board', help: add },
+      ]).map(r => ({ ...r, section }));
+    });
   }
 
   function shown(f) {
@@ -374,7 +388,10 @@ export function startTui(app, actions) {
     const fields = configRows();
     const sel = clampSel(CONFIG, fields.length);
     const rows = [[[ST.grey, '  Saved to '], [ST.link, CONFIG_PATH, pathToFileURL(CONFIG_PATH).href], [ST.grey, ' on every change. The next poll uses it.']], []];
-    for (const { item: f, i } of windowed(fields, sel, Math.max(1, H - 6))) {
+    // Each section's heading goes above its first row, after a blank line, and the window counts them as rows.
+    const lines = fields.flatMap((f, i) => [...(f.section !== fields[i - 1]?.section ? [...(i ? [{}] : []), { heading: f.section }] : []), { f, i }]);
+    for (const { item: { f, i, heading } } of windowed(lines, lines.findIndex(l => l.i === sel), Math.max(1, H - 6))) {
+      if (!f) { rows.push(heading ? [[ST.title, ` ${heading.toUpperCase()}`]] : []); continue; }
       const value = i === sel && ui.edit ? editSegs()
         : f.file ? [[ST.link, f.file, pathToFileURL(f.file).href]] : [['', shown(f)]];
       rows.push([cursor(i === sel), [f.addBoard ? ST.green : ST.grey, f.label.padEnd(LABEL_W)], ...value]);
