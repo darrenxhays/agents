@@ -110,7 +110,7 @@ async function jiraCloud(cfg) {
   const jira = await import('./jira.mjs');
   console.log(`  Your Jira site is the address you open Jira at. ${B('https://start.atlassian.com')} lists your sites.`);
   cfg.jira.site = (await ask('Jira site', cfg.jira.site || 'https://yourcompany.atlassian.net', {
-    valid: v => (/^https:\/\/\S+$/.test(v) && !v.includes('yourcompany')) || 'your Jira URL, e.g. https://acme.atlassian.net',
+    valid: v => (/^https:\/\/\S+$/.test(v) && !v.includes('yourcompany')) || 'your Jira URL, e.g. https://<your-site>.atlassian.net',
   })).replace(/\/+$/, '');
   const gitEmail = (await works('git', ['config', 'user.email']))?.trim();
   cfg.jira.email = await ask('Atlassian account email', cfg.jira.email || gitEmail, { valid: v => /^[^\s@"\\]+@[^\s@"\\]+$/.test(v) || 'must be an email address' });

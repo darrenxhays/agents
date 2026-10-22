@@ -2,6 +2,9 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.11.3
+- When setup rejects a Jira site address, the example it shows is now a generic https://<your-site>.atlassian.net.
+
 ## 2.11.2
 - Pressing q while reviews are running now asks you to press q again to quit, instead of y. n or esc still keeps Prowl open. Quitting still leaves running reviews going in the background.
 
