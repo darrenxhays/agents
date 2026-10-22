@@ -10,10 +10,12 @@ Every review body starts with this block, with `<verdict>` and `<batch-id>` fill
 
 ````markdown
 ```text
-  ,_,
- (O,O)    PR-Owl Review
- (   )    <verdict>
- -"-"-    <batch-id>
+╭─ PR-OWL ───────────────────────
+│    ,_,
+│   (◉,◉)    PR-Owl Review
+│   /)  )    <verdict>
+│  ──"─"──   <batch-id>
+╰────────────────────────────────
 ```
 ````
 
@@ -22,7 +24,7 @@ Every review body starts with this block, with `<verdict>` and `<batch-id>` fill
 Every inline comment, and every reply on an existing thread, starts with this text:
 
 ```text
-🦉 **PR-Owl Review** · 
+🦉 **PR-Owl Review** ·
 ```
 
 ## Review body
