@@ -13,6 +13,8 @@
 # helm's CONFIG panel writes it to .claude/settings.local.json) overrides that
 # option for Claude sessions in that project. ~/.codex/AGENTS.md is shared by
 # every project, so it follows the option alone.
+# The message_auto_use option off tells Claude to use the message skill only when
+# the user calls it; its description otherwise has Claude use it on its own.
 rule="For any planning or coding task, use the pragmatic-engineer skill."
 begin="<!-- BEGIN pragmatic-engineer (managed by the darrenxhays plugin) -->"
 end="<!-- END pragmatic-engineer -->"
@@ -70,13 +72,21 @@ $end"
   fi
 fi
 
+# The session's added context, as a JSON string's contents.
+context=
 if [ -z "$here_off" ]; then
   # The skill's body without its frontmatter, as one JSON string.
   body=$(awk 'NR == 1 && $0 == "---" { fm = 1; next } fm && $0 == "---" { fm = 0; next } !fm' \
     "$CLAUDE_PLUGIN_ROOT/skills/pragmatic-engineer/SKILL.md" \
     | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/	/\\t/g' \
     | awk 'NF || started { started = 1; printf "%s%s", sep, $0; sep = "\\n" }')
-  printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' \
-    "For any planning or coding task, follow this approach (the darrenxhays:pragmatic-engineer skill; no need to load it):\\n\\n$body"
+  context="For any planning or coding task, follow this approach (the darrenxhays:pragmatic-engineer skill; no need to load it):\\n\\n$body"
+fi
+if [ "$CLAUDE_PLUGIN_OPTION_MESSAGE_AUTO_USE" = false ]; then
+  [ -n "$context" ] && context="$context\\n\\n"
+  context="${context}The user turned off automatic use of the darrenxhays:message skill. Don't use it on your own: when you write a message for the user to send, put it in your reply. Use it only when the user calls /darrenxhays:message."
+fi
+if [ -n "$context" ]; then
+  printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' "$context"
 fi
 exit 0

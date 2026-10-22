@@ -212,7 +212,7 @@ test('CONFIG opens the helm options below the buttons and changes them in place'
   await ui.unmount()
 })
 
-test('CONFIG shows the pragmatic-engineer switch and writes this project override to settings.local.json', { options: FIVE_MIN }, async ($, on) => {
+test('CONFIG shows the pragmatic-engineer and message switches and writes this project override to settings.local.json', { options: FIVE_MIN }, async ($, on) => {
   mock.clock(on, { now: 1_000_000 })
   world(on)
   const sets: { key: string; value: unknown }[] = []
@@ -226,6 +226,14 @@ test('CONFIG shows the pragmatic-engineer switch and writes this project overrid
         label: 'Use pragmatic-engineer automatically',
         kind: 'boolean',
         value: false,
+        provider: { plugin: 'darrenxhays', tier: 'user' as const },
+        isLocked: false,
+      },
+      {
+        key: 'darrenxhays@agents.message_auto_use',
+        label: 'Use message automatically',
+        kind: 'boolean',
+        value: true,
         provider: { plugin: 'darrenxhays', tier: 'user' as const },
         isLocked: false,
       },
@@ -249,11 +257,17 @@ test('CONFIG shows the pragmatic-engineer switch and writes this project overrid
   const ui = await $.ui.mount(BAND)
   await ui.press({ key: 'config' })
   expect(await ui.find({ text: 'USE PRAGMATIC-ENGINEER AUTOMATICALLY' })).toBeDefined()
+  expect(await ui.find({ text: 'USE MESSAGE AUTOMATICALLY' })).toBeDefined()
   const labels = (await ui.findAll({ type: 'Text', text: /^ {2}\S/ })).map(found => found.text.trim())
-  expect(labels).toEqual(['All projects', 'This project'])
+  expect(labels).toEqual(['All projects', 'This project', 'All projects'])
 
   await ui.press({ key: 'opt-auto_use' })
-  expect(sets).toEqual([{ key: 'darrenxhays@agents.auto_use', value: true }])
+  await ui.press({ key: 'opt-message_auto_use' })
+  expect((await ui.find({ key: 'opt-message_auto_use' }))?.props.label).toBe('○ off')
+  expect(sets).toEqual([
+    { key: 'darrenxhays@agents.auto_use', value: true },
+    { key: 'darrenxhays@agents.message_auto_use', value: false },
+  ])
 
   await ui.select({ key: 'opt-autoUseHere', value: 'on' })
   expect(local()).toEqual({ permissions: { allow: ['Bash(ls)'] }, env: { FOO: '1', PRAGMATIC_ENGINEER_AUTO_USE: 'true' } })

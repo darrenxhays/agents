@@ -2,6 +2,9 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.11.0
+- Config (4) is now in sections, each under a heading: Config files, Task board, Tags (Labels on Jira), Review sessions, Verdicts and rounds, Fix my PRs, and Prowl. Some settings moved to join their section; every setting and its value are unchanged, and there's nothing to do.
+
 ## 2.10.0
 - When Prowl starts reviewing a PR, it now posts a one-line comment on it (🦉 PR-Owl is reviewing this PR, with a link to the ticket), so teammates can see a review is under way before they pick the PR up themselves. It stays on the PR after the review is posted.
 - The comment is the new *Review started* section of output.md (Config, Output templates): edit its text there. If you edited your copy in ~/.prowl/config/, it stays as it is, and Prowl uses the default's *Review started* until you copy that section in.

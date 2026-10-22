@@ -84,7 +84,7 @@ On Windows, use Windows Terminal. Reviews run in the **Projects Directory** from
 
 ## Config
 
-Settings live in `~/.prowl/config.json`. The Config view (`4`) edits the same file, and changes apply from the next poll.
+Settings live in `~/.prowl/config.json`. The Config view (`4`) edits the same file, with its settings grouped under headings (Config files, Task board, Tags, Review sessions, Verdicts and rounds, Fix my PRs, Prowl), and changes apply from the next poll.
 
 | Key | Default | Meaning |
 |---|---|---|

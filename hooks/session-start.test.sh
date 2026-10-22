@@ -9,8 +9,9 @@ $rule
 <!-- END pragmatic-engineer -->"
 fail() { echo "FAIL: $1"; exit 1; }
 # Optional second argument: the auto_use plugin option (unset = never configured);
-# third: the project's PRAGMATIC_ENGINEER_AUTO_USE override.
-run() { HOME="$1" CLAUDE_PLUGIN_ROOT="$root" CLAUDE_PLUGIN_OPTION_AUTO_USE="$2" PRAGMATIC_ENGINEER_AUTO_USE="$3" sh "$hook"; }
+# third: the project's PRAGMATIC_ENGINEER_AUTO_USE override; fourth: the message_auto_use option.
+run() { HOME="$1" CLAUDE_PLUGIN_ROOT="$root" CLAUDE_PLUGIN_OPTION_AUTO_USE="$2" PRAGMATIC_ENGINEER_AUTO_USE="$3" CLAUDE_PLUGIN_OPTION_MESSAGE_AUTO_USE="$4" sh "$hook"; }
+context_of() { python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])'; }
 codex_home() { h=$(mktemp -d); mkdir "$h/.codex"; }
 agents() { cat "$h/.codex/AGENTS.md"; }
 
@@ -19,7 +20,8 @@ codex_home
 out=$(run "$h")
 [ "$(readlink "$h/.codex/skills/pragmatic-engineer")" = "$root/skills/pragmatic-engineer" ] || fail "link"
 [ "$(agents)" = "$block" ] || fail "block on fresh file"
-context=$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])') || fail "invalid JSON"
+context=$(printf '%s' "$out" | context_of) || fail "invalid JSON"
+printf '%s' "$context" | grep -q 'message skill' && fail "message off by default"
 printf '%s' "$context" | grep -q '^## Stop at the first rung that holds$' || fail "context has the skill body"
 printf '%s' "$context" | grep -q '^name: pragmatic-engineer' && fail "context has the frontmatter"
 cp "$h/.codex/AGENTS.md" "$h/before"
@@ -86,6 +88,14 @@ run "$h" false true | grep -q additionalContext || fail "context when on in proj
 codex_home
 [ -z "$(run "$h" true false)" ] || fail "context printed when off in project"
 [ "$(agents)" = "$block" ] || fail "project override removed AGENTS.md block"
+
+# Message off: its instruction follows pragmatic-engineer's, or stands alone when that is off too.
+h=$(mktemp -d)
+context=$(run "$h" true "" false | context_of) || fail "invalid JSON with message off"
+printf '%s' "$context" | grep -q '^## Stop at the first rung that holds$' || fail "message off dropped the skill body"
+printf '%s' "$context" | tail -n 1 | grep -q '^The user turned off automatic use of the darrenxhays:message skill' || fail "message off instruction"
+[ "$(run "$h" false "" false | context_of)" = "$(printf '%s' "$context" | tail -n 1)" ] || fail "message off alone"
+[ -z "$(run "$h" false "" true)" ] || fail "context printed with message on"
 
 # No Codex: nothing created, Claude context still printed.
 h=$(mktemp -d)
