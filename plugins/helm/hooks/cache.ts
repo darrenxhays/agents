@@ -67,8 +67,6 @@ const mix = (stops: Stop[], at: number): Rgb => {
   return [0, 1, 2].map(k => c0[k]! + (c1[k]! - c0[k]!) * t) as Rgb
 }
 
-const lighten = (c: Rgb, by: number): Rgb => c.map(v => v + (255 - v) * by) as Rgb
-
 // ── formatting ──────────────────────────────────────────────────────────────
 
 export const kilo = (n: number) =>
@@ -103,26 +101,23 @@ type BarSpec = {
   color: (at: number) => Rgb
   label: string
   track?: string
-  sweep?: number
   marker?: number
   right?: { text: string; fg: string }
 }
 
 const PARTIALS = ['', '▏', '▎', '▍', '▌', '▋', '▊', '▉']
 
-// One full-width bar: a gradient fill with sub-cell precision at its edge, an
-// optional shimmer sweeping the fill, an optional marker, the label inside.
-export const barCells = ({ width, fraction, color, label, track = TRACK, sweep, marker, right }: BarSpec): Cell[] => {
+// One full-width bar: a fill colored by position, with sub-cell precision at
+// its edge, an optional marker, the label inside.
+export const barCells = ({ width, fraction, color, label, track = TRACK, marker, right }: BarSpec): Cell[] => {
   const exact = Math.min(1, Math.max(0, fraction)) * width
   const full = Math.min(width, Math.floor(exact))
   const eighths = Math.floor((exact - full) * 8)
-  const glowAt = sweep === undefined || full === 0 ? -99 : sweep % (full + 10)
   const cells: Cell[] = []
   for (let i = 0; i < width; i++) {
     const base = color(((i + 0.5) / width) * 100)
     if (i < full) {
-      const glow = Math.max(0, 1 - Math.abs(i - glowAt) / 2.5) * 0.45
-      cells.push({ ch: ' ', bg: hex(lighten(base, glow)) })
+      cells.push({ ch: ' ', bg: hex(base) })
     } else if (i === full && eighths > 0) {
       cells.push({ ch: PARTIALS[eighths]!, fg: hex(base), bg: track })
     } else {

@@ -141,9 +141,8 @@ export async function drawBand($: EngineInterface, e: Band, config: Settings, be
             barCells({
               width,
               fraction: (pct ?? 0) / 100,
-              color: heat,
+              color: () => heat(pct ?? 0),
               label: contextLabel,
-              sweep: isWarm ? tick * 2 : undefined,
               right: cacheRight,
             }),
           )}
