@@ -420,7 +420,7 @@ export function startTui(app, actions) {
 
   function footer(W) {
     if (ui.notes) return [[ST.grey, ' ↑↓ scroll · any other key closes the Update Notes']];
-    if (ui.confirm) return [[ST.title, ` ${ui.confirm.text} `], [ST.grey, ' y yes · n no']];
+    if (ui.confirm) return [[ST.title, ` ${ui.confirm.text} `], [ST.grey, ui.confirm.key ? ' n stay' : ' y yes · n no']];
     if (ui.edit) return [[ST.grey, ' enter save · esc cancel · ←→ move']];
     if (Date.now() < ui.flashUntil) return [[ST.green, ` ${ui.flash}`]];
     const hints = [' ↑↓ select · s stop · o open all PRs · a open ticket', ` ↑↓ select · enter open report · o open all PRs · a open ticket${app.cfg.fix?.enabled ? ' · w watch' : ''}`,
@@ -556,7 +556,8 @@ export function startTui(app, actions) {
     }
     if (ui.confirm) {
       const c = ui.confirm;
-      if (['y', 'n', 'esc'].includes(k)) { ui.confirm = null; if (k === 'y') c.yes(); }
+      const yes = c.key || 'y';
+      if ([yes, 'n', 'esc'].includes(k)) { ui.confirm = null; if (k === yes) c.yes(); }
       return undefined;
     }
     if (ui.edit) return editKey(k);
@@ -568,7 +569,7 @@ export function startTui(app, actions) {
     if (k === 'q') {
       const n = live().length;
       if (!n) return actions.quit();
-      ui.confirm = { text: `${plural(n, 'session')} still running. They keep going in the background and reappear next launch. Quit?`, yes: actions.quit };
+      ui.confirm = { text: `${plural(n, 'session')} still running. They keep going in the background and reappear next launch. Press q again to quit.`, key: 'q', yes: actions.quit };
       return undefined;
     }
     if (k === 'r') { actions.pollNow(); flash('Polling now.'); return undefined; }

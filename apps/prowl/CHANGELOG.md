@@ -2,6 +2,9 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.11.2
+- Pressing q while reviews are running now asks you to press q again to quit, instead of y. n or esc still keeps Prowl open. Quitting still leaves running reviews going in the background.
+
 ## 2.11.1
 - With Approve PRs on, reviews no longer add the "No blocking issues found … waiting on a human reviewer's approval" text to a PR Prowl approves. That text is only for Approve PRs off. Nothing to do.
 - output.md's *No blocking issues* section now says it's for Approve PRs off only. If you edited your copy in ~/.prowl/config/, it stays as it is; the fix works either way.
