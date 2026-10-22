@@ -121,7 +121,7 @@ Fix the findings below in order, most severe first. Each one quotes the code at 
 
 ## No blocking issues (approvals off)
 
-When Prowl's **Approve PRs** setting is off, a PR whose verdict would approve it (APPROVE or APPROVE WITH NITS) is posted as a comment instead of an approval. This goes right after the review banner, before the review body:
+When Prowl's **Approve PRs** setting is off, a PR whose verdict would approve it (APPROVE or APPROVE WITH NITS) is posted as a comment instead of an approval. This goes right after the review banner, before the review body. With Approve PRs on, it is never posted, even on a PR Prowl can't approve (your own):
 
 ```markdown
 ### ✅ No blocking issues found

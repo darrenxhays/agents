@@ -1,5 +1,5 @@
 {
   "name": "prowl",
   "description": "prowl-review skill, run by prowl.mjs for ADO work items tagged 'Ready for Review'",
-  "version": "2.11.0"
+  "version": "2.11.1"
 }

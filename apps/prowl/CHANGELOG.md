@@ -2,6 +2,10 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.11.1
+- With Approve PRs on, reviews no longer add the "No blocking issues found … waiting on a human reviewer's approval" text to a PR Prowl approves. That text is only for Approve PRs off. Nothing to do.
+- output.md's *No blocking issues* section now says it's for Approve PRs off only. If you edited your copy in ~/.prowl/config/, it stays as it is; the fix works either way.
+
 ## 2.11.0
 - Config (4) is now in sections, each under a heading: Config files, Task board, Tags (Labels on Jira), Review sessions, Verdicts and rounds, Fix my PRs, and Prowl. Some settings moved to join their section; every setting and its value are unchanged, and there's nothing to do.
 
