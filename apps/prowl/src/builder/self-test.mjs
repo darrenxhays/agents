@@ -609,13 +609,13 @@ async function builds(assert) {
   assert.equal(h.b.history()[0].status, 'following', 'enter: In Development, so taken as ours, and built');
   h.done();
   // …one whose write never reached the tracker is claimed again on enter; s leaves the tags as they are.
-  let fails = 1;
-  h = harness('ado', twoRepoBuild(), { trackerWrap: t => ({ ...t, claim: async (...a) => { if (fails-- > 0) throw new Error('ADO PATCH /x: 503 Service Unavailable'); return t.claim(...a); } }) });
+  let claimCalls = 0;
+  h = harness('ado', twoRepoBuild(), { trackerWrap: t => ({ ...t, claim: async (...a) => { if (claimCalls++ === 0) throw new Error('ADO PATCH /x: 503 Service Unavailable'); return t.claim(...a); } }) });
   await h.poll();
   assert.deepEqual(h.server.tags(123), ['Ready to Start', 'Web'], 'nothing written');
   h.b.answer(h.b.needs()[0], '');
   await h.b.drain();
-  assert.deepEqual([h.b.history()[0].status, h.server.tags(123)], ['following', ['Web', 'Ready for Review']], 'claimed on enter, then built');
+  assert.deepEqual([claimCalls, h.b.history()[0].status, h.server.tags(123)], [2, 'following', ['Web', 'Ready for Review']], 'claimed on enter, then built');
   h.done();
   h = harness('ado', twoRepoBuild(), { trackerWrap: t => ({ ...t, claim: async (...a) => { await t.claim(...a); throw new Error('ADO GET /x: 502 Bad Gateway'); } }) });
   await h.poll();
