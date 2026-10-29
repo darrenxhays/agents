@@ -169,7 +169,7 @@ export async function claim(cfg, ticket, drop, add) {
       if (!theirs) await editLabels(cfg, ticket.key, [label(add)], '');
       const by = entry.author?.displayName;
       const prowl = entry.items.some(it => it.field === 'labels' && (it.toString || '').split(' ').some(l => CLAIM.test(l)));
-      throw new Error(prowl ? `another copy of Prowl${by ? ` (signed in as ${by})` : ''} got there first` : `${by || 'someone else'} got there first`);
+      throw Object.assign(new Error(prowl ? `another copy of Prowl${by ? ` (signed in as ${by})` : ''} got there first` : `${by || 'someone else'} got there first`), { lost: true });
     }
   } finally {
     await editLabels(cfg, ticket.key, [mine], '').catch(() => {}); // or retag() clears it when the review ends

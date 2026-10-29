@@ -596,6 +596,14 @@ async function builds(assert) {
   // Validation: an entry that isn't an object, or a plan that isn't a path, is an unusable result, not a crash.
   assert.match(rules.validateBuild({ status: 'needs-approval', plan: 'plan.md', openQuestions: [null] }, '/'), /openQuestions must be a list of objects/);
   assert.match(rules.validateBuild({ status: 'needs-approval', plan: {}, openQuestions: [] }, '/'), /plan must be text/);
+  assert.match(rules.validateBuild({ status: 'needs-repos', repos: [{ repo: ['octo-org/api'] }] }, '/'), /isn't a repo/);
+
+  // A claim whose check failed after its write reached the tracker is still ours.
+  h = harness('ado', twoRepoBuild(), { trackerWrap: t => ({ ...t, claim: async (...a) => { await t.claim(...a); throw new Error('ADO GET /x: 502 Bad Gateway'); } }) });
+  await h.poll();
+  assert.equal(h.b.history()[0]?.status, 'following', 'built anyway');
+  assert.ok(h.logs.some(l => /couldn't confirm the claim/.test(l)));
+  h.done();
 
   // A secret in any commit pushed stops the push, even when a later commit takes it out again.
   h = harness('ado', (w, prompt) => {
@@ -662,6 +670,9 @@ async function builds(assert) {
   git(path.join(root, 'web'), 'config', 'remote.origin.pushurl', bare);
   git(path.join(root, 'web'), 'config', '--add', 'remote.origin.pushurl', 'https://example.invalid/someone/web.git');
   await assert.rejects(ensureClone({ workDir: root }, 'octo-org/web'), /pushes to https:\/\/example\.invalid\/someone\/web\.git, not octo-org\/web/, 'every push URL is checked');
+  git(path.join(root, 'web'), 'config', '--unset-all', 'remote.origin.pushurl');
+  git(path.join(root, 'web'), 'config', 'remote.origin.pushurl', 'ssh://git@example.invalid/octo-org/web.git');
+  await assert.rejects(ensureClone({ workDir: root }, 'octo-org/web'), /pushes to ssh:/, 'the same name on another host');
   fs.rmSync(root, { recursive: true, force: true });
 
   // Plans with Approve plans set to ask: enter with nothing approves; a note sends it back.
@@ -732,7 +743,7 @@ async function feedback(assert) {
   const roundScript = (moved = null) => (w, prompt) => {
     if (w.turnKind !== 'round') return twoRepoBuild()(w, prompt);
     const p = w.round.prs[0];
-    const again = prompt.startsWith('/prowl:prowl-work feedback ') ? '' : `// turn ${w.turns.length}\n`; // a repair turn commits on top
+    const again = (prompt.startsWith('/prowl:prowl-work feedback ') ? '' : `// turn ${w.turns.length}\n`) + (w.n > 1 ? `// record ${w.n}\n` : ''); // a later turn or record commits on top
     const sha = commit(p.worktree, { 'src/cart.js': `export const save = cart => (cart.length ? cart : null);\n${again}` }, `${w.key}: handle empty carts`);
     if (moved) moved(p);
     return { result: { status: 'fixed', summary: 'Empty carts are not saved.', commits: [{ pr: `${p.repo}#${p.number}`, sha }], checks: [],
@@ -957,6 +968,48 @@ async function feedback(assert) {
   await h.poll();
   assert.equal(execFileSync('git', ['ls-remote', h.bares['octo-org/web'], `refs/heads/${h.gh.prs[0].head}`], { encoding: 'utf8' }), before, 'not pushed');
   assert.ok(h.logs.some(l => /pushes to https:\/\/example\.invalid\/someone\/web\.git/.test(l)) && !h.gh.prs[0].replies.length);
+  assert.deepEqual([h.b.needs()[0]?.kind, h.server.tags(123).includes('In Development')], ['guard', true], 'Needs you, keeping In Development');
+  h.done();
+
+  // A push that fails for another reason (the server refuses it once) is retried, not dropped.
+  h = harness('ado', roundScript(p => {
+    const hook = path.join(h.bares[p.repo], 'hooks', 'pre-receive');
+    fs.writeFileSync(hook, '#!/bin/sh\nif [ -f "$GIT_DIR/fail-once" ]; then rm "$GIT_DIR/fail-once"; echo "try again later" >&2; exit 1; fi\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(h.bares[p.repo], 'fail-once'), '');
+  }));
+  await h.poll();
+  addFeedback(h, h.gh.prs[0].url);
+  h.server.setTags(123, ['Web', 'Reviewed']);
+  await h.poll();
+  const rw = h.b.history()[0];
+  assert.deepEqual([rw.step, rw.status, h.gh.prs[0].replies.length], ['push-round', 'active', 0], 'waits to retry');
+  assert.ok(h.logs.some(l => /try again later/.test(l)), 'the refused push');
+  rw._retryAt = 0;
+  await h.b.drain();
+  assert.deepEqual([h.gh.prs[0].replies.length, h.server.tags(123)], [2, ['Web', 'Reviewed', 'Ready for Review']], 'then pushed and replied');
+  h.done();
+
+  // Merged while the ticket still says Ready for Review: no longer followed.
+  h = harness('ado', roundScript());
+  await h.poll();
+  for (const p of h.gh.prs) p.state = 'MERGED';
+  await h.poll();
+  assert.equal(h.b.history()[0].status, 'done', 'merged PRs are noticed while waiting for a review');
+  h.done();
+
+  // Followed again later, in a new record: its replies carry their own markers, so none is taken for an old one.
+  h = harness('ado', roundScript());
+  await h.poll();
+  const again1 = addFeedback(h, h.gh.prs[0].url);
+  h.server.setTags(123, ['Web', 'Reviewed']);
+  await h.poll();
+  h.b.stopFollowing(h.b.history()[0]);
+  again1.reviews.push({ user: 'lead', state: 'CHANGES_REQUESTED', at: later(), body: 'Not quite.' });
+  h.server.setTags(123, ['Web', 'Reviewed']);
+  await h.b.enqueue('AB#123', 'follow');
+  await h.b.drain();
+  assert.equal(again1.replies.length, 4, 'a second set of replies');
+  assert.ok(again1.replies.slice(2).every(r => / r2\.1 /.test(r.body)), 'marked with the record');
   h.done();
 
   // The same on Jira: a two-repo build, a round another copy of Prowl claims first, then the round once it's done.

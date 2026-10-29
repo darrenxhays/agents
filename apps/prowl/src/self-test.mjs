@@ -312,6 +312,13 @@ const inDir = command => fenceDecision({ cwd: wt, tool_name: 'Bash', tool_input:
 assert.deepEqual([inDir(`git -C ${other} ship`), inDir('git ship'), inDir(`env git -C ${other} ship`)], ['deny', 'allow', 'deny'], "a pushing alias in -C's repo");
 assert.equal(bash(`git -C ${wt} -P push --force origin HEAD:main`), 'deny', 'a push after a short global option');
 assert.deepEqual([bash(`git -C "${wt}/My App" push --force origin HEAD:main`), bash(`git -C "${wt}/My App" remote set-url origin x`)], ['deny', 'deny'], 'after a quoted path with a space');
+for (const c of ["git -c 'alias.ship=push --force' ship origin HEAD:main", "git config 'alias.ship' 'push --force'", 'git -c "remote.origin.pushurl=https://example.invalid/r.git" fetch']) {
+  assert.equal(bash(c), 'deny', `denies quoted push config: ${c}`);
+}
+// A shell reading a heredoc runs it; a subshell's cd ends with it.
+assert.deepEqual([bash("bash <<'SH'\nrm -rf /etc/other\nSH"), bash("cat <<'SH'\nrm -rf /etc/other\nSH")], ['deny', 'allow'], 'a heredoc script');
+const fromHome = command => fenceDecision({ cwd: os.homedir(), tool_name: 'Bash', tool_input: { command } }, workEnv, () => '')?.hookSpecificOutput.permissionDecision || 'allow';
+assert.deepEqual([fromHome(`(cd ${wt} && npm test); rm -rf build`), fromHome(`cd ${wt} && rm -rf build`)], ['deny', 'allow'], "a subshell's cd doesn't move the shell"); 
 // curl and wget writes to GitHub's API, and GraphQL the fence can't read; reads are allowed.
 for (const c of ['curl -X POST https://api.github.com/repos/o/r/issues -d @body.json', 'curl -sS -XPATCH https://api.github.com/repos/o/r/pulls/1 --data "{}"',
   'curl -H "Authorization: bearer x" https://api.github.com/graphql -d \'{"query":"query{viewer{login}}"}\'', 'wget --method=DELETE https://api.github.com/repos/o/r/git/refs/heads/b',
@@ -339,7 +346,8 @@ for (const c of ['curl https://dev.azure.com/o/Shop/_apis/wit/workitems/1', 'cur
 // (The test's own folders are in the temp folder, which sessions may write in, so "outside" is the home folder or /etc here.)
 for (const c of ['echo x > /etc/x', 'echo x >> ~/outside.txt', 'ls | tee /etc/listing', `cp a ${path.join(os.homedir(), 'b')}`, 'mv notes.md ~/notes.md', 'rm -rf ~',
   'rm -rf /', 'echo $(echo x > /etc/y)', 'sh -c "echo > /etc/z"', 'echo x > $SOMEWHERE/out', 'cd / && rm -rf other', 'echo x > "$HOME/.bashrc"',
-  "bash -lc 'rm -f /etc/notes.txt'", 'zsh -ec "echo > /etc/z"', `printf '%s' "$(rm -f /etc/notes.txt)"`, 'echo "`rm -f /etc/notes.txt`"', '(rm -rf /etc/other)', 'true && (cd / && rm -rf other)']) {
+  "bash -lc 'rm -f /etc/notes.txt'", 'zsh -ec "echo > /etc/z"', `printf '%s' "$(rm -f /etc/notes.txt)"`, 'echo "`rm -f /etc/notes.txt`"', '(rm -rf /etc/other)', 'true && (cd / && rm -rf other)',
+  'if rm -rf /etc/other; then echo cleaned; fi', 'while true; do rm -f /etc/x; done', '{ rm -rf /etc/other; }']) {
   assert.equal(bash(c), 'deny', `denies a write outside: ${c}`);
 }
 for (const c of ['echo x > notes.md', `echo x > ${path.join(briefDir, 'result.json')}`, 'cp a b', 'rm -rf build', 'mv a.js b.js', 'npm test 2>&1 | tee test.log',
@@ -518,6 +526,9 @@ assert.match(guardFailures({ ...okGuard, numstat: '1\t0\t{src => .github/workflo
 assert.match(guardFailures({ ...okGuard, numstat: '1\t0\t.github/workflows/deploy-é.yml\0' }, limits)[0]?.text || '', /deploy-é\.yml/, 'numstat -z: a path git would quote');
 assert.match(guardFailures({ ...okGuard, numstat: '0\t0\t\0ci.yml\0.github/workflows/ci.yml\0' }, limits)[0]?.text || '', /Paths that need a person/, 'numstat -z: a rename');
 assert.deepEqual(guardFailures({ ...okGuard, numstat: '3\t1\tsrc/a.js\0' }, limits), [], 'numstat -z: a plain change');
+assert.match(guardFailures({ ...okGuard, diff: `++const t = 'ghp_${'a'.repeat(36)}';\n` }, limits)[0]?.text || '', /a GitHub token/, "a merge's own line (--cc)");
+const { hostOf } = await import('./git.mjs');
+assert.deepEqual(['https://github.com/o/r.git', 'git@github.com:o/r.git', 'ssh://git@example.invalid/o/r.git', '/srv/o/r.git'].map(hostOf), ['github.com', 'github.com', 'example.invalid', '']);
 for (const [line, what] of [['-----BEGIN RSA PRIVATE KEY-----', 'a private key'], ['key = "AKIAABCDEFGHIJKLMNOP"', 'an AWS access key'],
   [`token: ghp_${'a'.repeat(36)}`, 'a GitHub token'], ['password = "hunter22"', 'a password or secret'], ['DB_PASSWORD=s3cretvalue', 'a password or secret']]) {
   assert.match(guardFailures({ ...okGuard, diff: `+${line}\n` }, limits)[0].text, new RegExp(what), `secret scan: ${what}`);
@@ -715,6 +726,10 @@ st = migState();
 st.fixes[0].status = 'stopped'; // 2.11.3's take-over: signalled, and marked stopped at once
 await migrateFixes(migCfg(), st, deps(false, []));
 assert.ok(fs.existsSync(migWt), 'taken over but still running: its worktree stays');
+st = migState();
+st.fixes[1].worktree = migWt; // an older, finished fix on the same PR, with the same worktree path
+await migrateFixes(migCfg(), st, deps(false, []));
+assert.ok(fs.existsSync(migWt), "an older record doesn't remove a live session's worktree");
 // Confirmed: marked stopped, nothing pushed, its worktree removed; the settings moved to the backup.
 st = migState();
 mc = migCfg();

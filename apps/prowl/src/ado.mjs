@@ -95,9 +95,13 @@ export async function readItem(cfg, ref) {
   return ticketOf(ref.org, ref.project, await getItem(ref.org, ref.project, ref.id));
 }
 
-/** Swaps the trigger tag for the in-progress one; the revision check makes it fail if anyone got there first. */
+/**
+ * Swaps the trigger tag for the in-progress one; the revision check makes it fail if anyone got there first. That
+ * failure is marked `lost`; any other may or may not have reached the work item.
+ */
 export const claim = (cfg, ticket, drop, add) =>
-  setTags(ticket.ref.org, ticket.ref.project, ticket.ref.id, ticket.rev, swapTags(ticket.tags, drop, add));
+  setTags(ticket.ref.org, ticket.ref.project, ticket.ref.id, ticket.rev, swapTags(ticket.tags, drop, add))
+    .catch(e => { if (/: 4(?:09|12) /.test(e.message)) e.lost = true; throw e; });
 
 /** Replaces the tags Prowl owns (`drop`) with `add` ('' = none); resolves with the work item's new revision. */
 export async function retag(cfg, ref, drop, add) {

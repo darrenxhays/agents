@@ -95,10 +95,13 @@ export function validateBuild(r, briefDir) {
   if (!r || typeof r !== 'object' || Array.isArray(r)) return 'it is not a JSON object';
   if (!STATUSES.includes(r.status)) return `status must be one of ${STATUSES.join(', ')}`;
   for (const k of ['repos', 'changes', 'openQuestions', 'commits', 'prs', 'checks']) if (!isList(r[k]) || r[k]?.some(x => !x || typeof x !== 'object')) return `${k} must be a list of objects`;
-  const badRepo = [...(r.repos || []), ...(r.changes || []), ...(r.commits || []), ...(r.prs || []), ...(r.checks || [])].find(x => !REPO.test(x?.repo || ''));
+  const badRepo = [...(r.repos || []), ...(r.changes || []), ...(r.commits || []), ...(r.prs || []), ...(r.checks || [])].find(x => !(typeof x.repo === 'string' && REPO.test(x.repo)));
   if (badRepo) return `"${badRepo?.repo || ''}" isn't a repo, as owner/name`;
   const notText = ['plan', 'investigation', 'summary', 'reason'].find(k => r[k] != null && typeof r[k] !== 'string');
   if (notText) return `${notText} must be text`;
+  const fields = [...(r.repos || []).map(x => [x, 'why']), ...(r.changes || []).map(x => [x, 'base']), ...(r.commits || []).map(x => [x, 'sha']),
+    ...(r.prs || []).flatMap(x => [[x, 'title'], [x, 'body']])].find(([x, k]) => x[k] != null && typeof x[k] !== 'string');
+  if (fields) return `${fields[0].repo}'s ${fields[1]} must be text`;
   if (r.status === 'needs-repos' && !r.repos?.length) return 'needs-repos lists no repos';
   if (r.status === 'needs-approval') {
     if (!r.plan || !fs.existsSync(path.resolve(briefDir, r.plan))) return `the plan file ${r.plan || '(none)'} isn't in the brief folder`;

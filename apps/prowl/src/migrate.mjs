@@ -39,7 +39,8 @@ export async function migrateFixes(cfg, state, deps) {
     if (ENDED.includes(fix.status)) continue;
     Object.assign(fix, { status: 'stopped', note: 'Fix my PRs was removed in 2.12.0; nothing was pushed', endedAt: fix.endedAt || Date.now() });
   }
-  for (const fix of (state.fixes || []).filter(f => f.worktree && ENDED.includes(f.status) && !live.has(f))) {
+  const liveWorktrees = new Set([...live].map(f => f.worktree)); // an older record can share a running one's path
+  for (const fix of (state.fixes || []).filter(f => f.worktree && ENDED.includes(f.status) && !live.has(f) && !liveWorktrees.has(f.worktree))) {
     if (!fs.existsSync(fix.worktree)) continue;
     await remove(path.join(cfg.workDir, fix.pr.repo.split('/')[1]), fix.worktree).catch(() => fs.rmSync(fix.worktree, { recursive: true, force: true }));
   }

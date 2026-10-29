@@ -6,6 +6,9 @@ import { run, runFull } from './proc.mjs';
 export const git = (dir, ...args) => run('git', ['-C', dir, ...args]);
 export const short = sha => String(sha || '').slice(0, 7);
 
+/** The host of a git remote URL (https://host/…, ssh://user@host/…, user@host:…), lowercased; '' for a local path. */
+export const hostOf = url => (/^[a-z][\w+.-]*:\/\/(?:[^@/]*@)?([^/:]+)/i.exec(url) || /^(?:[^@/]*@)?([^/:]+):(?!\/)/.exec(url) || [])[1]?.toLowerCase() || '';
+
 /** True when `url` (a git remote) is the GitHub repo `repo` (owner/name). */
 export const sameRepo = (url, repo) => {
   const u = String(url).trim().replace(/\.git$/i, '').toLowerCase();

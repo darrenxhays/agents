@@ -2,7 +2,7 @@
 // worktree per ticket beside them. The user's checked-out branch, working tree and local branches are never touched.
 import fs from 'node:fs';
 import path from 'node:path';
-import { addWorktree, fetchBranch, git, sameRepo } from '../git.mjs';
+import { addWorktree, fetchBranch, git, hostOf, sameRepo } from '../git.mjs';
 import { run } from '../proc.mjs';
 
 /** Where a ticket's worktrees go: <Projects Directory>/.prowl-worktrees/work-<id>. */
@@ -17,7 +17,9 @@ export async function ensureClone(cfg, repo, clone = ghClone) {
   const origin = (await git(dir, 'remote', 'get-url', 'origin')).trim();
   if (!sameRepo(origin, repo)) throw new Error(`${dir} is a clone of ${origin}, not ${repo}`);
   // Pushes go to every push URL, which a pushurl or pushInsteadOf can point somewhere else.
-  const elsewhere = (await git(dir, 'remote', 'get-url', '--push', '--all', 'origin')).split('\n').map(u => u.trim()).filter(Boolean).find(u => !sameRepo(u, repo));
+  // The same repo on the same host as origin: another server can hold a repo of that name too.
+  const elsewhere = (await git(dir, 'remote', 'get-url', '--push', '--all', 'origin')).split('\n').map(u => u.trim()).filter(Boolean)
+    .find(u => !sameRepo(u, repo) || hostOf(u) !== hostOf(origin));
   if (elsewhere) throw new Error(`${dir} pushes to ${elsewhere}, not ${repo}`);
   return dir;
 }

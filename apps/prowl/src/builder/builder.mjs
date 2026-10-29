@@ -201,9 +201,11 @@ export function createBuilder(app, deps) {
     try {
       await tracker.claim(cfg(), ticket, owned, b().tags.inProgress);
     } catch (e) {
-      log('warn', `${ticket.key}: not claimed (changed or claimed by someone else): ${e.message}`, `pick:${ticket.key}`);
-      if (w) Object.assign(w, { status: 'ended', step: null, note: `not claimed: ${e.message}` });
-      return null;
+      if (!(await landed(tracker, ticket, e))) {
+        log('warn', `${ticket.key}: not claimed (changed or claimed by someone else): ${e.message}`, `pick:${ticket.key}`);
+        if (w) Object.assign(w, { status: 'ended', step: null, note: `not claimed: ${e.message}` });
+        return null;
+      }
     } finally {
       claiming--;
     }
@@ -219,6 +221,19 @@ export function createBuilder(app, deps) {
     log('ok', `${w.key}: claimed, marked '${b().tags.inProgress}'`);
     hoot(`Picking up ${w.title}, marking as '${b().tags.inProgress}'`);
     return w;
+  }
+
+  /**
+   * After a claim failed with `e`: true when it reached the tracker anyway (the check after the write failed, say), as
+   * the ticket now carries In Development where it didn't. A claim someone else won (`e.lost`) never counts.
+   */
+  async function landed(tracker, ticket, e) {
+    if (e.lost) return false;
+    const has = t => tags().has(t, b().tags.inProgress);
+    const now = await tracker.readItem(cfg(), ticket.ref || ticket).catch(() => null);
+    const ours = Boolean(now && has(now.tags) && !has(ticket.tags || []));
+    if (ours) log('warn', `${ticket.key}: couldn't confirm the claim (${e.message}), but it is '${b().tags.inProgress}' now: going on with it`);
+    return ours;
   }
 
   /** Switched off as it claimed `ticket`: puts back what the claim took off. */
@@ -493,7 +508,8 @@ export function createBuilder(app, deps) {
         ancestor: await succeeds(rec.worktree, 'merge-base', '--is-ancestor', base(rec), 'HEAD'),
         onBranch: onBranch ? (await git(rec.worktree, 'symbolic-ref', '--short', 'HEAD').catch(() => '')).trim() === rec.branch : true,
         numstat: await git(rec.worktree, 'diff', '--numstat', '-z', `${base(rec)}..HEAD`), // -z: paths unquoted
-        diff: await git(rec.worktree, 'log', '-p', '-U0', '--format=', `${base(rec)}..HEAD`), // every commit pushed, not just the end state
+        // Every commit pushed, not just the end state, and what a merge adds itself (--cc: a conflict's resolution).
+        diff: await git(rec.worktree, 'log', '-p', '--cc', '-U0', '--format=', `${base(rec)}..HEAD`),
       }, b());
       if (failed[0]?.kind === 'moved') return { moved: `${rec.repo}: ${failed[0].text}` };
       if (failed.length) throw new NeedsYou('guard', `Prowl didn't push ${w.key} to ${rec.repo}: ${failed.map(x => x.text).join('; ')}.`, { retry: 'continue' });
@@ -578,8 +594,8 @@ export function createBuilder(app, deps) {
 
   // ---- Following the PRs ----
 
-  /** The followed PRs with feedback newer than the last push or round. Merged and closed PRs stop being followed. */
-  async function dueFeedback(w) {
+  /** The followed PRs with feedback newer than the last push or round (none without `feedback`). Merged and closed PRs stop being followed. */
+  async function dueFeedback(w, feedback = true) {
     const due = [];
     for (const pr of [...w.prs]) {
       const facts = await gh.prFacts(pr);
@@ -588,7 +604,7 @@ export function createBuilder(app, deps) {
         log('info', `${w.key}: ${prName(pr)} is ${facts.state.toLowerCase()}; no longer following it`);
         continue;
       }
-      if (prRefusal(facts, pr, app.me, b().protectedBranches)) continue; // drafts, others' PRs and forks get no round
+      if (!feedback || prRefusal(facts, pr, app.me, b().protectedBranches)) continue; // drafts, others' PRs and forks get no round
       const [reviews, threads] = await Promise.all([gh.prReviews(pr), gh.prThreads(pr)]);
       if (rules.feedbackDue({ reviews, threads }, w.lastActivityAt || 0, b().fixFrom)) due.push(pr);
     }
@@ -604,7 +620,7 @@ export function createBuilder(app, deps) {
         // A review asked for or under way finishes first, and so does work someone else claimed (In Development).
         // (Tags compare without case or punctuation, so Jira's Ready-for-Review matches.)
         const waiting = [b().tags.done, b().tags.reviewing, b().tags.inProgress].some(t => tags().has(item.tags, t));
-        const due = waiting ? [] : await dueFeedback(w);
+        const due = await dueFeedback(w, !waiting); // waiting, it still notices merged and closed PRs
         if (w.status !== 'following' || w.step) continue; // stopped following (t) while this looked
         if (!w.prs.length) {
           Object.assign(w, { status: 'done', endedAt: Date.now(), note: 'its PRs are merged or closed' });
@@ -665,7 +681,7 @@ export function createBuilder(app, deps) {
       try {
         await tracker.claim(cfg(), ticket, tags().owned, b().tags.inProgress);
       } catch (e) {
-        return back(`the ticket changed or someone else claimed it (${e.message})`);
+        if (!(await landed(tracker, ticket, e))) return back(`the ticket changed or someone else claimed it (${e.message})`);
       }
       if (!on()) {
         Object.assign(w, { status: 'following', step: null });
@@ -735,10 +751,11 @@ export function createBuilder(app, deps) {
   /** Checks, guards, pushes and replies for a round. A branch that moved since the round started drops the round. */
   async function pushRound(w) {
     checkStop(w);
+    // Its feedback stays due (lastActivityAt as it was): the next round starts from the new head.
     const drop = async why => {
       await trackerOf(w).retag(cfg(), w.ref, tags().owned, '');
       await tidy(w, [], w.round.prs);
-      Object.assign(w, { status: 'following', step: null, lastActivityAt: Date.now() });
+      Object.assign(w, { status: 'following', step: null, round: null, roundPrs: [] });
       touch(w);
       return log('warn', `${w.key}: round ${w.rounds} dropped, nothing pushed: ${why}`);
     };
@@ -762,12 +779,15 @@ export function createBuilder(app, deps) {
         const head = (await git(p.worktree, 'rev-parse', 'HEAD')).trim();
         try {
           await ensureClone(cfg(), p.repo, clone); // its push URL still leads to the repo
+        } catch (e) {
+          throw new NeedsYou('guard', `Prowl didn't push ${w.key} to ${prName(p)}: ${e.message}.`, { retry: 'push-round' });
+        }
+        try {
           await push(p.worktree, p.branch); // never forced
         } catch (e) {
-          await trackerOf(w).retag(cfg(), w.ref, tags().owned, '');
-          Object.assign(w, { status: 'following', step: null, lastActivityAt: Date.now() });
-          touch(w);
-          return log('warn', `${w.key}: the push to ${prName(p)} was rejected (${e.message}); round ${w.rounds} dropped`);
+          const now = await remoteSha(p.worktree, p.branch).catch(() => null);
+          if (now === null || now === (p.pushedSha || p.headSha)) throw e; // not a moved branch: retried in a minute
+          return drop(`the push to ${prName(p)} was rejected (${e.message.split('\n')[0]})`);
         }
         p.pushedSha = head;
         w.lastPushAt = Date.now();
@@ -779,7 +799,9 @@ export function createBuilder(app, deps) {
     const tpl = heading => outputTemplate(appDir, heading);
     for (const p of w.round.prs) {
       const items = (w.result.items || []).filter(it => forPr(it, p) || (w.round.prs.length === 1 && !it.pr));
-      const todo = items.length ? repliesToPost({ ticket: w.key, round: w.rounds, items, threads: p.threads, pushed: p.pushedSha }, await gh.prCommentBodies(p)) : [];
+      // The round in each marker: n.round from a ticket's second record on, so following it again never matches an old reply.
+      const round = w.n > 1 ? `${w.n}.${w.rounds}` : w.rounds;
+      const todo = items.length ? repliesToPost({ ticket: w.key, round, items, threads: p.threads, pushed: p.pushedSha }, await gh.prCommentBodies(p)) : [];
       for (const r of todo) {
         checkStop(w);
         const body = `${fill(tpl(r.what === 'fixed' ? 'Fix reply' : 'Dispute reply'), { 'comment prefix': tpl('Comment prefix'), sha: short(p.pushedSha), note: r.note })}\n${r.marker}`;

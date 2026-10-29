@@ -34,6 +34,13 @@ const GIT_BUILTINS = new Set(('add am apply archive bisect blame branch bundle c
   + 'replace reset restore rev-list rev-parse revert rm send-pack shortlog show show-branch show-ref sparse-checkout stash status submodule '
   + 'subtree switch symbolic-ref tag update-index update-ref var verify-commit version whatchanged worktree write-tree lfs').split(' '));
 
+/** Why setting git config `key` to `value` changes how or where git pushes, or ''. */
+function pushConfig(key, value) {
+  if (new RegExp(`^${PUSH_CONFIG}$`, 'i').test(key)) return 'changing where a remote pushes';
+  if (/^alias\./i.test(key) && /\b(?:push|send-pack)\b/.test(value)) return 'a git alias that pushes';
+  return '';
+}
+
 /** Why `gh api …` (one command, up to the next ; && || | or line break) writes to GitHub, or ''. */
 function apiWrite(cmd) {
   if (/\bgraphql\b/.test(cmd)) {
@@ -57,14 +64,14 @@ function apiWrite(cmd) {
 export function lex(text) {
   const cmds = [[]];
   const subs = [];
-  const heredocs = []; // delimiters of heredocs whose bodies start at the next line break
+  const heredocs = []; // { delim, cmd } of heredocs whose bodies start at the next line break
   let wantDelim = false;
   let word = null;
   const w = () => (word ??= { text: '', dynamic: false });
   const end = () => {
     if (!word) return;
     cmds.at(-1).push(word);
-    if (wantDelim) { heredocs.push(word.text); wantDelim = false; }
+    if (wantDelim) { heredocs.push({ delim: word.text, cmd: cmds.at(-1) }); wantDelim = false; }
     word = null;
   };
   const next = () => { end(); if (cmds.at(-1).length) cmds.push([]); };
@@ -114,16 +121,19 @@ export function lex(text) {
       Object.assign(w(), { dynamic: true }).text += c;
     } else if (c === '#' && !word) {
       while (i + 1 < text.length && text[i + 1] !== '\n') i++;
-    } else if ((c === '(' || c === ')') && !word) {
-      next(); // a subshell: ( cmd ) runs cmd
-    } else if (c === ')' && word) {
+    } else if (c === '(' || c === ')') {
+      // A subshell: ( cmd ) runs cmd, and a cd inside it ends with it. A marker command tells deniedCommand.
       next();
+      cmds.at(-1).push({ group: c });
+      cmds.push([]);
     } else if (c === '\n' || c === ';' || c === '|' || (c === '&' && text[i + 1] !== '>')) {
       next();
       if ((c === '&' || c === '|') && text[i + 1] === c) i++;
-      for (const delim of c === '\n' ? heredocs.splice(0) : []) { // skip the body, up to the line holding only its delimiter
+      for (const { delim, cmd } of c === '\n' ? heredocs.splice(0) : []) { // skip the body, up to the line holding only its delimiter
+        const from = i + 1;
         let eol = text.indexOf('\n', i + 1);
         while (eol >= 0 && text.slice(i + 1, eol).replace(/^\t+/, '') !== delim) { i = eol; eol = text.indexOf('\n', i + 1); }
+        (cmd.bodies ??= []).push(text.slice(from, i + 1)); // kept: a shell reading it runs it
         i = eol < 0 ? text.length : eol;
       }
     } else if (c === '>' || (c === '&' && text[i + 1] === '>')) {
@@ -164,7 +174,8 @@ function writeTargets(cmd) {
     targets.push(target);
   }
   let at = 0;
-  while (at < words.length && (/^\w+=/.test(words[at].text) || ['sudo', 'env', 'command', 'builtin', 'exec', 'nohup', 'time'].includes(words[at].text))) at++;
+  const lead = ['sudo', 'env', 'command', 'builtin', 'exec', 'nohup', 'time', 'if', 'then', 'else', 'elif', 'while', 'until', 'do', '!', '{'];
+  while (at < words.length && (/^\w+=/.test(words[at].text) || lead.includes(words[at].text))) at++;
   const name = path.basename(words[at]?.text || '');
   const args = words.slice(at + 1);
   const operands = args.filter(a => a.dynamic || !a.text.startsWith('-') || a.text === '-');
@@ -248,7 +259,13 @@ export function deniedCommand(command, ctx = {}) {
     const why = deniedCommand(sub, { ...ctx, cwd });
     if (why) return why;
   }
+  const outer = []; // the cwd outside each ( … ) we're in
   for (const cmd of cmds) {
+    if (cmd[0]?.group) {
+      if (cmd[0].group === '(') outer.push(cwd);
+      else cwd = outer.pop() ?? cwd;
+      continue;
+    }
     const web = webWrite(cmd, ctx.trackerHosts || [], text);
     if (web) return web;
     const { name, words, args, targets } = writeTargets(cmd);
@@ -257,11 +274,21 @@ export function deniedCommand(command, ctx = {}) {
       const why = deniedCommand(args[dashC + 1].text, { ...ctx, cwd });
       if (why) return why;
     }
+    if (['sh', 'bash', 'zsh', 'dash', 'ksh'].includes(name) && dashC < 0) {
+      for (const body of cmd.bodies || []) { // bash <<'SH' … SH: the heredoc is the script
+        const why = deniedCommand(body, { ...ctx, cwd });
+        if (why) return why;
+      }
+    }
     if (name === 'git') {
       let i = 0; // in git's own words, after env, command and the like
       let dir = cwd; // the alias is looked up where git runs: -C moves it
       while (args[i] && /^-/.test(args[i].text)) {
         if (args[i].text === '-C' && args[i + 1]) dir = resolvePath(args[i + 1], dir) || dir;
+        if (args[i].text === '-c' && args[i + 1]) { // -c 'alias.x=push …', -c remote.origin.pushurl=…
+          const why = pushConfig(args[i + 1].text.split('=')[0], args[i + 1].text.split('=').slice(1).join('='));
+          if (why) return why;
+        }
         i += /^(?:-[Cc]|--(?:git-dir|work-tree|namespace|exec-path|config-env))$/.test(args[i].text) ? 2 : 1;
       }
       const sub = args[i]?.text;
@@ -269,6 +296,11 @@ export function deniedCommand(command, ctx = {}) {
       // The same as DENY, for options the regexes can't step over (a quoted -C "My App", say).
       if (sub === 'push' || sub === 'send-pack' || (['subtree', 'lfs'].includes(sub) && then === 'push')) return 'pushing: Prowl pushes the work itself once it has checked it';
       if (sub === 'remote' && /^(?:add|remove|rm|rename|set-url|set-head|set-branches|prune|update)$/.test(then || '')) return 'changing git remotes';
+      if (sub === 'config') { // git config [options] key [value]
+        const rest = args.slice(i + 1).filter(a => !a.text.startsWith('-'));
+        const why = rest[0] && pushConfig(rest[0].text, rest.slice(1).map(a => a.text).join(' '));
+        if (why) return why;
+      }
       if (sub && ctx.alias && !GIT_BUILTINS.has(sub) && /\b(?:push|send-pack)\b/.test(ctx.alias(sub, dir) || '')) return `the git alias '${sub}', which pushes`;
     }
     if (!roots.length) continue;
