@@ -66,25 +66,28 @@ async function boardId(cfg, board) {
   return boardIds.get(board);
 }
 
+const ticketOf = (cfg, issue) => ({
+  key: issue.key, title: issue.fields.summary || '', url: ticketUrl(cfg, issue.key), tags: issue.fields.labels || [],
+  assignee: issue.fields.assignee?.displayName || '', ref: { site: siteOf(cfg), key: issue.key },
+});
+
 /**
- * Open issues on the board carrying the trigger label. Labels are matched loosely, so every open labelled
- * issue on the board is read and filtered here.
+ * Open issues on the board carrying a label `isTrigger` accepts; with `assignedToMe`, only yours. Labels are matched
+ * loosely, so every open labelled issue on the board is read and filtered here.
  */
-export async function findTickets(cfg, board, isTrigger) {
+export async function findTickets(cfg, board, isTrigger, { assignedToMe = false } = {}) {
   const id = await boardId(cfg, board.board);
-  const jql = enc('labels is not EMPTY AND statusCategory != Done');
+  const jql = enc(`labels is not EMPTY AND statusCategory != Done${assignedToMe ? ' AND assignee = currentUser()' : ''}`);
   const issues = [];
   // optimization-note: reads every open labelled issue on the board each poll; fine for a team board
   // (hundreds of issues). If boards get much bigger, list the site's labels and query the matching ones.
   for (let at = 0; at < 2000;) {
-    const page = await api(cfg, `/rest/agile/1.0/board/${id}/issue?jql=${jql}&fields=summary,labels&startAt=${at}&maxResults=100`);
+    const page = await api(cfg, `/rest/agile/1.0/board/${id}/issue?jql=${jql}&fields=summary,labels,assignee&startAt=${at}&maxResults=100`);
     issues.push(...page.issues);
     at += page.issues.length;
     if (!page.issues.length || at >= page.total) break;
   }
-  const tickets = issues
-    .filter(i => (i.fields.labels || []).some(isTrigger))
-    .map(i => ({ key: i.key, title: i.fields.summary || '', url: ticketUrl(cfg, i.key), tags: i.fields.labels, ref: { site: siteOf(cfg), key: i.key } }));
+  const tickets = issues.filter(i => (i.fields.labels || []).some(isTrigger)).map(i => ticketOf(cfg, i));
   return { tickets, variants: [...new Set(tickets.flatMap(t => t.tags.filter(isTrigger)))] };
 }
 
@@ -96,6 +99,7 @@ const editLabels = (cfg, key, remove, add) => api(cfg, `/rest/api/3/issue/${enc(
 });
 
 const CLAIM = /^prowl-claim-/; // the one-off label each claim adds; see claim()
+export const claimWait = { ms: 2000 }; // how long a claim waits for a rival write to reach the changelog (the self-test sets 0)
 
 /** True when the changelog entry added label `l`. */
 export const addedLabel = (entry, l) => entry.items.some(it => it.field === 'labels'
@@ -116,10 +120,22 @@ export function claimEntry(histories, removed) {
   })).at(-1) || null;
 }
 
-/** The issue for a key (PROJ-123), for prowl --watch. */
+/** The issue for a key (PROJ-123, used as typed), for prowl --work and --follow. */
 export async function lookup(cfg, key) {
-  const issue = await api(cfg, `/rest/api/3/issue/${enc(key)}?fields=summary`);
-  return { key: issue.key, title: issue.fields.summary || '', url: ticketUrl(cfg, issue.key), ref: { site: siteOf(cfg), key: issue.key } };
+  if (!/^[A-Z][A-Z0-9_]*-\d+$/i.test(String(key).trim())) throw new Error(`${key} isn't a Jira issue key: use PROJ-123`);
+  return readItem(cfg, { key: String(key).trim() });
+}
+
+/**
+ * The changelog's length: the issue's revision. It only grows, unlike a timestamp, which would depend on the clocks
+ * of Jira and of the machine Prowl runs on.
+ */
+const revision = async (cfg, key) => (await api(cfg, `/rest/api/3/issue/${enc(key)}/changelog?maxResults=1`)).total;
+
+/** The issue now: its key, title, url, labels (as tags), rev (the changelog's length), assignee and ref. */
+export async function readItem(cfg, ref) {
+  const issue = await api(cfg, `/rest/api/3/issue/${enc(ref.key)}?fields=summary,labels,assignee`);
+  return { ...ticketOf(cfg, issue), rev: await revision(cfg, issue.key) };
 }
 
 /**
@@ -132,7 +148,7 @@ export async function claim(cfg, ticket, drop, add) {
   const mine = `prowl-claim-${randomBytes(4).toString('hex')}`;
   await editLabels(cfg, ticket.key, remove, [add, mine]);
   try {
-    await new Promise(r => setTimeout(r, 2000)); // two writes at the same moment: both are in the changelog by then
+    await new Promise(r => setTimeout(r, claimWait.ms)); // two writes at the same moment: both are in the changelog by then
     const { total } = await api(cfg, `/rest/api/3/issue/${enc(ticket.key)}/changelog?maxResults=1`);
     const recent = await api(cfg, `/rest/api/3/issue/${enc(ticket.key)}/changelog?startAt=${Math.max(0, total - 20)}&maxResults=20`);
     const entry = claimEntry(recent.values, remove);
@@ -169,8 +185,72 @@ export async function ticketText(cfg, ticket) {
   return adfText(issue.fields.description).replace(/\n{3,}/g, '\n\n').trim();
 }
 
-/** Replaces the labels Prowl owns (`drop`) with `add` ('' = none) on a ticket a review ran for. */
+/** Replaces the labels Prowl owns (`drop`) with `add` ('' = none); resolves with the issue's new revision. */
 export async function retag(cfg, ref, drop, add) {
   const issue = await api(cfg, `/rest/api/3/issue/${enc(ref.key)}?fields=labels`);
   await editLabels(cfg, ref.key, (issue.fields.labels || []).filter(l => drop(l) || CLAIM.test(l)), add);
+  return revision(cfg, ref.key);
+}
+
+/** True when the label changes in `histories` (oldest first) took a label `isTag` accepts off and then put one back on. */
+export function readded(histories, isTag) {
+  let removed = false;
+  for (const h of histories) {
+    for (const it of h.items.filter(x => x.field === 'labels')) {
+      const [had, has] = [(it.fromString || '').split(' ').some(l => l && isTag(l)), (it.toString || '').split(' ').some(l => l && isTag(l))];
+      if (had && !has) removed = true;
+      else if (removed && has && !had) return true;
+    }
+  }
+  return false;
+}
+
+/** True when someone took a label `isTag` accepts off the issue and put it back after changelog entry `since` (up to `upTo`). */
+export async function tagsChangedSince(cfg, ref, since, upTo, isTag) {
+  const entries = [];
+  for (let at = since; upTo == null || at < upTo;) {
+    const page = await api(cfg, `/rest/api/3/issue/${enc(ref.key)}/changelog?startAt=${at}&maxResults=100`);
+    entries.push(...page.values);
+    at += page.values.length;
+    if (!page.values.length || at >= page.total) break;
+  }
+  return readded(upTo == null ? entries : entries.slice(0, upTo - since), isTag);
+}
+
+const textOf = v => (v && typeof v === 'object' ? adfText(v) : String(v ?? '')).replace(/\n{3,}/g, '\n\n').trim();
+const summaryOf = (cfg, i) => ({
+  key: i.key, title: i.fields?.summary || '', type: i.fields?.issuetype?.name || '', state: i.fields?.status?.name || '',
+  description: textOf(i.fields?.description), url: ticketUrl(cfg, i.key),
+});
+
+/**
+ * Everything the Builder writes into ticket.md: the issue's fields (with the optional acceptance criteria and repro
+ * steps custom fields), comments, parent, sub-tasks, linked issues with their titles and descriptions, remote links
+ * and attachment names.
+ */
+export async function workItem(cfg, ref) {
+  const { acceptanceCriteria = '', reproSteps = '' } = cfg.jira.fields || {};
+  const custom = [acceptanceCriteria, reproSteps].filter(Boolean);
+  const issue = await api(cfg, `/rest/api/3/issue/${enc(ref.key)}?fields=${['summary', 'issuetype', 'status', 'labels', 'assignee', 'description', 'comment', 'parent', 'subtasks', 'issuelinks', 'attachment', ...custom].join(',')}`);
+  const f = issue.fields;
+  const remote = await api(cfg, `/rest/api/3/issue/${enc(ref.key)}/remotelink`).catch(() => []);
+  const keys = [f.parent?.key, ...(f.subtasks || []).map(t => t.key), ...(f.issuelinks || []).map(l => (l.inwardIssue || l.outwardIssue)?.key)].filter(Boolean);
+  const linked = new Map();
+  for (const k of [...new Set(keys)]) {
+    try { linked.set(k, summaryOf(cfg, await api(cfg, `/rest/api/3/issue/${enc(k)}?fields=summary,issuetype,status,description`))); } catch { /* no access: left out */ }
+  }
+  const one = k => linked.get(k) || null;
+  return {
+    key: issue.key, title: f.summary || '', url: ticketUrl(cfg, issue.key), type: f.issuetype?.name || '', state: f.status?.name || '',
+    tags: f.labels || [], assignee: f.assignee?.displayName || '',
+    description: textOf(f.description),
+    acceptanceCriteria: acceptanceCriteria ? textOf(f[acceptanceCriteria]) : null, // null: no field configured, so no section
+    reproSteps: reproSteps ? textOf(f[reproSteps]) : null,
+    comments: (f.comment?.comments || []).map(c => ({ author: c.author?.displayName || '', at: c.created || '', text: textOf(c.body) })),
+    parent: f.parent ? one(f.parent.key) : null,
+    children: (f.subtasks || []).map(t => one(t.key)).filter(Boolean),
+    related: (f.issuelinks || []).map(l => one((l.inwardIssue || l.outwardIssue)?.key)).filter(Boolean),
+    links: (remote || []).map(r => ({ name: r.object?.title || 'Link', url: r.object?.url || '' })).filter(l => l.url),
+    attachments: (f.attachment || []).map(a => a.filename),
+  };
 }

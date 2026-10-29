@@ -1,14 +1,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { StringDecoder } from 'node:string_decoder';
-import { CONFIG_DIR, HOME, writeJson } from './config.mjs';
-import { frontMatter } from './match.mjs';
-import { spawnCli, isAlive, keepAwake, killTree, processStart } from './proc.mjs';
+import { CONFIG_DIR, HOME, writeJson } from '../config.mjs';
+import { frontMatter } from '../match.mjs';
+import { spawnCli, killTree } from '../proc.mjs';
+import { alive, capHit, readActivity, sessionEnv, track } from '../sessions.mjs';
 
+export { alive, readActivity };
 export const REPORTS_DIR = path.join(HOME, 'reports');
 const LOGS_DIR = path.join(HOME, 'logs');
 const STATE_PATH = path.join(HOME, 'state.json');
-const exited = new Set(); // pids of reviews started by this process that have exited
 
 export function loadState() {
   let state;
@@ -32,17 +32,6 @@ export function loadState() {
 // Fields starting with _ are in-memory only (log position, parsed activity).
 export const saveState = state => writeJson(STATE_PATH, state, (k, v) => (k.startsWith('_') ? undefined : v));
 
-export function alive(run) {
-  if (exited.has(run.pid) || !isAlive(run.pid)) return false;
-  // A pid saved by an earlier launch can belong to another program by now: after a reboot or sign-out, and
-  // sooner on Windows, which reuses pids quickly. It is still the review only if it started with the review.
-  if (run._ours === undefined) {
-    const started = run._spawned ? null : processStart(run.pid);
-    run._ours = started === null || started < run.startedAt + 10_000; // unreadable: trust the pid
-  }
-  return run._ours;
-}
-
 /** True when a ticket's next review would go past Max review rounds; `prior` is its latest finished review. */
 export const roundCapped = (cfg, prior) => cfg.maxReviewRounds > 0 && (prior?.reviewNo || 0) >= cfg.maxReviewRounds;
 
@@ -56,20 +45,26 @@ export const awaitingHuman = (run, approvals) => run?.awaitingHuman ?? (approval
  * Starts a detached headless Claude Code session running prowl-review on the PRs. It outlives this
  * process; output goes to a log file this app tails, so a restart picks running reviews back up.
  */
-export function startReview(cfg, pluginDir, { tracker, ticket, prs, approvedPrs = [], prior, me = '', heads = {}, ticketText = '' }) {
+export function startReview(cfg, pluginDir, { tracker, ticket, prs, approvedPrs = [], leftOut = [], prior, me = '', heads = {}, ticketText = '' }) {
   const reviewNo = (prior?.reviewNo || 0) + 1;
   const id = `${ticket.key.replace(/[^A-Za-z0-9-]/g, '')}-${new Date().toISOString().slice(0, 16).replace(/[-:]/g, '')}-r${reviewNo}`;
   for (const dir of [REPORTS_DIR, LOGS_DIR, CONFIG_DIR]) fs.mkdirSync(dir, { recursive: true });
   const run = {
     id, tracker, ticket: ticket.key, ticketUrl: ticket.url, ref: ticket.ref, title: ticket.title, prs, reviewNo, priorId: prior?.id || null,
-    me, startedAt: Date.now(), status: 'running', pid: null, pendingTag: null, reviewedPrs: [], contextPrs: approvedPrs,
-    // PR URL -> the head commit Prowl approved it at; the skipped PRs carry over, and finalize() adds this review's.
-    approved: Object.fromEntries(approvedPrs.map(p => [p.url, prior.approved[p.url]])),
+    me, startedAt: Date.now(), status: 'running', pid: null, pendingTag: null, reviewedPrs: [], contextPrs: approvedPrs, leftOut,
+    // Ends the body of each review the session posts, so finish() can tell its reviews from thread replies.
+    marker: postMarker(id),
+    // PR URL -> the head commit Prowl approved it at; the skipped and left-out PRs carry over, and finalize() adds this review's.
+    approved: Object.fromEntries([...approvedPrs, ...leftOut].filter(p => prior?.approved?.[p.url]).map(p => [p.url, prior.approved[p.url]])),
     // The approved PRs that only got Prowl's stamp (Approve PRs off, or your own PR) and still need a human's approval.
-    approvals: cfg.approvals, awaitingHuman: approvedPrs.map(p => p.url).filter(u => awaitingHuman(prior, cfg.approvals).includes(u)),
+    approvals: cfg.approvals, awaitingHuman: [...approvedPrs, ...leftOut].map(p => p.url).filter(u => awaitingHuman(prior, cfg.approvals).includes(u)),
     // PR URL -> its head commit as this review starts, for a delta re-review to start from. The context PRs are
-    // unchanged since they were last reviewed, so their head is their last reviewed commit too.
-    reviewedHeads: Object.fromEntries([...prs, ...approvedPrs].filter(p => heads[p.url]).map(p => [p.url, heads[p.url]])),
+    // unchanged since they were last reviewed, so their head is their last reviewed commit too. A left-out PR keeps
+    // the commit it was last reviewed at.
+    reviewedHeads: Object.fromEntries([
+      ...[...prs, ...approvedPrs].filter(p => heads[p.url]).map(p => [p.url, heads[p.url]]),
+      ...leftOut.filter(p => prior?.reviewedHeads?.[p.url]).map(p => [p.url, prior.reviewedHeads[p.url]]),
+    ]),
     reportPath: path.join(REPORTS_DIR, `${id}.md`),
     logPath: path.join(LOGS_DIR, `${id}.ndjson`),
     promptPath: path.join(LOGS_DIR, `${id}.prompt.md`),
@@ -80,14 +75,12 @@ export function startReview(cfg, pluginDir, { tracker, ticket, prs, approvedPrs 
   if (prior) {
     try { priorReport = fs.readFileSync(prior.reportPath, 'utf8'); } catch { priorReport = '(the previous report file is missing)'; }
   }
-  // Fix my PRs briefs each fix session with its PR's details file, copied here by the review.
-  const detailsDir = cfg.fix?.enabled ? detailsDirOf(run) : '';
-  fs.writeFileSync(run.promptPath, buildPrompt({ ...run, prior, priorReport, approvals: cfg.approvals, reReviewScope: cfg.reReviewScope, heads, parkHumanOnly: cfg.parkHumanOnly, ticketText, detailsDir }));
+  fs.writeFileSync(run.promptPath, buildPrompt({ ...run, prior, priorReport, approvals: cfg.approvals, reReviewScope: cfg.reReviewScope, heads, parkHumanOnly: cfg.parkHumanOnly, ticketText }));
 
   const stdin = fs.openSync(run.promptPath, 'r');
   const log = fs.openSync(run.logPath, 'a');
   const child = spawnCli('claude', reviewArgs(cfg, pluginDir), {
-    cwd: cfg.workDir, detached: true, stdio: [stdin, log, log], env: reviewEnv(cfg),
+    cwd: cfg.workDir, detached: true, stdio: [stdin, log, log], env: sessionEnv(cfg),
   });
   fs.closeSync(stdin);
   fs.closeSync(log);
@@ -95,18 +88,8 @@ export function startReview(cfg, pluginDir, { tracker, ticket, prs, approvedPrs 
   return run;
 }
 
-/** Follows a detached session this process spawned for `run` (a review or a fix), so alive() knows when it exits. */
-export function track(run, child, cfg) {
-  run.pid = child.pid;
-  run._spawned = true;
-  if (cfg.caffeinate) keepAwake(child.pid); // a sleeping Mac stalls the session's streams and stretches the review
-  child.on('error', e => { run.spawnError = e.message; exited.add(child.pid); });
-  child.on('exit', () => exited.add(child.pid));
-  child.unref();
-}
-
-/** Where a review copies each PR's details file, as <repo name>-<n>.md, for Fix my PRs. */
-export const detailsDirOf = run => path.join(REPORTS_DIR, run.id);
+/** The hidden line that ends the body of each review a session posts. */
+export const postMarker = id => `<!-- prowl-review ${id} review -->`;
 
 /** The `claude` arguments for a review session. */
 export function reviewArgs(cfg, pluginDir) {
@@ -121,27 +104,28 @@ export function reviewArgs(cfg, pluginDir) {
 }
 
 /** The environment for a review session. */
-export const reviewEnv = (cfg, env = process.env) => ({
-  ...env,
-  // prowl-review runs its reviewers as background subagents and ends its turn while they work. `claude -p`
-  // stops background tasks still running 10 minutes after the last turn, which kills a large batch's
-  // reviewers before anything is posted. Each finished subagent starts a new turn, so this is the longest
-  // stretch with no subagent finishing.
-  // optimization-note: a hung background command (e.g. a test runner in watch mode) holds the review open
-  // for up to this long after its report is written; Stop ends it sooner.
-  CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: String(60 * 60_000),
-  // Headless reviews otherwise add their outcome to the project's memory index, which loads into every later session.
-  ...(cfg.allowMemoryWrites === false && { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' }),
-});
+export const reviewEnv = sessionEnv;
 
 /** True once a running review has run past the Review time limit; it is then stopped, and fails with the cap named. */
 export const overdue = (run, cfg) => cfg.reviewTimeoutMinutes > 0 && run.status === 'running' && Date.now() - run.startedAt > cfg.reviewTimeoutMinutes * 60_000;
 
 /**
  * Whether a failed review is retried automatically: once per ticket (`failures` counts this one), and never one
- * stopped by a cap, so a runaway review isn't paid for twice.
+ * stopped by a cap, so a runaway review isn't paid for twice, nor one that didn't post its reviews, which a retry
+ * would most likely be blocked from posting again.
  */
-export const retryFailed = (run, failures) => !run.capped && failures === 1;
+export const retryFailed = (run, failures) => !run.capped && !run.unposted?.length && failures === 1;
+
+/**
+ * Fails a review whose session ended without posting its review on `missing` (open PRs with no review carrying the
+ * run's marker): its own post may have been blocked, by an auto-mode permission check say, while thread replies went through.
+ */
+export function failUnposted(run, missing) {
+  if (!missing.length) return;
+  run.status = 'failed';
+  run.unposted = missing.map(p => p.url);
+  run.error = `no review posted on ${missing.map(p => `${p.repo}#${p.number}`).join(', ')}; the session ended without posting it (see ${run.logPath})`;
+}
 
 export function stopReview(run) {
   run.status = 'stopping';
@@ -173,51 +157,6 @@ export function tidyLogs(days, running, home = HOME) {
   return deleted;
 }
 
-/** Reads new output from a review's log into run._activity; returns its final `result` event once present. */
-export function readActivity(run) {
-  run._activity ??= [];
-  run._offset ??= 0;
-  run._partial ??= '';
-  run._decoder ??= new StringDecoder('utf8');
-  let size;
-  try { size = fs.statSync(run.logPath).size; } catch { return run._result; }
-  if (size > run._offset) {
-    const buf = Buffer.alloc(size - run._offset);
-    const fd = fs.openSync(run.logPath, 'r');
-    try { fs.readSync(fd, buf, 0, buf.length, run._offset); } finally { fs.closeSync(fd); }
-    run._offset = size;
-    run._lastOutputAt = Date.now();
-    const lines = (run._partial + run._decoder.write(buf)).split('\n');
-    run._partial = lines.pop();
-    for (const line of lines) parseLine(run, line);
-    if (run._activity.length > 400) run._activity.splice(0, run._activity.length - 400);
-  }
-  return run._result;
-}
-
-function parseLine(run, line) {
-  if (!line.trim()) return;
-  let e;
-  try {
-    e = JSON.parse(line);
-  } catch {
-    run._activity.push({ text: line, error: true }); // stderr shares the log
-    return;
-  }
-  const sub = Boolean(e.parent_tool_use_id);
-  if (e.type === 'assistant') {
-    for (const c of e.message?.content || []) {
-      if (c.type === 'tool_use') run._activity.push({ sub, text: describeTool(c) });
-      else if (c.type === 'text' && c.text.trim()) run._activity.push({ sub, said: true, text: c.text.trim().split('\n')[0] });
-    }
-  }
-  if (e.type === 'result') run._result = e;
-}
-
-const describeTool = ({ name, input = {} }) =>
-  `${name} ${input.description || input.command || input.skill || input.file_path || input.pattern || input.url || input.prompt || ''}`
-    .replace(/\s+/g, ' ').trim();
-
 /** Settles a review whose session has ended: status, cost, summary, and a fallback report if the agent wrote none. */
 export function finalize(run) {
   const result = run._result;
@@ -225,7 +164,7 @@ export function finalize(run) {
   run.costUsd = result?.total_cost_usd ?? null;
   const ok = result?.subtype === 'success' && !result.is_error;
   const stderr = run._activity?.filter(a => a.error).at(-1)?.text;
-  run.capped ??= { error_max_budget_usd: `spend cap $${run.caps?.maxBudgetUsd}`, error_max_turns: `turn cap ${run.caps?.maxTurns}` }[result?.subtype];
+  run.capped ??= capHit(result, run.caps) ?? undefined;
   if (run.capped) {
     run.status = 'failed';
     run.error = `stopped: ${run.capped}`;
@@ -253,7 +192,7 @@ export function finalize(run) {
 }
 
 /** The prompt (the agent's brief): the PR list for prowl-review, the ticket, the re-review brief and the report spec. */
-export function buildPrompt({ ticket, title, ticketUrl, prs, contextPrs = [], reviewNo, reportPath, prior, priorReport, approvals = true, reReviewScope = 'full', heads = {}, parkHumanOnly = false, ticketText = '', detailsDir = '' }) {
+export function buildPrompt({ ticket, title, ticketUrl, prs, contextPrs = [], leftOut = [], reviewNo, reportPath, prior, priorReport, approvals = true, reReviewScope = 'full', heads = {}, parkHumanOnly = false, ticketText = '', marker = '' }) {
   const lines = [
     `/prowl:prowl-review ${[...prs, ...contextPrs].map(p => p.url).join(' ')}`,
     '',
@@ -263,6 +202,7 @@ export function buildPrompt({ ticket, title, ticketUrl, prs, contextPrs = [], re
     `- This is review ${reviewNo} of this ticket${prior ? ', a RE-REVIEW' : ''}.`,
     '- It started automatically because the ticket was tagged for review. Nobody is watching this session: never stop to ask a question; make the reasonable call and note it in the report.',
   ];
+  if (marker) lines.push(`- End the body of each review you post with this line: ${marker}`);
   if (!approvals) lines.push("- Approvals off (Prowl's Approve PRs setting): never post an APPROVE review; see approvals-off mode in the skill.");
   if (ticketText) lines.push('', ...ticketSection(ticketText));
   if (contextPrs.length) {
@@ -270,12 +210,16 @@ export function buildPrompt({ ticket, title, ticketUrl, prs, contextPrs = [], re
       'Prowl approved these PRs in an earlier review and they have no new commits since. They are already approved (see Step 1): read them for the batch brief and the cross-PR contracts, but give them no spec or reviewer, post nothing on them, and leave their earlier findings and comment threads alone.',
       '', ...contextPrs.map(p => `- ${p.url}`));
   }
+  if (prior && leftOut.length) {
+    lines.push('', '## Left out of this review', '',
+      "An earlier review covered these PRs, and they aren't part of this one (turned back into drafts, or past Prowl's round cap). Don't read them, and post nothing on them: leave their prior findings exactly as they are, without re-verifying, replying on or resolving them, and carry those findings into this report unchanged.",
+      '', ...leftOut.map(p => `- ${p.url}`));
+  }
   // A delta re-review needs the commits the last review saw; reviews from before 2.8.0 didn't record them.
   const steps = parkHumanOnly ? [...PRIOR_STEPS, PARK_STEP] : PRIOR_STEPS;
   if (prior && reReviewScope === 'delta' && prior.reviewedHeads) lines.push('', ...deltaBrief(prior, priorReport, prs, heads, steps));
   else if (prior) lines.push('', ...reReviewBrief(prior, priorReport, steps));
   lines.push('', ...reportSpec(ticket, reviewNo, reportPath, Boolean(prior)));
-  if (detailsDir) lines.push(`Also copy each PR's details file (\`details/<repo>-<n>.md\` in your run folder) to ${detailsDir}${path.sep}<repo>-<n>.md, where <repo> is the repository's name without its owner: Prowl's Fix my PRs works from it.`);
   return `${lines.join('\n')}\n`;
 }
 

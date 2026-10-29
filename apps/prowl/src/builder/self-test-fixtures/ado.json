@@ -1,0 +1,44 @@
+{
+  "123": {
+    "id": 123, "rev": 7,
+    "fields": {
+      "System.TeamProject": "Shop", "System.Title": "Save the cart between visits", "System.WorkItemType": "User Story", "System.State": "Active",
+      "System.Tags": "Ready to Start; Web", "System.AssignedTo": { "displayName": "Octo Cat", "uniqueName": "octocat@example.invalid" },
+      "System.Description": "<div>Shoppers lose their cart when they come back.</div><div>repo: octo-org/web</div>",
+      "Microsoft.VSTS.Common.AcceptanceCriteria": "<ul><li>A saved cart survives a reload</li><li>An empty cart isn&#39;t saved</li></ul>"
+    },
+    "relations": [
+      { "rel": "System.LinkTypes.Hierarchy-Reverse", "url": "https://dev.azure.com/o/_apis/wit/workItems/100" },
+      { "rel": "System.LinkTypes.Hierarchy-Forward", "url": "https://dev.azure.com/o/_apis/wit/workItems/125" },
+      { "rel": "System.LinkTypes.Related", "url": "https://dev.azure.com/o/_apis/wit/workItems/124" },
+      { "rel": "ArtifactLink", "url": "vstfs:///GitHub/Commit/0a1b2c3d", "attributes": { "name": "GitHub Commit" } },
+      { "rel": "Hyperlink", "url": "https://example.invalid/design/cart" },
+      { "rel": "AttachedFile", "url": "https://dev.azure.com/o/_apis/wit/attachments/1", "attributes": { "name": "cart-mockup.png" } }
+    ],
+    "comments": [{ "createdBy": { "displayName": "Product Owner" }, "createdDate": "2026-10-20T09:00:00Z", "text": "<p>Keep it to signed-in shoppers.</p>" }],
+    "updates": []
+  },
+  "100": {
+    "id": 100, "rev": 2,
+    "fields": { "System.TeamProject": "Shop", "System.Title": "Returning shoppers", "System.WorkItemType": "Feature", "System.State": "Active", "System.Description": "<p>Make coming back painless.</p>" },
+    "relations": [], "comments": [], "updates": []
+  },
+  "124": {
+    "id": 124, "rev": 3,
+    "fields": { "System.TeamProject": "Shop", "System.Title": "Cart badge shows 0 after sign-in", "System.WorkItemType": "Bug", "System.State": "New", "System.Description": "" },
+    "relations": [], "comments": [], "updates": []
+  },
+  "125": {
+    "id": 125, "rev": 1,
+    "fields": { "System.TeamProject": "Shop", "System.Title": "Store carts", "System.WorkItemType": "Task", "System.State": "New", "System.Description": "<p>Carts need a table.</p>" },
+    "relations": [], "comments": [], "updates": []
+  },
+  "126": {
+    "id": 126, "rev": 4,
+    "fields": {
+      "System.TeamProject": "Shop", "System.Title": "Someone else's ticket", "System.WorkItemType": "User Story", "System.State": "Active",
+      "System.Tags": "Ready to Start", "System.AssignedTo": { "displayName": "Teammate", "uniqueName": "teammate@example.invalid" }, "System.Description": ""
+    },
+    "relations": [], "comments": [], "updates": []
+  }
+}

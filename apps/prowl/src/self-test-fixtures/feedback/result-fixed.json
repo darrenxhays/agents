@@ -1,0 +1,13 @@
+{
+  "status": "fixed",
+  "summary": "Awaited the first save and handled a null response.",
+  "items": [
+    { "pr": "octo-org/api#12", "thread": "PRRT_owl1", "finding": "F-01", "action": "fix", "note": "save() now awaits the first write before the second." },
+    { "pr": "octo-org/api#12", "thread": "PRRT_bot1", "finding": "", "action": "fix", "note": "load() returns [] on a null response." },
+    { "pr": "octo-org/api#12", "thread": "PRRT_person1", "finding": "", "action": "dispute", "note": "save is the name the ticket uses (AB#42), and src/api.js:12 exports it." },
+    { "pr": "octo-org/api#12", "thread": "", "finding": "F-02", "action": "park", "note": "Listed under Parked." }
+  ],
+  "questions": [],
+  "commits": [{ "pr": "octo-org/api#12", "sha": "3f2a1c9d0e" }],
+  "checks": [{ "pr": "octo-org/api#12", "command": "npm test", "result": "pass" }]
+}

@@ -4,19 +4,23 @@ import { run, runFull } from './proc.mjs';
 import { mentions } from './match.mjs';
 
 let login = '';
+const jsonLines = out => out.split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
 
 /** The GitHub login of whoever runs the poller. Their own PRs are skipped unless Review my own PRs is on. */
 export async function me() {
   return (login ||= (await run('gh', ['api', 'user', '--jq', '.login'])).trim());
 }
 
-/** Open PRs in `owner` whose title or body mentions the ticket key (AB#123 or PROJ-123). */
-export async function openPrs(owner, key) {
-  const out = await run('gh', ['search', 'prs', `"${key}"`, '--owner', owner, '--state', 'open', '--limit', '100',
-    '--json', 'url,title,body,author,number,repository']);
+/** Open PRs in `owner` whose title or body mentions the ticket key (AB#123 or PROJ-123), drafts marked `draft`. */
+export const openPrs = (owner, key) => prsMentioning(owner, key, 'open');
+
+/** PRs in `owner` whose title or body mentions the ticket key; `state` 'open', 'closed' or '' for both. */
+export async function prsMentioning(owner, key, state = '') {
+  const out = await run('gh', ['search', 'prs', `"${key}"`, '--owner', owner, ...(state ? ['--state', state] : []), '--limit', '100',
+    '--json', 'url,title,body,author,number,repository,isDraft,state']);
   return JSON.parse(out)
     .filter(p => mentions(`${p.title} ${p.body}`, key)) // search is fuzzy; this keeps AB#123 from matching AB#1234
-    .map(p => ({ url: p.url, title: p.title, number: p.number, repo: p.repository.nameWithOwner, author: p.author?.login || '' }));
+    .map(p => ({ url: p.url, title: p.title, number: p.number, repo: p.repository.nameWithOwner, author: p.author?.login || '', draft: Boolean(p.isDraft), state: p.state || '' }));
 }
 
 /** The commit at the head of the PR now. */
@@ -33,13 +37,28 @@ export async function humanApproved(url, sha) {
   return pr.state !== 'OPEN' || pr.reviews.some(r => r.state === 'APPROVED' && [sha, pr.headRefOid].includes(r.commit?.oid));
 }
 
-/** True once `login` has submitted a review on the PR at or after `since` (ms). */
-export async function reviewedSince(pr, login, since) {
-  const out = await run('gh', ['api', `repos/${pr.repo}/pulls/${pr.number}/reviews`, '--paginate', '--jq', '.[] | [.user.login, .submitted_at] | @tsv']);
-  return out.split('\n').some(line => {
-    const [who, at] = line.split('\t');
-    return who?.toLowerCase() === login.toLowerCase() && Date.parse(at) >= since;
-  });
+/**
+ * Whether `login` submitted a review on the PR at or after `since` (ms), from its reviews ([{ user, at, body }]). With a
+ * `marker`, only a review whose body carries it is true: GitHub also files each thread reply as an empty COMMENT
+ * review, which must not count. A non-empty review without the marker is 'unmarked': it counts, with a warning. An
+ * empty `marker` (a review started before 2.12.0) counts any review.
+ */
+export function reviewedIn(rows, login, since, marker = '') {
+  const mine = rows.filter(r => r.user?.toLowerCase() === login.toLowerCase() && Date.parse(r.at) >= since);
+  if (!marker) return mine.length > 0;
+  if (mine.some(r => String(r.body || '').includes(marker))) return true;
+  return mine.some(r => String(r.body || '').trim()) ? 'unmarked' : false;
+}
+
+/** reviewedIn() for the PR's reviews on GitHub. */
+export async function reviewedSince(pr, login, since, marker = '') {
+  const rows = jsonLines(await run('gh', ['api', `repos/${pr.repo}/pulls/${pr.number}/reviews`, '--paginate', '--jq', '.[] | {user: .user.login, at: .submitted_at, body}']));
+  return reviewedIn(rows, login, since, marker);
+}
+
+/** True while the PR is open (not merged or closed). */
+export async function isOpen(pr) {
+  return (await run('gh', ['api', `repos/${pr.repo}/pulls/${pr.number}`, '--jq', '.state'])).trim() === 'open';
 }
 
 /** Clones each PR's repo into `dir` unless a folder of that name is already there. Resolves with the repos cloned. */
@@ -54,11 +73,11 @@ export async function cloneMissing(prs, dir) {
   return cloned;
 }
 
-// Fix my PRs: what a fix round reads from a PR, and the one thing it writes (a reply on a thread).
-// postComment is the poller's Review started comment.
+// What the Builder reads from a PR, and what it writes (a PR, a reply on a thread). postComment is the Reviewer's
+// Review started comment.
 
 const THREADS = 'query($owner:String!,$repo:String!,$n:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$n){reviewThreads(first:100){nodes{'
-  + 'id isResolved path line first:comments(first:1){nodes{databaseId author{login __typename} body url}} last:comments(last:1){nodes{author{login} body}}}}}}}';
+  + 'id isResolved path line first:comments(first:1){nodes{databaseId author{login __typename} body url}} last:comments(last:1){nodes{author{login} body createdAt}}}}}}}';
 
 /** A PR's review threads from the GraphQL payload: the first comment (replies go to it) and the last (who spoke last). */
 export const threadsFrom = payload => (payload?.data?.repository?.pullRequest?.reviewThreads?.nodes || []).map(t => {
@@ -66,7 +85,7 @@ export const threadsFrom = payload => (payload?.data?.repository?.pullRequest?.r
   return {
     id: t.id, resolved: Boolean(t.isResolved), path: t.path || '', line: t.line ?? null, commentId: first.databaseId,
     author: first.author?.login || '', bot: first.author?.__typename === 'Bot', body: first.body || '', url: first.url || '',
-    lastAuthor: last.author?.login || '', lastBody: last.body || '',
+    lastAuthor: last.author?.login || '', lastBody: last.body || '', lastAt: last.createdAt || '',
   };
 });
 
@@ -76,17 +95,14 @@ export async function prThreads(pr) {
   return threadsFrom(JSON.parse(await run('gh', ['api', 'graphql', '-F', `owner=${owner}`, '-F', `repo=${repo}`, '-F', `n=${pr.number}`, '-f', `query=${THREADS}`])));
 }
 
-/** What a fix round needs to know about a PR before it touches it. */
+/** What the Builder needs to know about a PR before it touches it. */
 export async function prFacts(pr) {
-  const v = JSON.parse(await run('gh', ['pr', 'view', pr.url, '--json', 'state,isCrossRepository,headRefName,headRefOid,baseRefName,author,reviewDecision']));
-  const defaultBranch = (await run('gh', ['repo', 'view', pr.repo, '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name'])).trim();
+  const v = JSON.parse(await run('gh', ['pr', 'view', pr.url, '--json', 'state,isDraft,isCrossRepository,headRefName,headRefOid,baseRefName,author,reviewDecision']));
   return {
-    state: v.state, fork: Boolean(v.isCrossRepository), headBranch: v.headRefName, headSha: v.headRefOid, base: v.baseRefName,
-    defaultBranch, author: v.author?.login || '', reviewDecision: v.reviewDecision || '',
+    state: v.state, draft: Boolean(v.isDraft), fork: Boolean(v.isCrossRepository), headBranch: v.headRefName, headSha: v.headRefOid, base: v.baseRefName,
+    defaultBranch: await defaultBranch(pr.repo), author: v.author?.login || '', reviewDecision: v.reviewDecision || '',
   };
 }
-
-const jsonLines = out => out.split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
 
 /**
  * The details file of the latest PR-Owl review of PR `<repo name>-<n>` that has one, from review bodies ([{ body, at }]) and
@@ -118,10 +134,25 @@ export async function detailsFromGitHub(pr) {
   return detailsFromBodies(reviews, comments, `${pr.repo.split('/')[1]}-${pr.number}`);
 }
 
-/** When the PR's latest review was submitted (ms; 0 if none), leaving out bare thread replies, which GitHub also files as reviews. */
-export async function lastReviewAt(pr) {
-  const out = await run('gh', ['api', `repos/${pr.repo}/pulls/${pr.number}/reviews`, '--paginate', '--jq', '.[] | select(.body != "" or .state != "COMMENTED") | .submitted_at']);
-  return Math.max(0, ...out.split('\n').filter(Boolean).map(Date.parse).filter(Number.isFinite));
+/** The PR's reviews, leaving out bare thread replies (which GitHub also files as reviews): [{ user, state, at, body }]. */
+export async function prReviews(pr) {
+  return jsonLines(await run('gh', ['api', `repos/${pr.repo}/pulls/${pr.number}/reviews`, '--paginate', '--jq', '.[] | select(.body != "" or .state != "COMMENTED") | {user: .user.login, state, at: .submitted_at, body}']));
+}
+
+/** The default branch of `repo` (owner/name). */
+export async function defaultBranch(repo) {
+  return (await run('gh', ['repo', 'view', repo, '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name'])).trim();
+}
+
+/** Opens a PR; `file` holds { title, head, base, body, draft }. Resolves with { url, number }. */
+export async function createPr(repo, file) {
+  const [url, number] = (await run('gh', ['api', '-X', 'POST', `repos/${repo}/pulls`, '--input', file, '--jq', '[.html_url, .number] | @tsv'])).trim().split('\t');
+  return { url, number: Number(number) };
+}
+
+/** Replaces a PR's body with the one in `file` ({ body }). */
+export async function editPr(pr, file) {
+  await run('gh', ['api', '-X', 'PATCH', `repos/${pr.repo}/pulls/${pr.number}`, '--input', file, '--jq', '.number']);
 }
 
 /** The bodies of every review comment on the PR (thread comments and replies). */

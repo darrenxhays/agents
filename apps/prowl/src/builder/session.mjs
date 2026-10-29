@@ -1,0 +1,60 @@
+// A Builder session: `claude -p` in the Projects Directory (so its CLAUDE.md loads), fenced as kind 'work', with one
+// session id resumed at each step. Each turn is its own detached process with its own log.
+import fs from 'node:fs';
+import path from 'node:path';
+import { CONFIG_DIR, HOME, writeJson } from '../config.mjs';
+import { fenceArgs, fenceEnv, fenceSettings, trackerHosts } from '../fence.mjs';
+import { spawnCli } from '../proc.mjs';
+import { resetActivity, sessionEnv, track } from '../sessions.mjs';
+
+export const LOGS_DIR = path.join(HOME, 'logs');
+
+/** The folders a session may write in: its worktrees and its brief folder. */
+export const rootsOf = w => [...(w.turnKind === 'round' ? (w.round?.prs || []) : (w.repos || [])).map(r => r.worktree), w.briefDir].filter(Boolean);
+
+/** The `claude` arguments for a turn. `budget` is what is left of the session's spend cap (0 = no cap). */
+export function workArgs(cfg, appDir, w, settingsPath, budget) {
+  const b = cfg.builder;
+  return [
+    '-p', '--plugin-dir', appDir, ...rootsOf(w).flatMap(d => ['--add-dir', d]), '--add-dir', CONFIG_DIR,
+    '--model', b.model || cfg.claude.model, '--effort', b.effort, '--permission-mode', cfg.claude.permissionMode,
+    ...(w.sessionStarted ? ['--resume', w.sessionId] : ['--session-id', w.sessionId]),
+    ...(budget > 0 ? ['--max-budget-usd', String(Math.round(budget * 100) / 100)] : []),
+    ...(b.maxTurns > 0 ? ['--max-turns', String(b.maxTurns)] : []),
+    ...fenceArgs(b.mcpAllow),
+    '--settings', settingsPath,
+    '--output-format', 'stream-json', '--verbose',
+  ];
+}
+
+/** The environment for a turn: a session's, fenced as kind 'work', with no tracker token in it. */
+export function workEnv(cfg, w, env = process.env) {
+  const out = {
+    ...sessionEnv(cfg, env),
+    ...fenceEnv('work', rootsOf(w), cfg.builder.mcpAllow, trackerHosts(cfg.taskBoard === 'jira' ? cfg.jira.site : '')),
+    PROWL_BRIEF_DIR: w.briefDir, PROWL_UNATTENDED: '1',
+  };
+  for (const k of ['JIRA_API_TOKEN', 'AZURE_DEVOPS_EXT_PAT', 'SYSTEM_ACCESSTOKEN']) delete out[k];
+  return out;
+}
+
+/** Starts a turn of `w`'s session with `prompt`: a new detached process, tailed through its log. */
+export function startTurn(cfg, appDir, w, prompt, budget) {
+  fs.mkdirSync(LOGS_DIR, { recursive: true });
+  const n = (w.turns?.length || 0) + 1;
+  const base = path.join(LOGS_DIR, `work-${w.id}-${w.n || 1}.t${n}`);
+  const settingsPath = path.join(w.briefDir, 'settings.json');
+  writeJson(settingsPath, fenceSettings(appDir));
+  fs.rmSync(path.join(w.briefDir, 'result.json'), { force: true }); // each turn writes it afresh
+  fs.writeFileSync(`${base}.prompt.md`, prompt);
+  const stdin = fs.openSync(`${base}.prompt.md`, 'r');
+  const out = fs.openSync(`${base}.ndjson`, 'a');
+  const child = spawnCli('claude', workArgs(cfg, appDir, w, settingsPath, budget), {
+    cwd: cfg.workDir, detached: true, stdio: [stdin, out, out], env: workEnv(cfg, w),
+  });
+  fs.closeSync(stdin);
+  fs.closeSync(out);
+  resetActivity(w);
+  Object.assign(w, { logPath: `${base}.ndjson`, startedAt: Date.now(), spawnError: null, capped: null, sessionStarted: true });
+  track(w, child, cfg);
+}

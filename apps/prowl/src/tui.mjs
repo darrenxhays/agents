@@ -2,9 +2,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { CHECKS_PATH, CONFIG_DIR, CONFIG_PATH } from './config.mjs';
+import { BUILDER_FIELDS } from './builder/fields.mjs';
 import { createMascot, wrap } from './mascot.mjs';
 import { openExternal } from './proc.mjs';
-import { awaitingHuman, isOwn } from './reviews.mjs';
+import { awaitingHuman, isOwn } from './reviewer/reviews.mjs';
 
 const ST = {
   reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m', title: '\x1b[1;38;5;220m', yellow: '\x1b[38;5;220m',
@@ -13,6 +14,8 @@ const ST = {
 };
 const LEVEL = { ok: ST.green, info: ST.grey, warn: ST.yellow, error: ST.red };
 const SPIN = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
+const SIDES = ['reviewer', 'builder'];
+const NAMES = { reviewer: 'Reviewer', builder: 'Builder' };
 const TABS = ['Running', 'History', 'Needs you', 'Config', 'Log'];
 const [RUNNING, HISTORY, NEEDS, CONFIG] = [0, 1, 2, 3];
 
@@ -20,26 +23,38 @@ const isDir = p => { try { return fs.statSync(p).isDirectory(); } catch { return
 const https = v => /^https:\/\/\S+$/.test(v) || 'must be an https:// URL';
 const ADO = c => c.taskBoard === 'ado';
 const JIRA = c => c.taskBoard === 'jira';
-const FIX = c => c.fix?.enabled;
 const opens = 'enter opens it. Updates never overwrite your edits.';
-const FIELDS = [
-  // { heading } starts a section of the Config view: drawn above the rows that follow it, never selected.
-  { heading: 'Config files' },
-  // The user's config files: enter opens one in its default app.
-  { file: CONFIG_PATH, label: 'Settings file', help: `Every setting on this page, as JSON. ${opens}` },
-  { file: path.join(CONFIG_DIR, 'review.md'), label: 'Review rules', help: `Reviewer stance, severity definitions, and the verdict each severity gives. Applies from the next review. ${opens}` },
-  { file: path.join(CONFIG_DIR, 'review-axis-catalog.md'), label: 'Review checklists', help: `What reviewers check: the review axes and their checklists. Applies from the next review. ${opens}` },
-  { file: path.join(CONFIG_DIR, 'output.md'), label: 'Output templates', help: `How everything posted on GitHub looks: review-started comment, banner, review body, details file, comments, replies, approvals-off comment. Applies from the next review. ${opens}` },
-  { heading: 'Task board' },
-  { key: 'taskBoard', label: 'Task board', type: 'enum', values: ['ado', 'jira'], names: { ado: 'Azure DevOps', jira: 'Jira' }, help: 'Where tickets are watched: Azure DevOps or Jira Cloud. enter switches. Each keeps its own boards.' },
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+// { heading } starts a section of the Config view: drawn above the rows that follow it, never selected.
+// { file } rows open one of the user's config files in its default app. Jira calls tags labels: `jira` replaces the
+// label and help shown when it is the task board.
+const SHARED_FIELDS = [
+  { heading: 'Shared' },
+  { file: CONFIG_PATH, label: 'Settings file', help: `Every setting on this page, both sides, as JSON. ${opens}` },
+  { key: 'taskBoard', label: 'Task board', type: 'enum', values: ['ado', 'jira'], names: { ado: 'Azure DevOps', jira: 'Jira' }, help: 'Where tickets are watched, for both sides: Azure DevOps or Jira Cloud. enter switches. Each keeps its own boards.' },
   { key: 'ado.org', label: 'Azure DevOps org', type: 'text', when: ADO, help: 'Organization URL, e.g. https://dev.azure.com/your-org. Signed in with az login.', valid: https },
   { key: 'jira.site', label: 'Jira site', type: 'text', when: JIRA, help: 'Your Jira Cloud URL, e.g. https://yourcompany.atlassian.net.', valid: v => https(v) === true ? true : 'must be an https:// URL, e.g. https://yourcompany.atlassian.net' },
   { key: 'jira.email', label: 'Jira email', type: 'text', when: JIRA, help: 'The email you sign in to Atlassian with.', valid: v => /^[^\s@"\\]+@[^\s@"\\]+$/.test(v) || 'must be an email address' },
   { key: 'jira.token', label: 'Jira API token', type: 'secret', when: JIRA, help: 'Create one at id.atlassian.com > Security > API tokens. Kept in your OS credential store, never in the config file.' },
   'boards',
-  { key: 'githubOwner', label: 'GitHub org', type: 'text', help: 'Open PRs whose title or description mentions the ticket (AB#123 or PROJ-123) are searched for here.' },
-  { key: 'pollSeconds', label: 'Poll every (seconds)', type: 'int', min: 30, max: 86400, help: 'How often the boards are checked. r polls now.' },
-  // Jira calls tags labels: `jira` replaces the label and help shown when it is the task board.
+  { key: 'githubOwner', label: 'GitHub org', type: 'text', help: 'Open PRs whose title or description mentions the ticket (AB#123 or PROJ-123) are searched for here, and the Builder works in its repos.' },
+  { key: 'workDir', label: 'Projects Directory', type: 'text', help: 'Sessions run here and load its CLAUDE.md, e.g. your projects root. Repos not cloned here are cloned before use; worktrees go in its .prowl-worktrees folder.', valid: v => isDir(v) || 'folder not found' },
+  { key: 'pollSeconds', label: 'Poll every (seconds)', type: 'int', min: 30, max: 86400, help: 'How often the boards are checked, and config.json re-read. r polls the side in view now.' },
+  { key: 'tagMatchMaxTypos', label: 'Tag typo tolerance', type: 'int', min: 0, max: 3, help: "Typos (wrong, missing, extra or swapped letters) still treated as the Reviewer's trigger tag or the Builder's start tag. Case, spaces and punctuation are always ignored. 0 = exact.",
+    jira: { label: 'Label typo tolerance', help: "Typos (wrong, missing, extra or swapped letters) still treated as the trigger or start label. Case, spaces and punctuation are always ignored. 0 = exact." } },
+  { key: 'claude.permissionMode', label: 'Permission mode', type: 'enum', values: ['auto', 'bypassPermissions'], help: 'For both sides\' sessions. auto lets a safety classifier block risky actions. bypassPermissions lets sessions run anything: not recommended, they read text written by other people.' },
+  { key: 'allowMemoryWrites', label: 'Sessions use memory', type: 'bool', help: "on: sessions use Claude Code's auto-memory like any session, and can add what they did to your memory files. off: they run with auto-memory off, so they neither read nor write it." },
+  { key: 'caffeinate', label: 'Keep Mac awake', type: 'bool', when: () => process.platform === 'darwin', help: "on: the Mac doesn't idle-sleep while a session runs (caffeinate), since sleep stalls it and stretches it out. Closing the lid still sleeps it." },
+  { key: 'logRetentionDays', label: 'Keep logs (days)', type: 'int', min: 0, max: 3650, help: 'Session logs older than this are deleted, and poller.log rolls over to poller.log.1 past 5 MB. Reports are always kept. 0 = keep everything.' },
+  { key: 'dryRun', label: 'Dry run', type: 'bool', help: 'Log what would be reviewed or built, without changing tags or starting sessions.' },
+  { key: 'autoUpdate', label: 'Auto-update', type: 'bool', help: 'Install a newer Prowl release before launching. It waits while sessions from an earlier launch are still running.' },
+  { file: CHECKS_PATH, label: 'Checks before push', help: 'Commands the Builder runs in a worktree before it pushes, per repo, e.g. { "my-org/*": { "run": ["npm test"] } }. Nothing matches: no checks. Never overwritten. enter opens it.' },
+];
+const REVIEWER_FIELDS = [
+  { heading: 'Config files' },
+  { file: path.join(CONFIG_DIR, 'review.md'), label: 'Review rules', help: `Reviewer stance, severity definitions, and the verdict each severity gives. Applies from the next review. ${opens}` },
+  { file: path.join(CONFIG_DIR, 'review-axis-catalog.md'), label: 'Review checklists', help: `What reviewers check: the review axes and their checklists. Applies from the next review. ${opens}` },
+  { file: path.join(CONFIG_DIR, 'output.md'), label: 'Output templates', help: `How everything posted on GitHub looks: review-started comment, banner, review body, details file, comments, replies (the Builder's too), approvals-off comment. ${opens}` },
   { heading: 'Tags', jira: { heading: 'Labels' } },
   { key: 'tags.trigger', label: 'Trigger tag', type: 'text', help: 'Tickets carrying this tag, or a near-miss spelling of it, get reviewed.',
     jira: { label: 'Trigger label', help: 'Issues carrying this label, or a near-miss spelling of it, get reviewed.' } },
@@ -47,52 +62,25 @@ const FIELDS = [
     jira: { label: 'In-progress label', help: 'Set when a review starts. Spaces become dashes (In-Review).' } },
   { key: 'tags.done', label: 'Done tag', type: 'text', help: 'Set when a review finishes. Re-add the trigger tag to ask for a re-review.',
     jira: { label: 'Done label', help: 'Set when a review finishes. Spaces become dashes. Re-add the trigger label to ask for a re-review.' } },
-  { key: 'tagMatchMaxTypos', label: 'Tag typo tolerance', type: 'int', min: 0, max: 3, help: 'Typos (wrong, missing, extra or swapped letters) still treated as the trigger tag. Case, spaces and punctuation are always ignored. 0 = exact.',
-    jira: { label: 'Label typo tolerance', help: 'Typos (wrong, missing, extra or swapped letters) still treated as the trigger label. Case, spaces and punctuation are always ignored. 0 = exact.' } },
   { heading: 'Review sessions' },
   { key: 'maxConcurrentReviews', label: 'Max parallel reviews', type: 'int', min: 1, max: 10, help: "Extra tickets stay tagged until a slot frees, so a teammate's poller can take them." },
-  { key: 'workDir', label: 'Projects Directory', type: 'text', help: 'Reviews run here and load its CLAUDE.md, e.g. your projects root. A PR repo not cloned here is cloned before its review.', valid: v => isDir(v) || 'folder not found' },
-  { key: 'claude.model', label: 'Model', type: 'text', help: 'Model for review sessions.' },
-  { key: 'claude.effort', label: 'Effort', type: 'enum', values: ['low', 'medium', 'high', 'xhigh', 'max'], help: 'Reasoning effort for review sessions. enter cycles.' },
-  { key: 'claude.permissionMode', label: 'Permission mode', type: 'enum', values: ['auto', 'bypassPermissions'], help: 'auto lets a safety classifier block risky actions. bypassPermissions lets reviews run anything: not recommended, reviews read text written by PR authors.' },
+  { key: 'claude.model', label: 'Model', type: 'text', help: 'Model for review sessions, and for Builder sessions unless Build model is set.' },
+  { key: 'claude.effort', label: 'Effort', type: 'enum', values: EFFORTS, help: 'Reasoning effort for review sessions. enter cycles.' },
   { key: 'claude.maxBudgetUsd', label: 'Spend cap per review ($)', type: 'int', min: 0, max: 100000, help: "Stops a review once it has spent this much. It fails with the cap named and isn't retried, so a runaway review isn't paid for twice. 0 = no cap." },
   { key: 'claude.maxTurns', label: 'Turn cap per review', type: 'int', min: 0, max: 100000, help: "Stops a review after this many turns. It fails with the cap named and isn't retried. 0 = no cap." },
   { key: 'reviewTimeoutMinutes', label: 'Review time limit (min)', type: 'int', min: 0, max: 10080, help: "Stops a review that runs longer than this, counted from its start. It fails with the cap named and isn't retried. 0 = no limit." },
   { key: 'ticketContext', label: 'Ticket text in reviews', type: 'bool', help: "on: the ticket's description (and, on Azure DevOps, its acceptance criteria) is added to the review's brief, so reviewers know the goal without signing in to the tracker. Up to about 6 KB." },
-  { key: 'allowMemoryWrites', label: 'Reviews use memory', type: 'bool', help: "on: review sessions use Claude Code's auto-memory like any session, and can add what they did to your memory files. off: reviews run with auto-memory off, so they neither read nor write it." },
-  { key: 'caffeinate', label: 'Keep Mac awake', type: 'bool', when: () => process.platform === 'darwin', help: "on: the Mac doesn't idle-sleep while a review runs (caffeinate), since sleep stalls a review and stretches it out. Closing the lid still sleeps it." },
   { heading: 'Verdicts and rounds' },
   { key: 'reviewOwnPrs', label: 'Review my own PRs', type: 'bool', help: "off: a ticket with any PR you authored is left for a teammate. on: it is reviewed like any other; GitHub won't let you approve or request changes on your own PR, so those get a comment review with the verdict." },
   { key: 'approvals', label: 'Approve PRs', type: 'bool', help: 'on: a PR with no blocking findings gets a GitHub approval. off: Prowl comments that it found no blocking issues, and a human approves (text in Output templates); History flags those PRs with ⚑ until someone approves them.' },
-  { key: 'maxReviewRounds', label: 'Max review rounds', type: 'int', min: 0, max: 100, help: 'Reviews per ticket. Once a ticket has had this many, Prowl leaves it tagged and unclaimed for a person, and History flags it with ⚑ round cap reached. 0 = no cap.' },
+  { key: 'maxReviewRounds', label: 'Max review rounds', type: 'int', min: 0, max: 100, help: 'Reviews per ticket. Once a ticket has had this many, Prowl leaves it tagged and unclaimed for a person, and History flags it with ⚑ round cap reached. A PR no review has covered yet is still reviewed. 0 = no cap.' },
   { key: 'reReviewScope', label: 'Re-review scope', type: 'enum', values: ['full', 'delta'], help: "full: a re-review reads each PR whole, with the whole last report. delta: only the commits since the last review, plus its still-open findings; the rest of the PR is context. enter switches." },
   { key: 'parkHumanOnly', label: 'Park human-only findings', type: 'bool', help: "on: a re-review parks an earlier finding that only a person can fix outside the code (a CI pipeline, tracker or permissions config, a product decision). It isn't re-posted, is listed under Parked in the details file, and doesn't hold up the verdict." },
-  { heading: 'Fix my PRs' },
-  { key: 'fix.enabled', label: 'Fix my PRs', type: 'bool', help: "on: when a review asks for changes on your own PRs, Prowl fixes them, runs your checks, pushes, replies on the threads and re-tags for a re-review. With Review my own PRs off, Prowl never reviews your PRs, so rounds start only on tickets you watch (w in History)." },
-  { file: path.join(CONFIG_DIR, 'fix.md'), label: 'Fix rules', when: FIX, help: `How fix sessions work through findings and threads: what they fix, dispute or ask you. Applies from the next fix. ${opens}` },
-  { file: CHECKS_PATH, label: 'Checks before push', when: FIX, help: 'Commands run in the fix worktree before a push, per repo, e.g. { "my-org/*": { "run": ["npm test"] } }. Nothing matches: no checks. Never overwritten. enter opens it.' },
-  { key: 'fix.from', label: 'Fix comments from', type: 'enum', values: ['prowl', 'prowl+bots', 'everyone'], when: FIX, help: "Whose unresolved threads fix sessions take on: Prowl's own, Prowl's plus bots', or everyone's. enter cycles." },
-  { key: 'fix.maxRounds', label: 'Fix rounds per ticket', type: 'int', min: 1, max: 20, when: FIX, help: 'Fix-and-re-review rounds per ticket. Then the ticket goes to Needs you.' },
-  { key: 'fix.maxBudgetUsd', label: 'Spend cap per fix ($)', type: 'int', min: 0, max: 100000, when: FIX, help: "Stops a fix session once it has spent this much. It goes to Needs you and isn't retried. 0 = no cap." },
-  { key: 'fix.maxTurns', label: 'Turn cap per fix', type: 'int', min: 0, max: 100000, when: FIX, help: "Stops a fix session after this many turns. It goes to Needs you and isn't retried. 0 = no cap." },
-  { key: 'fix.timeoutMinutes', label: 'Fix time limit (min)', type: 'int', min: 0, max: 10080, when: FIX, help: "Stops a fix session that runs longer than this. It goes to Needs you and isn't retried. 0 = no limit." },
-  { key: 'fix.ticketBudgetUsd', label: 'Spend cap per ticket ($)', type: 'int', min: 0, max: 100000, when: FIX, help: 'Reviews plus fixes for one ticket, since its loop started. At the cap no new fix starts and the ticket goes to Needs you. 0 = no cap.' },
-  { key: 'fix.dailyBudgetUsd', label: 'Spend cap per day ($)', type: 'int', min: 0, max: 100000, when: FIX, help: 'Fix sessions since midnight. At the cap no new fix starts until tomorrow. 0 = no cap.' },
-  { key: 'fix.waitForChecksMinutes', label: 'Wait for CI (min)', type: 'int', min: 0, max: 1440, when: FIX, help: "After a push, how long to wait for the PR's required checks before re-tagging anyway. A failing check gets one more fix. 0 = re-tag at once." },
-  { key: 'fix.maxChangedLines', label: 'Max lines changed per round', type: 'int', min: 1, max: 1000000, when: FIX, help: 'A fix that changes more lines than this is not pushed; it goes to Needs you.' },
-  { key: 'fix.protectedPaths', label: 'Paths that need a person', type: 'list', when: FIX, help: 'Globs, e.g. .github/workflows/**. A fix that changes one is not pushed; it goes to Needs you. Edit them in the settings file: enter opens it.' },
-  { key: 'fix.protectedBranches', label: 'Branches never pushed', type: 'list', when: FIX, help: "Globs, e.g. release/*. Prowl never pushes to these, nor to a repo's default branch. Edit them in the settings file: enter opens it." },
-  { key: 'fix.maxConcurrent', label: 'Max parallel fixes', type: 'int', min: 1, max: 10, when: FIX, help: 'Fix sessions at once. Separate from Max parallel reviews.' },
-  { key: 'fix.model', label: 'Fix model', type: 'text', empty: true, when: FIX, help: 'Model for fix sessions. Empty: the review Model.' },
-  { key: 'fix.effort', label: 'Fix effort', type: 'enum', values: ['low', 'medium', 'high', 'xhigh', 'max'], when: FIX, help: 'Reasoning effort for fix sessions. enter cycles.' },
-  { key: 'fix.notify', label: 'Desktop notifications', type: 'bool', when: FIX, help: 'on: a desktop notification when a ticket is ready to merge or needs you.' },
-  { heading: 'Prowl' },
-  { key: 'logRetentionDays', label: 'Keep logs (days)', type: 'int', min: 0, max: 3650, help: 'Review logs older than this are deleted, and poller.log rolls over to poller.log.1 past 5 MB. Reports are always kept. 0 = keep everything.' },
-  { key: 'dryRun', label: 'Dry run', type: 'bool', help: 'Log what would be reviewed without changing tags or starting reviews.' },
-  { key: 'autoUpdate', label: 'Auto-update', type: 'bool', help: 'Install a newer Prowl release before launching. It waits while reviews from an earlier launch are still running.' },
 ];
+const SIDE_FIELDS = { reviewer: REVIEWER_FIELDS, builder: BUILDER_FIELDS };
+const ALL_FIELDS = [...SHARED_FIELDS, ...REVIEWER_FIELDS, ...BUILDER_FIELDS];
 
-const LABEL_W = Math.max(...FIELDS.map(f => f.label?.length || 0)) + 2; // the Config view's label column
+const LABEL_W = Math.max(...ALL_FIELDS.map(f => f.label?.length || 0)) + 2; // the Config view's label column
 
 // Control characters (ESC included) are stripped from everything shown: titles, PR text and agent output
 // come from other people, and raw escape sequences would let them drive this terminal. Wide characters
@@ -155,70 +143,86 @@ function* keys(data) {
 }
 
 /**
- * Full-screen terminal UI. `app` is read every frame; `actions` = { pollNow, togglePause, stop, saveConfig, saveToken, quit,
- * and for Fix my PRs: fixing, watch, answer, skip, takeOver }.
+ * Full-screen terminal UI: a tab for each side (Reviewer and Builder), each with Running, History, Needs you, Config
+ * and Log. `app` is read every frame. `actions` = { sides: { reviewer, builder }, pollNow(side), togglePause(side),
+ * toggleSide(side), stop(side, item), answer(item, text), skip(item), handBack(item), follow(record), stopFollowing(record),
+ * saveConfig, saveToken, quit }. `io` = { out, stdin, headless } (headless: no raw mode or timers, for the self-test).
+ * Returns { restore, key(k), frame() }.
  */
-export function startTui(app, actions) {
-  const out = process.stdout;
+export function startTui(app, actions, io = {}) {
+  const out = io.out || process.stdout;
+  const stdin = io.stdin || process.stdin;
   const owl = createMascot();
-  const ui = { tab: 0, sel: TABS.map(() => 0), edit: null, confirm: null, flash: '', flashUntil: 0, notes: app.notes ? { scroll: 0 } : null };
+  const { sides } = actions;
+  const ui = {
+    side: 'reviewer', view: { reviewer: 0, builder: 0 }, sel: { reviewer: TABS.map(() => 0), builder: TABS.map(() => 0) },
+    edit: null, confirm: null, flash: '', flashUntil: 0, notes: app.notes ? { scroll: 0 } : null,
+  };
   const flash = text => { ui.flash = text; ui.flashUntil = Date.now() + 4000; };
-  const clampSel = (tab, n) => (ui.sel[tab] = Math.max(0, Math.min(ui.sel[tab], n - 1)));
+  const side = () => sides[ui.side];
+  const view = () => ui.view[ui.side];
+  const sel = () => ui.sel[ui.side];
+  const clampSel = (tab, n) => (sel()[tab] = Math.max(0, Math.min(sel()[tab], n - 1)));
+  const isOn = name => app.sideOn(name);
+  const reviewer = sides.reviewer;
+  const builder = sides.builder;
 
-  // Reviews and fix sessions, live.
-  const live = () => [...app.running(), ...actions.fixing()];
-  // Finished reviews and fixes that aren't a running session, newest first.
-  const history = () => [...app.finished(), ...(app.state.fixes || []).filter(f => !['fixing', 'stopping'].includes(f.status))]
+  // Running sessions, per side.
+  const live = name => (name === 'reviewer' ? reviewer.running() : builder.running());
+  // The Reviewer's finished reviews and, from before 2.12.0, Fix my PRs' fixes, newest first.
+  const reviewHistory = () => [...reviewer.finished(), ...(reviewer.state.fixes || []).filter(f => !['fixing', 'stopping'].includes(f.status))]
     .sort((a, b) => (b.endedAt || b.startedAt || b.createdAt) - (a.endedAt || a.startedAt || a.createdAt));
-  const needs = () => app.state.needs || [];
+  const history = name => (name === 'reviewer' ? reviewHistory() : builder.history());
+  const needs = name => sides[name].needs();
+  const allLive = () => SIDES.reduce((n, s) => n + live(s).length, 0);
 
-  // Hoot sleeps unless something is happening: a poll, a running review, or something he has to say.
+  // Hoot sleeps unless something is happening: a poll, a running session, or something he has to say.
   function mood(said) {
     if (said?.mood) return said.mood;
-    if (app.polling) return 'poll';
-    if (live().length) return 'review';
+    if (SIDES.some(s => sides[s].polling)) return 'poll';
+    if (allLive()) return 'review';
     return said ? 'idle' : 'sleep';
   }
 
   function titleBar(W) {
+    const s = side();
     const left = [[ST.title, ' ◆ Prowl '], [ST.grey, `· ${app.tracker().name}${app.me ? ` · ${app.me}` : ''}`]];
-    const status = app.polling ? [ST.yellow, `${spin()} checking boards`]
-      : app.paused ? [ST.grey, '‖ paused']
-        : [ST.grey, `next poll in ${clock(app.nextPoll - Date.now())}`];
+    const status = !isOn(ui.side) ? [ST.grey, `${NAMES[ui.side]} off`]
+      : s.polling ? [ST.yellow, `${spin()} checking boards`]
+        : s.paused ? [ST.grey, '‖ paused']
+          : [ST.grey, `next poll in ${clock(s.nextPoll - Date.now())}`];
     const right = [
       ...(app.dryRun() ? [[ST.tabOn, ' DRY RUN '], ['', ' ']] : []),
-      ...(app.lastError ? [[ST.red, '● error, see Log  ']] : []),
+      ...(s.lastError ? [[ST.red, '● error, see Log  ']] : []),
       status, ['', ' '],
     ];
     return spread(left, right, W);
   }
 
-  function tabBar() {
-    const counts = [live().length, history().length, needs().length];
+  /** A side's tab label, from the fullest that fits `room` columns down to its initial. */
+  function sideLabel(name, room) {
+    const [n, k] = [live(name).length, needs(name).length];
+    const full = `${NAMES[name]} · ${isOn(name) ? 'on' : 'off'}${n ? ` · ▶ ${n}` : ''}${k ? ` · ⚑ ${k}` : ''}`;
+    const mid = `${NAMES[name]} ${isOn(name) ? 'on' : 'off'}${n ? ` ▶${n}` : ''}${k ? ` ⚑${k}` : ''}`;
+    const tiny = `${NAMES[name][0]}${isOn(name) ? '' : ' off'}${n ? ` ▶${n}` : ''}${k ? ` ⚑${k}` : ''}`;
+    return [full, mid, tiny].find(l => l.length + 2 <= room) || tiny;
+  }
+
+  function sideBar(W) {
+    const room = Math.floor((W - 2) / 2);
     const segs = [['', ' ']];
-    TABS.forEach((t, i) => segs.push([i === ui.tab ? ST.tabOn : ST.tabOff, ` ${i + 1} ${t}${counts[i] != null ? ` (${counts[i]})` : ''} `], ['', ' ']));
+    for (const name of SIDES) segs.push([name === ui.side ? ST.tabOn : ST.tabOff, ` ${sideLabel(name, room)} `], ['', ' ']);
     return segs;
   }
 
-  function runningView(W, H) {
-    const runs = live();
-    if (!runs.length) {
-      const n = app.boards().length;
-      return [[], [[ST.grey, n
-        ? `  No reviews running. Watching ${plural(n, 'board')} for '${app.cfg.tags.trigger}'.`
-        : '  No boards configured yet: press 4 for Config, then a to add one.']]];
-    }
-    const sel = clampSel(RUNNING, runs.length);
-    const rows = windowed(runs, sel, Math.min(runs.length, Math.max(3, Math.floor(H / 3)))).map(({ item: r, i }) => {
-      const stopping = r.status === 'stopping';
-      const left = [cursor(i === sel), [stopping ? ST.red : r.pr ? ST.cyan : ST.yellow, `${stopping ? '■' : spin()} `], [ST.bold, `${r.ticket}  `]];
-      const what = r.pr ? `fix r${r.round} · ${prName(r.pr)}` : `${plural(r.prs.length, 'PR')} · ${r.reviewNo > 1 ? `re-review #${r.reviewNo}` : 'first review'}`;
-      const right = [[ST.grey, `  ${what} · ${dur(Date.now() - r.startedAt)} `]];
-      const title = trunc(stopping ? `stopping… ${r.title}` : r.title, W - width(left) - width(right) - 1);
-      return spread([...left, ['', title]], right, W);
-    });
-    const r = runs[sel];
-    rows.push(rule(W), [[ST.bold, ` Activity · ${r.ticket}  `], [ST.grey, prsOf(r).map(prName).join('  ')]]);
+  function tabBar() {
+    const counts = [live(ui.side).length, history(ui.side).length, needs(ui.side).length];
+    const segs = [['', ' ']];
+    TABS.forEach((t, i) => segs.push([i === view() ? ST.tabOn : ST.tabOff, ` ${i + 1} ${t}${counts[i] != null ? ` (${counts[i]})` : ''} `], ['', ' ']));
+    return segs;
+  }
+
+  function activity(rows, r, H) {
     const acts = (r._activity || []).slice(-Math.max(1, H - rows.length));
     if (!acts.length) rows.push([[ST.grey, '  starting…']]);
     for (const a of acts) {
@@ -229,6 +233,59 @@ export function startTui(app, actions) {
     return rows;
   }
 
+  function runningView(W, H) {
+    if (ui.side === 'builder') return builderRunning(W, H);
+    const runs = live('reviewer');
+    if (!runs.length) {
+      const n = app.boards().length;
+      return [[], [[ST.grey, !isOn('reviewer') ? '  The Reviewer is off: e turns it on.'
+        : n ? `  No reviews running. Watching ${plural(n, 'board')} for '${app.cfg.tags.trigger}'.`
+          : '  No boards configured yet: press 4 for Config, then a to add one.']]];
+    }
+    const at = clampSel(RUNNING, runs.length);
+    const rows = windowed(runs, at, Math.min(runs.length, Math.max(3, Math.floor(H / 3)))).map(({ item: r, i }) => {
+      const stopping = r.status === 'stopping';
+      const left = [cursor(i === at), [stopping ? ST.red : ST.yellow, `${stopping ? '■' : spin()} `], [ST.bold, `${r.ticket}  `]];
+      const right = [[ST.grey, `  ${plural(r.prs.length, 'PR')} · ${r.reviewNo > 1 ? `re-review #${r.reviewNo}` : 'first review'} · ${dur(Date.now() - r.startedAt)} `]];
+      const title = trunc(stopping ? `stopping… ${r.title}` : r.title, W - width(left) - width(right) - 1);
+      return spread([...left, ['', title]], right, W);
+    });
+    const r = runs[at];
+    rows.push(rule(W), [[ST.bold, ` Activity · ${r.ticket}  `], [ST.grey, prsOf(r).map(prName).join('  ')]]);
+    return activity(rows, r, H);
+  }
+
+  // Where a Builder ticket stands, in a word or two.
+  const STEP_NAMES = { claim: 'claiming', adopt: 'looking for its PRs', read: 'reading the ticket', turn: 'starting a turn', session: 'session running', settle: 'reading the result',
+    repos: 'checking out repos', approve: 'approving the plan', publish: 'checking and publishing', round: 'starting a round', 'push-round': 'pushing the round', ci: 'waiting for CI', 'end-round': 'retagging' };
+  function workStatus(w) {
+    if (w.status === 'needs-you') return [ST.yellow, 'NEEDS YOU'];
+    if (w.status === 'active') return [ST.yellow, w.turnKind === 'round' ? `ROUND ${w.rounds}` : 'BUILDING'];
+    if (w.status === 'following') return w.ready ? [ST.green, 'READY TO MERGE'] : [ST.cyan, w.rounds ? `FOLLOWING · r${w.rounds}` : 'PRS OPEN'];
+    if (w.status === 'stopped') return [ST.grey, 'STOPPED'];
+    if (w.status === 'done') return [ST.green, w.prs?.length ? 'DONE' : 'ENDED'];
+    return [ST.grey, 'ENDED'];
+  }
+
+  function builderRunning(W, H) {
+    const items = live('builder');
+    if (!items.length) {
+      const n = app.boards().length;
+      return [[], [[ST.grey, !isOn('builder') ? '  The Builder is off: e turns it on (Config, 4, has its settings).'
+        : n ? `  Nothing being built. Watching ${plural(n, 'board')} for '${app.cfg.builder.tags.start}'${app.cfg.builder.assignedToMe ? ' on tickets assigned to you' : ''}.`
+          : '  No boards configured yet: press 4 for Config, then a to add one.']]];
+    }
+    const at = clampSel(RUNNING, items.length);
+    const rows = windowed(items, at, Math.min(items.length, Math.max(3, Math.floor(H / 3)))).map(({ item: w, i }) => {
+      const left = [cursor(i === at), [w.stopRequested ? ST.red : ST.yellow, `${w.stopRequested ? '■' : spin()} `], [ST.bold, `${w.key}  `]];
+      const right = [[ST.grey, `  ${w.stopRequested ? 'stopping' : STEP_NAMES[w.step] || 'waiting'} · ${plural(w.turns?.length || 0, 'turn')} · $${(w.costUsd || 0).toFixed(2)} · ${dur(Date.now() - (w.claimedRoundAt || w.claimedAt || w.createdAt))} `]];
+      return spread([...left, ['', trunc(w.title, W - width(left) - width(right) - 1)]], right, W);
+    });
+    const w = items[at];
+    rows.push(rule(W), [[ST.bold, ` Activity · ${w.key}  `], [ST.grey, (w.turnKind === 'round' ? w.round?.prs || [] : w.repos || []).map(r => r.repo.split('/')[1]).join('  ')]]);
+    return activity(rows, w, H);
+  }
+
   function verdict(r) {
     if (r.status === 'failed') return [ST.red, 'FAILED'];
     if (r.status === 'stopped') return [ST.grey, 'STOPPED'];
@@ -237,43 +294,30 @@ export function startTui(app, actions) {
   }
 
   // PRs given Prowl's stamp with Approve PRs off or on your own PR, flagged on the ticket's latest review until it is reviewed again.
-  const waiting = r => (app.finished().find(x => x.ticket === r.ticket && x.status === 'done') === r ? awaitingHuman(r, app.cfg.approvals) : []);
-  // The review's PRs, plus earlier-approved ones it carried over that still await a human; a fix's one PR.
+  const waiting = r => (reviewer.finished().find(x => x.ticket === r.ticket && x.status === 'done') === r ? awaitingHuman(r, app.cfg.approvals) : []);
+  // The review's PRs, plus earlier-approved ones it carried over that still await a human; an old fix's one PR.
   const prsOf = r => (r.pr ? [r.pr] : [...r.prs, ...(r.contextPrs || []).filter(p => waiting(r).includes(p.url))]);
-  // Fix my PRs flags, on the ticket's newest row in History.
-  const loopFlags = r => {
-    const loop = app.state.loops?.[r.ticket];
-    if (!loop || history().find(x => x.ticket === r.ticket) !== r) return [];
-    return [
-      ...(loop.phase === 'ready' ? [[ST.green, '⚑ ready to merge  ']] : []),
-      ...(loop.phase === 'needs-you' ? [[ST.yellow, '⚑ needs you  ']] : []),
-      ...(loop.watched && loop.phase !== 'stopped' ? [[ST.grey, '◉ watched  ']] : []),
-    ];
-  };
 
-  /** Where a fix stands, for History. */
+  /** Where an old Fix my PRs fix ended, for History. */
   function fixStatus(f) {
     const sha = f.pushedSha ? ` ${f.pushedSha.slice(0, 7)}` : '';
-    if (f.status === 'waiting-ci') return [ST.yellow, `pushed${sha} · waiting for CI`];
     if (f.status === 'done') return [ST.green, f.pushedSha ? `pushed${sha}${f.checks ? ` · ${f.checks}` : ''}` : `replied on ${plural(f.replies?.length || 0, 'thread')}`];
     if (f.status === 'failed') return [ST.red, `failed: ${f.error}`];
-    const doing = { queued: 'queued', collecting: 'collecting', checking: 'running checks', pushing: 'pushing', replying: 'replying', asking: 'waiting for your answer' }[f.status];
-    return doing ? [ST.yellow, doing] : [ST.grey, `${f.status}${f.note ? `: ${f.note}` : ''}`];
+    return [ST.grey, `${f.status}${f.note ? `: ${f.note}` : ''}`];
   }
 
+  const label = t => [ST.grey, `  ${t.padEnd(8)}`];
+
   function fixDetails(f) {
-    const label = t => [ST.grey, `  ${t.padEnd(8)}`];
     return [
-      f.briefDir ? [label('Brief'), [ST.link, f.briefDir, pathToFileURL(f.briefDir).href]] : [label('Brief'), [ST.grey, '(none yet)']],
+      f.briefDir ? [label('Brief'), [ST.link, f.briefDir, pathToFileURL(f.briefDir).href]] : [label('Brief'), [ST.grey, '(none)']],
       [label('Ticket'), [ST.link, f.ticketUrl || '', f.ticketUrl]],
       [label('PR'), [ST.link, f.pr.url, f.pr.url], [ST.grey, `  ${f.pr.title || ''}`]],
-      [label('Replies'), [ST.grey, `${f.replies?.length || 0}${f.checks ? ` · checks: ${f.checks}` : ''}${f.result?.summary ? ` · ${f.result.summary}` : ''}`]],
-      [label('Status'), fixStatus(f), [ST.grey, f.costUsd ? `  · $${f.costUsd.toFixed(2)}` : '']],
+      [label('Status'), fixStatus(f), [ST.grey, `${f.costUsd ? `  · $${f.costUsd.toFixed(2)}` : ''}  · Fix my PRs, removed in 2.12.0`]],
     ];
   }
 
   function details(r) {
-    const label = t => [ST.grey, `  ${t.padEnd(8)}`];
     const flagged = waiting(r);
     const prs = prsOf(r);
     const rows = [];
@@ -291,15 +335,34 @@ export function startTui(app, actions) {
     return rows;
   }
 
+  function workDetails(w) {
+    const prs = w.prs?.length ? w.prs : (w.repos || []).filter(r => r.pr).map(r => r.pr);
+    const rows = [
+      [label('Brief'), [ST.link, w.briefDir, pathToFileURL(w.briefDir).href]],
+      [label('Ticket'), [ST.link, w.url || '', w.url]],
+      ...prs.slice(0, 4).map((p, i) => [label(i ? '' : 'PRs'), [ST.link, p.url, p.url], [ST.grey, `  ${p.title || ''}`]]),
+      ...(w.plan ? [[label('Plan'), [ST.link, w.plan, pathToFileURL(w.plan).href]]] : []),
+    ];
+    rows.push([label('Status'), workStatus(w), [ST.grey, `  · $${(w.costUsd || 0).toFixed(2)}${w.note ? ` · ${w.note}` : ''}${w.summary ? ` · ${w.summary}` : ''}`]]);
+    return rows;
+  }
+
   function historyView(W, H) {
-    const runs = history();
-    if (!runs.length) return [[], [[ST.grey, '  No finished reviews yet.']]];
-    const sel = clampSel(HISTORY, runs.length);
-    const detail = runs[sel].pr ? fixDetails(runs[sel]) : details(runs[sel]);
-    const rows = windowed(runs, sel, Math.max(1, H - detail.length - 1)).map(({ item: r, i }) => {
+    const runs = history(ui.side);
+    if (!runs.length) return [[], [[ST.grey, ui.side === 'builder' ? '  Nothing built yet.' : '  No finished reviews yet.']]];
+    const at = clampSel(HISTORY, runs.length);
+    const it = runs[at];
+    const detail = ui.side === 'builder' ? workDetails(it) : it.pr ? fixDetails(it) : details(it);
+    const rows = windowed(runs, at, Math.max(1, H - detail.length - 1)).map(({ item: r, i }) => {
+      if (ui.side === 'builder') {
+        const prs = r.prs?.length || 0;
+        const head = [cursor(i === at), [ST.grey, `${stamp(r.updatedAt || r.createdAt)}  `], [ST.bold, r.key.padEnd(11)], [workStatus(r)[0], workStatus(r)[1].padEnd(18)],
+          [ST.grey, `${prs ? `${plural(prs, 'PR')} · ` : ''}$${(r.costUsd || 0).toFixed(2)}  `]];
+        return [...head, ['', trunc(r.title, W - width(head))]];
+      }
       if (r.pr) {
-        const head = [cursor(i === sel), [ST.grey, `${stamp(r.endedAt || r.startedAt || r.createdAt)}  `], [ST.bold, r.ticket.padEnd(11)],
-          [ST.cyan, `FIX r${r.round}`.padEnd(18)], [ST.grey, `${prName(r.pr)} · `], fixStatus(r), ['', '  '], ...loopFlags(r)];
+        const head = [cursor(i === at), [ST.grey, `${stamp(r.endedAt || r.startedAt || r.createdAt)}  `], [ST.bold, r.ticket.padEnd(11)],
+          [ST.cyan, `FIX MY PRS r${r.round}`.padEnd(18)], [ST.grey, `${prName(r.pr)} · `], fixStatus(r), ['', '  ']];
         return [...head, ['', trunc(r.title, W - width(head))]];
       }
       const s = r.summary || {};
@@ -308,11 +371,10 @@ export function startTui(app, actions) {
         : [['C', 'critical', ST.red], ['H', 'high', ST.orange], ['M', 'medium', ST.yellow], ['L', 'low', ST.grey], ['N', 'nit', ST.grey]]
           .map(([l, k, style]) => [Number(s[k]) > 0 ? style : ST.dim, `${l}${s[k] ?? '?'} `]);
       const head = [
-        cursor(i === sel), [ST.grey, `${stamp(r.endedAt)}  `], [ST.bold, r.ticket.padEnd(11)], [vs, vt.padEnd(18)], ...counts,
+        cursor(i === at), [ST.grey, `${stamp(r.endedAt)}  `], [ST.bold, r.ticket.padEnd(11)], [vs, vt.padEnd(18)], ...counts,
         [ST.grey, `${r.reviewNo > 1 ? `· fixed ${s.fixed ?? '?'} · re-review #${r.reviewNo}` : ''}  `],
         ...(waiting(r).length ? [[ST.yellow, `⚑ ${plural(waiting(r).length, 'PR')} to approve  `]] : []),
-        ...(app.state.capped?.[r.ticket] && app.finished().find(x => x.ticket === r.ticket) === r ? [[ST.yellow, '⚑ round cap reached  ']] : []),
-        ...loopFlags(r),
+        ...(reviewer.state.capped?.[r.ticket] && reviewer.finished().find(x => x.ticket === r.ticket) === r ? [[ST.yellow, '⚑ round cap reached  ']] : []),
       ];
       return [...head, ['', trunc(r.title, W - width(head))]];
     });
@@ -324,54 +386,59 @@ export function startTui(app, actions) {
     jira: ['A Jira board, by name or id: its open issues are polled.', 'Add a Jira board by its name (e.g. My Team board) or its id (the number in its URL).'],
   };
 
-  /** The Config view's selectable rows, each with the `section` heading it sits under. */
+  /** The Config view's selectable rows for the side in view, each with the `section` heading it sits under. */
   function configRows() {
     const [one, add] = BOARD_HELP[app.cfg.taskBoard];
-    let section = '';
-    return FIELDS.filter(f => !f.when || f.when(app.cfg)).flatMap(f => {
+    const name = ui.side;
+    const own = name === 'builder' && !isOn('builder') ? [] : SIDE_FIELDS[name]; // the Builder's rows are hidden while it is off
+    let section = NAMES[name];
+    const head = [{ switch: name, label: NAMES[name], section, help: `${name === 'reviewer' ? 'Reviews the PRs of tickets tagged for review.' : 'Builds tickets tagged to start, opens their PRs and follows them through review.'} enter or e turns it on or off; it applies at once. Off: nothing new is claimed or started, and running sessions finish.` }];
+    return [...head, ...[...SHARED_FIELDS, ...own].filter(f => !f.when || f.when(app.cfg)).flatMap(f => {
       f = JIRA(app.cfg) && f.jira ? { ...f, ...f.jira } : f;
       if (f.heading) { section = f.heading; return []; }
       return (f !== 'boards' ? [f] : [
         ...app.boards().map((b, i) => ({ board: i, label: `Board ${i + 1}`, help: `${one} enter edits · d deletes.` })),
         { addBoard: true, label: '+ Add board', help: add },
       ]).map(r => ({ ...r, section }));
-    });
+    })];
   }
 
   function shown(f) {
     const c = app.cfg;
+    if (f.switch) return isOn(f.switch) ? `on${app.override?.[f.switch] != null ? ' (this launch)' : ''}` : 'off';
     if (f.board != null) return app.tracker().boardLabel(app.boards()[f.board]);
     if (f.addBoard) return '';
     if (f.type === 'secret') return app.hasToken() ? 'saved ••••••••' : 'not set: enter to add';
     if (f.type === 'bool') return getPath(c, f.key) ? 'on' : 'off';
-    if (f.type === 'list') return plural(getPath(c, f.key)?.length || 0, 'pattern');
-    if (f.empty && !getPath(c, f.key)) return '(same as Model)';
+    if (f.type === 'list') { const v = getPath(c, f.key); return Array.isArray(v) ? plural(v.length, 'pattern') : plural(Object.keys(v || {}).length, 'rule'); }
+    if (f.empty && !getPath(c, f.key)) return f.emptyShows || '(none)';
     if (f.names) return f.names[getPath(c, f.key)] || String(getPath(c, f.key));
     return String(getPath(c, f.key));
   }
 
-  /** Fix my PRs' Needs you items: what only you can answer or decide. */
+  /** What only you can answer or decide: the Builder's questions, plans and stops. The Reviewer's stays empty. */
   function needsView(W, H) {
-    const items = needs();
+    const items = needs(ui.side);
     if (!items.length) {
-      return [[], [[ST.grey, app.cfg.fix?.enabled
-        ? '  Nothing needs you. Questions from fix sessions, and fixes Prowl stopped, show up here.'
-        : '  Fix my PRs is off (Config, 4). With it on, questions only you can answer show up here.']]];
+      return [[], [[ST.grey, ui.side === 'reviewer'
+        ? '  The Reviewer never waits on you: a ticket it can\'t review stays tagged for a person, and History says why.'
+        : isOn('builder') ? '  Nothing needs you. The Builder\'s questions, plans waiting for approval and stops show up here.'
+          : '  The Builder is off (e turns it on). Its questions and stops show up here.']]];
     }
-    const sel = clampSel(NEEDS, items.length);
-    const it = items[sel];
-    const label = t => [ST.grey, `  ${t.padEnd(9)}`];
+    const at = clampSel(NEEDS, items.length);
+    const it = items[at];
+    const lab = t => [ST.grey, `  ${t.padEnd(9)}`];
     const detail = [
-      [label('Ticket'), [ST.bold, it.ticket], ...(it.pr ? [['', '  '], [ST.link, it.pr, it.pr]] : [])],
-      ...wrap(clean(it.question), W - 12, 4).map((l, i) => [label(i ? '' : it.kind === 'question' ? 'Question' : 'Stopped'), ['', l]]),
-      ...it.context.map(c => [label(''), [ST.grey, trunc(c, W - 12)]]),
-      ...it.options.map((o, i) => [label(i ? '' : 'Options'), [ST.yellow, `${i + 1}. `], ['', trunc(o, W - 30)], [ST.green, o === it.recommended ? '  (recommended)' : '']]),
-      ...(it.blocked ? [[label('Blocked'), [ST.grey, trunc(it.blocked, W - 12)]]] : []),
-      ...(it.searched ? [[label('Searched'), [ST.grey, trunc(it.searched, W - 12)]]] : []),
+      [lab('Ticket'), [ST.bold, it.ticket], ...(it.pr ? [['', '  '], [ST.link, it.pr, it.pr]] : [])],
+      ...wrap(clean(it.question), W - 12, 4).map((l, i) => [lab(i ? '' : ['question', 'plan', 'repos', 'blocked'].includes(it.kind) ? 'Question' : 'Stopped'), ['', l]]),
+      ...it.context.map(c => [lab(''), [ST.grey, trunc(c, W - 12)]]),
+      ...it.options.map((o, i) => [lab(i ? '' : 'Options'), [ST.yellow, `${i + 1}. `], ['', trunc(o, W - 30)], [ST.green, o === it.recommended ? '  (recommended)' : '']]),
+      ...(it.blocked ? [[lab('Blocked'), [ST.grey, trunc(it.blocked, W - 12)]]] : []),
+      ...(it.searched ? [[lab('Searched'), [ST.grey, trunc(it.searched, W - 12)]]] : []),
     ];
-    if (ui.edit) detail.push([], [label('Answer'), ...editSegs()]);
-    const rows = windowed(items, sel, Math.max(1, H - detail.length - 1)).map(({ item: x, i }) => {
-      const head = [cursor(i === sel), [ST.grey, `${stamp(x.createdAt)}  `], [ST.bold, x.ticket.padEnd(11)], [x.kind === 'question' ? ST.yellow : ST.red, x.kind.padEnd(10)]];
+    if (ui.edit) detail.push([], [lab(it.kind === 'plan' ? 'Note' : 'Answer'), ...editSegs()]);
+    const rows = windowed(items, at, Math.max(1, H - detail.length - 1)).map(({ item: x, i }) => {
+      const head = [cursor(i === at), [ST.grey, `${stamp(x.createdAt)}  `], [ST.bold, x.ticket.padEnd(11)], [['question', 'plan', 'repos'].includes(x.kind) ? ST.yellow : ST.red, x.kind.padEnd(10)]];
       return [...head, ['', trunc(x.question, W - width(head))]];
     });
     return [...rows, rule(W), ...detail];
@@ -386,19 +453,20 @@ export function startTui(app, actions) {
 
   function configView(W, H) {
     const fields = configRows();
-    const sel = clampSel(CONFIG, fields.length);
+    const at = clampSel(CONFIG, fields.length);
     const rows = [[[ST.grey, '  Saved to '], [ST.link, CONFIG_PATH, pathToFileURL(CONFIG_PATH).href], [ST.grey, ' on every change. The next poll uses it.']], []];
     // Each section's heading goes above its first row, after a blank line, and the window counts them as rows.
     const lines = fields.flatMap((f, i) => [...(f.section !== fields[i - 1]?.section ? [...(i ? [{}] : []), { heading: f.section }] : []), { f, i }]);
-    for (const { item: { f, i, heading } } of windowed(lines, lines.findIndex(l => l.i === sel), Math.max(1, H - 6))) {
+    for (const { item: { f, i, heading } } of windowed(lines, lines.findIndex(l => l.i === at), Math.max(1, H - 6))) {
       if (!f) { rows.push(heading ? [[ST.title, ` ${heading.toUpperCase()}`]] : []); continue; }
-      const value = i === sel && ui.edit ? editSegs()
-        : f.file ? [[ST.link, f.file, pathToFileURL(f.file).href]] : [['', shown(f)]];
-      rows.push([cursor(i === sel), [f.addBoard ? ST.green : ST.grey, f.label.padEnd(LABEL_W)], ...value]);
+      const value = i === at && ui.edit ? editSegs()
+        : f.file ? [[ST.link, f.file, pathToFileURL(f.file).href]] : [[f.switch ? (isOn(f.switch) ? ST.green : ST.grey) : '', shown(f)]];
+      rows.push([cursor(i === at), [f.addBoard ? ST.green : ST.grey, f.label.padEnd(LABEL_W)], ...value]);
     }
-    rows.push([], ui.edit?.error ? [[ST.red, `  ${ui.edit.error}`]] : [[ST.grey, `  ${fields[sel].help}`]]);
-    const variants = Object.entries(app.tagVariants).map(([p, v]) => `${p}: ${v.join(', ') || 'none yet'}`).join('  ·  ');
-    if (variants) rows.push([[ST.grey, `  ${JIRA(app.cfg) ? 'Labels' : 'Tags'} treated as the trigger: `], ['', variants]]);
+    if (ui.side === 'builder' && !isOn('builder')) rows.push([], [[ST.grey, "  The Builder's own settings show here once it is on."]]);
+    rows.push([], ui.edit?.error ? [[ST.red, `  ${ui.edit.error}`]] : [[ST.grey, `  ${fields[at].help}`]]);
+    const variants = Object.entries(reviewer.tagVariants || {}).map(([p, v]) => `${p}: ${v.join(', ') || 'none yet'}`).join('  ·  ');
+    if (variants && ui.side === 'reviewer') rows.push([[ST.grey, `  ${JIRA(app.cfg) ? 'Labels' : 'Tags'} treated as the trigger: `], ['', variants]]);
     return rows;
   }
 
@@ -416,32 +484,40 @@ export function startTui(app, actions) {
     return rows.slice(ui.notes.scroll);
   }
 
-  const logView = (W, H) => app.log.slice(-H).map(l => [[ST.grey, `${time(l.t)} `], [LEVEL[l.level], `${l.level.padEnd(5)} `], ['', l.msg]]);
+  const logView = (W, H) => app.log.filter(l => l.side === ui.side || l.side === 'prowl').slice(-H)
+    .map(l => [[ST.grey, `${time(l.t)} `], [LEVEL[l.level], `${l.level.padEnd(5)} `], ['', l.msg]]);
 
+  const HINTS = {
+    reviewer: [' ↑↓ select · s stop · o open all PRs · a open ticket', ' ↑↓ select · enter open report · o open all PRs · a open ticket', '', ' ↑↓ select · enter edit · a add board · d delete board', ''],
+    builder: [' ↑↓ select · enter open brief · s stop · o open PRs · a open ticket', ' ↑↓ select · enter open brief · o open PRs · a open ticket · w follow PRs · t stop following',
+      ' ↑↓ select · enter answer · s skip · t hand back · o open', ' ↑↓ select · enter edit · a add board · d delete board', ''],
+  };
   function footer(W) {
     if (ui.notes) return [[ST.grey, ' ↑↓ scroll · any other key closes the Update Notes']];
     if (ui.confirm) return [[ST.title, ` ${ui.confirm.text} `], [ST.grey, ui.confirm.key ? ' n stay' : ' y yes · n no']];
     if (ui.edit) return [[ST.grey, ' enter save · esc cancel · ←→ move']];
     if (Date.now() < ui.flashUntil) return [[ST.green, ` ${ui.flash}`]];
-    const hints = [' ↑↓ select · s stop · o open all PRs · a open ticket', ` ↑↓ select · enter open report · o open all PRs · a open ticket${app.cfg.fix?.enabled ? ' · w watch' : ''}`,
-      ' ↑↓ select · enter answer · s skip · t take over · o open PR', ' ↑↓ select · enter edit · a add board · d delete board', ''];
-    return spread([[ST.grey, hints[ui.tab]]], [[ST.grey, '←→ views · r poll now · p pause · q quit ']], W);
+    return spread([[ST.grey, HINTS[ui.side][view()]]], [[ST.grey, 'tab side · ←→ views · e on/off · r poll · p pause · q quit ']], W);
   }
 
-  function paint(advance) {
-    const W = Math.max(40, (out.columns || 100) - 1);
-    const H = Math.max(12, out.rows || 30);
-    const rows = [titleBar(W)];
-    if (H >= 26) {
+  function rows(advance, W, H) {
+    const out = [titleBar(W)];
+    if (H >= 27) {
       const said = app.speech();
-      rows.push(...owl.render(W, 7, mood(said), said?.text || '', advance));
+      out.push(...owl.render(W, 7, mood(said), said?.text || '', advance));
     }
-    rows.push(tabBar(), rule(W));
-    const bodyH = H - rows.length - 1;
-    const body = (ui.notes ? notesView : [runningView, historyView, needsView, configView, logView][ui.tab])(W, bodyH).slice(0, bodyH);
+    out.push(sideBar(W), tabBar(), rule(W));
+    const bodyH = H - out.length - 1;
+    const body = (ui.notes ? notesView : [runningView, historyView, needsView, configView, logView][view()])(W, bodyH).slice(0, bodyH);
     while (body.length < bodyH) body.push([]);
-    rows.push(...body, footer(W));
-    out.write(`\x1b[?2026h\x1b[H${rows.map(r => draw(r, W)).join('\r\n')}\x1b[?2026l`);
+    out.push(...body, footer(W));
+    return out;
+  }
+
+  const size = () => [Math.max(40, (out.columns || 100) - 1), Math.max(12, out.rows || 30)];
+  function paint(advance) {
+    const [W, H] = size();
+    out.write(`\x1b[?2026h\x1b[H${rows(advance, W, H).map(r => draw(r, W)).join('\r\n')}\x1b[?2026l`);
   }
 
   const startEdit = (value, commit, secret = false) => { ui.edit = { value, cursor: value.length, commit, error: '', secret }; };
@@ -458,7 +534,7 @@ export function startTui(app, actions) {
 
   function editBoard(index) {
     const boards = app.boards();
-    if (index == null) ui.sel[CONFIG] = configRows().findIndex(f => f.addBoard);
+    if (index == null) sel()[CONFIG] = configRows().findIndex(f => f.addBoard);
     startEdit(index == null ? '' : app.tracker().boardLabel(boards[index]), v => {
       const b = parseBoard(v);
       if (typeof b === 'string') return b;
@@ -469,10 +545,16 @@ export function startTui(app, actions) {
     });
   }
 
+  function toggleSide() {
+    const now = actions.toggleSide(ui.side);
+    flash(now ? `${NAMES[ui.side]} on: it picks up work from the next poll.` : `${NAMES[ui.side]} off: nothing new is claimed or started; running sessions finish.`);
+  }
+
   function configKey(k) {
-    const f = configRows()[ui.sel[CONFIG]];
+    const f = configRows()[sel()[CONFIG]];
     const c = app.cfg;
     if (k === 'a') return editBoard(null);
+    if (f.switch) return k === 'enter' ? toggleSide() : undefined;
     if (f.file) return k === 'enter' ? openExternal(f.file) : undefined;
     if (k === 'd' && f.board != null) {
       const boards = app.boards();
@@ -496,7 +578,7 @@ export function startTui(app, actions) {
     if (f.type === 'list') return openExternal(CONFIG_PATH);
     if (f.type === 'bool') { setPath(c, f.key, !cur); return saved(); }
     if (f.type === 'enum') { setPath(c, f.key, f.values[(f.values.indexOf(cur) + 1) % f.values.length]); return saved(); }
-    return startEdit(String(cur), v => {
+    return startEdit(String(cur ?? ''), v => {
       if (!v && !f.empty) return 'Cannot be empty';
       if (f.type === 'int') {
         const n = Number(v);
@@ -513,23 +595,24 @@ export function startTui(app, actions) {
   }
 
   function needsKey(k) {
-    const it = needs()[ui.sel[NEEDS]];
+    const it = needs(ui.side)[sel()[NEEDS]];
     if (!it) return undefined;
-    if (k === 'o' && it.pr) openExternal(it.pr);
+    if (k === 'o') openExternal(it.pr || builder.history().find(w => w.uid === it.recordId)?.url || '');
     else if (k === 'enter') {
       startEdit('', v => {
         const n = Number(v);
         const text = Number.isInteger(n) && it.options[n - 1] ? it.options[n - 1] : v;
-        if (!text && it.kind === 'question') return 'Type an answer, or an option number';
         actions.answer(it, text);
-        flash(it.kind === 'question' ? 'Answered: the fix session picks up from here.' : 'Cleared: the next review restarts the loop.');
+        flash(it.kind === 'plan' ? (text ? 'Sent back with your note.' : 'Plan approved: the session builds it now.')
+          : ['question', 'repos', 'blocked'].includes(it.kind) ? 'Answered: the session picks up from here.' : 'Retrying.');
         return '';
       });
     } else if (k === 's') {
-      actions.skip(it);
-      flash(it.kind === 'question' ? 'Skipped: the fix session leaves that item to you.' : 'Cleared.');
+      ui.confirm = ['question', 'repos'].includes(it.kind) ? null
+        : { text: `End the work on ${it.ticket} and take its '${app.cfg.builder.tags.inProgress}' tag off?`, yes: () => { actions.skip(it); flash('Ended.'); } };
+      if (!ui.confirm) { actions.skip(it); flash('Skipped: the session uses its default.'); }
     } else if (k === 't') {
-      ui.confirm = { text: `Take ${it.ticket} over? Prowl stops fixing it until you watch it again (w in History).`, yes: () => actions.takeOver(it.ticket) };
+      ui.confirm = { text: `Hand ${it.ticket} back with '${app.cfg.builder.tags.start}'? Prowl leaves it until someone re-tags it.`, yes: () => actions.handBack(it) };
     }
     return undefined;
   }
@@ -547,6 +630,33 @@ export function startTui(app, actions) {
     else if (k.length === 1 && k >= ' ') { e.value = e.value.slice(0, e.cursor) + k + e.value.slice(e.cursor); e.cursor++; }
   }
 
+  function reviewerKey(k, r) {
+    if (k === 'o') prsOf(r).forEach(p => openExternal(p.url));
+    else if (k === 'a' && r.ticketUrl) openExternal(r.ticketUrl);
+    else if (k === 'enter' && view() === HISTORY && r.pr) openExternal(r.briefDir || r.pr.url);
+    else if (k === 'enter' && view() === HISTORY && r.status === 'done') openExternal(r.reportPath);
+    else if (k === 's' && view() === RUNNING && r.status === 'running') {
+      ui.confirm = { text: `Stop the review of ${r.ticket}? Its '${app.cfg.tags.inProgress}' tag is removed; re-tag to run it again.`, yes: () => actions.stop('reviewer', r) };
+    }
+  }
+
+  function builderKey(k, w) {
+    const prs = w.prs?.length ? w.prs : (w.repos || []).filter(r => r.pr).map(r => r.pr);
+    if (k === 'o') prs.forEach(p => openExternal(p.url));
+    else if (k === 'a' && w.url) openExternal(w.url);
+    else if (k === 'enter') openExternal(w.briefDir);
+    else if (k === 's' && view() === RUNNING) {
+      ui.confirm = { text: `Stop ${w.key}? It stops before its next push, PR, tag or turn, and '${app.cfg.builder.tags.inProgress}' comes off.`, yes: () => actions.stop('builder', w) };
+    } else if (k === 'w' && view() === HISTORY) {
+      if (!isOn('builder')) return flash('w follows a ticket\'s PRs with the Builder: turn it on first (e).');
+      actions.follow(w).then(() => flash(`Following ${w.key}'s PRs.`), e => flash(`Couldn't follow ${w.key}: ${e.message}`));
+    } else if (k === 't' && view() === HISTORY && w.status === 'following') {
+      actions.stopFollowing(w);
+      flash(`Stopped following ${w.key}.`);
+    }
+    return undefined;
+  }
+
   function onKey(k) {
     if (k === 'ctrl-c') return actions.quit();
     if (ui.notes) {
@@ -561,43 +671,43 @@ export function startTui(app, actions) {
       return undefined;
     }
     if (ui.edit) return editKey(k);
-    if (k.length === 1 && k >= '1' && k <= String(TABS.length)) { ui.tab = Number(k) - 1; return undefined; }
-    if (k === 'tab' || k === 'right') { ui.tab = (ui.tab + 1) % TABS.length; return undefined; }
-    if (k === 'left') { ui.tab = (ui.tab + TABS.length - 1) % TABS.length; return undefined; }
-    if (k === 'up') { ui.sel[ui.tab] = Math.max(0, ui.sel[ui.tab] - 1); return undefined; }
-    if (k === 'down') { ui.sel[ui.tab]++; return undefined; }
+    if (k === 'tab') { ui.side = ui.side === 'reviewer' ? 'builder' : 'reviewer'; return undefined; }
+    if (k === 'R' || k === 'B') { ui.side = k === 'R' ? 'reviewer' : 'builder'; return undefined; }
+    if (k.length === 1 && k >= '1' && k <= String(TABS.length)) { ui.view[ui.side] = Number(k) - 1; return undefined; }
+    if (k === 'right') { ui.view[ui.side] = (view() + 1) % TABS.length; return undefined; }
+    if (k === 'left') { ui.view[ui.side] = (view() + TABS.length - 1) % TABS.length; return undefined; }
+    if (k === 'up') { sel()[view()] = Math.max(0, sel()[view()] - 1); return undefined; }
+    if (k === 'down') { sel()[view()]++; return undefined; }
     if (k === 'q') {
-      const n = live().length;
+      const n = allLive();
       if (!n) return actions.quit();
       ui.confirm = { text: `${plural(n, 'session')} still running. They keep going in the background and reappear next launch. Press q again to quit.`, key: 'q', yes: actions.quit };
       return undefined;
     }
-    if (k === 'r') { actions.pollNow(); flash('Polling now.'); return undefined; }
-    if (k === 'p') { actions.togglePause(); flash(app.paused ? 'Paused: running reviews carry on, no new ones start.' : 'Resumed.'); return undefined; }
-    if (ui.tab === CONFIG) return configKey(k);
-    if (ui.tab === NEEDS) return needsKey(k);
-    const r = (ui.tab === RUNNING ? live() : ui.tab === HISTORY ? history() : [])[ui.sel[ui.tab]];
+    if (k === 'e') return toggleSide();
+    if (k === 'r') { actions.pollNow(ui.side); flash(isOn(ui.side) ? `Polling the ${NAMES[ui.side]} now.` : `The ${NAMES[ui.side]} is off: e turns it on.`); return undefined; }
+    if (k === 'p') { actions.togglePause(ui.side); flash(side().paused ? `${NAMES[ui.side]} paused: running sessions carry on, nothing new starts.` : 'Resumed.'); return undefined; }
+    if (view() === CONFIG) return configKey(k);
+    if (view() === NEEDS) return needsKey(k);
+    const r = (view() === RUNNING ? live(ui.side) : view() === HISTORY ? history(ui.side) : [])[sel()[view()]];
     if (!r) return undefined;
-    if (k === 'o') prsOf(r).forEach(p => openExternal(p.url));
-    else if (k === 'a' && r.ticketUrl) openExternal(r.ticketUrl);
-    else if (k === 'enter' && ui.tab === HISTORY && r.pr) openExternal(r.briefDir || r.pr.url);
-    else if (k === 'enter' && ui.tab === HISTORY && r.status === 'done') openExternal(r.reportPath);
-    else if (k === 's' && ui.tab === RUNNING && r.pr && r.status === 'fixing') {
-      ui.confirm = { text: `Stop the fix session on ${prName(r.pr)}? Nothing is pushed; the next review restarts the loop.`, yes: () => actions.stop(r) };
-    } else if (k === 's' && ui.tab === RUNNING && r.status === 'running') {
-      ui.confirm = { text: `Stop the review of ${r.ticket}? Its '${app.cfg.tags.inProgress}' tag is removed; re-tag to run it again.`, yes: () => actions.stop(r) };
-    } else if (k === 'w' && ui.tab === HISTORY) {
-      if (!app.cfg.fix?.enabled) return flash('w watches a ticket for Fix my PRs: turn it on in Config (4) first.');
-      flash(actions.watch(r) ? `Watching ${r.ticket}: Prowl fixes your PRs after reviews by anyone.` : `Stopped watching ${r.ticket}.`);
-    }
-    return undefined;
+    return ui.side === 'reviewer' ? reviewerKey(k, r) : builderKey(k, r);
   }
 
+  if (io.headless) {
+    return {
+      restore() {},
+      key(k) { onKey(k); },
+      /** The frame as plain text lines, at `W` by `H` columns and rows. */
+      frame(W = 80, H = 30) { return rows(false, W, H).map(r => draw(r, W).replace(/\x1b\[[0-9;?]*[A-Za-z]|\x1b\]8;;[^\x1b]*\x1b\\/g, '')); },
+      ui,
+    };
+  }
   out.write('\x1b[?1049h\x1b[?25l'); // alternate screen, hidden cursor
-  process.stdin.setRawMode(true);
-  process.stdin.setEncoding('utf8');
-  process.stdin.resume();
-  process.stdin.on('data', data => { for (const k of keys(data)) onKey(k); paint(false); });
+  stdin.setRawMode(true);
+  stdin.setEncoding('utf8');
+  stdin.resume();
+  stdin.on('data', data => { for (const k of keys(data)) onKey(k); paint(false); });
   out.on('resize', () => paint(false));
   const timer = setInterval(() => paint(true), 100);
   paint(true);
@@ -606,8 +716,8 @@ export function startTui(app, actions) {
     restore() {
       clearInterval(timer);
       out.write('\x1b[?2026l\x1b[?25h\x1b[?1049l');
-      try { process.stdin.setRawMode(false); } catch { /* not a TTY any more */ }
-      process.stdin.pause();
+      try { stdin.setRawMode(false); } catch { /* not a TTY any more */ }
+      stdin.pause();
     },
   };
 }

@@ -37,8 +37,8 @@ export function installUpdate() {
   return r.status === 0;
 }
 
-const SEEN_PATH = path.join(HOME, 'seen.json'); // the version last launched, and the defaults the user's config files match
-const hash = s => crypto.createHash('sha256').update(s).digest('hex');
+export const SEEN_PATH = path.join(HOME, 'seen.json'); // the version last launched, and the defaults the user's config files match
+export const hash = s => crypto.createHash('sha256').update(s).digest('hex');
 // Config files renamed by a release: the user's copy, edited or not, moves to the new name.
 const RENAMED = { 'axis-catalog.md': 'review-axis-catalog.md' };
 const read = file => { try { return fs.readFileSync(file, 'utf8'); } catch { return null; } };
@@ -129,7 +129,7 @@ export function updateNotes(appDir) {
   const version = localVersion(appDir);
   const synced = seen?.defaults || {};
   // Both skills' defaults share one folder, so their file names must differ.
-  const files = ['prowl-review', 'prowl-fix'].flatMap(skill => syncConfigFiles(path.join(appDir, 'skills', skill, 'config'), CONFIG_DIR, synced, !fresh));
+  const files = ['prowl-review', 'prowl-work'].flatMap(skill => syncConfigFiles(path.join(appDir, 'skills', skill, 'config'), CONFIG_DIR, synced, !fresh));
   const added = fresh ? [] : newSettings();
   if (added.length) {
     saveConfig(loadConfig()); // writes the new settings with their defaults, so they are announced once

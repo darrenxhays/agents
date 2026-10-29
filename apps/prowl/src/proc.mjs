@@ -86,6 +86,35 @@ export function killTree(pid) {
   }
 }
 
+const signal = (pid, sig) => {
+  try { process.kill(-pid, sig); } catch { try { process.kill(pid, sig); } catch { /* already gone */ } } // detached: its own process group
+};
+
+/** Resolves true once `pid` has exited, or false after `ms`. */
+async function gone(pid, ms) {
+  for (const until = Date.now() + ms; Date.now() < until;) {
+    if (!isAlive(pid)) return true;
+    await new Promise(r => setTimeout(r, 100));
+  }
+  return !isAlive(pid);
+}
+
+/**
+ * Stops a detached session and everything it started, and resolves true only once it has exited: SIGTERM, up to
+ * `waitMs` to exit, then SIGKILL and as long again (taskkill /F on Windows).
+ */
+export async function stopProcess(pid, waitMs = 5000) {
+  if (!isAlive(pid)) return true;
+  if (WIN) {
+    await new Promise(r => spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }).on('error', r).on('exit', r));
+    return gone(pid, waitMs);
+  }
+  signal(pid, 'SIGTERM');
+  if (await gone(pid, waitMs)) return true;
+  signal(pid, 'SIGKILL');
+  return gone(pid, waitMs);
+}
+
 /** macOS: keeps the Mac from idle-sleeping until process `pid` exits; caffeinate exits with it. Elsewhere it does nothing. */
 export function keepAwake(pid) {
   if (process.platform !== 'darwin' || !pid) return;

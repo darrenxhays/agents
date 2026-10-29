@@ -1,6 +1,6 @@
 # PR-Owl Review — Output
 
-Templates for everything this skill posts on GitHub: the comment Prowl posts when a review starts, the review banner, the review body, the details file collapsed at its bottom, inline comments, replies on existing threads, and the comment that stands in for an approval when approvals are off. With Fix my PRs on, it also templates the replies Prowl posts after fixing a PR, and the fix commits. Prowl keeps your copy of this file in `~/.prowl/config/` (or `$PROWL_HOME/config/`): edit that one. Updates never overwrite a copy you've edited; Prowl's Update Notes say when this default changes.
+Templates for everything this skill posts on GitHub: the comment Prowl posts when a review starts, the review banner, the review body, the details file collapsed at its bottom, inline comments, replies on existing threads, and the comment that stands in for an approval when approvals are off. The Builder uses it too, for the replies it posts after a feedback round on its PRs, and for that round's commits. Prowl keeps your copy of this file in `~/.prowl/config/` (or `$PROWL_HOME/config/`): edit that one. Updates never overwrite a copy you've edited; Prowl's Update Notes say when this default changes.
 
 Each template is a fenced block. Words in `<angle brackets>` are filled in for each post; everything else is posted as written. The hidden `<!-- prowl-review … -->` marker is added to every post whatever these templates say, because the re-run guard depends on it.
 
@@ -170,7 +170,7 @@ On a re-review, on each thread from the previous review. **Verified fixed** (the
 
 ## Fix reply
 
-With Prowl's **Fix my PRs** on, Prowl posts this on each thread a fix session fixed, after pushing the fix. `<sha>` is the pushed commit and `<note>` the session's one-line note on what it changed. Prowl never resolves the thread: the next review resolves it once it verifies the fix. Prowl adds a hidden `<!-- prowl-fix … -->` marker to each reply, so a restart never posts one twice.
+After a Builder feedback round, Prowl posts this on each thread the round fixed, after pushing the fix. `<sha>` is the pushed commit and `<note>` the session's one-line note on what it changed. Prowl never resolves the thread: the next review resolves it once it verifies the fix. Prowl adds a hidden `<!-- prowl-fix … -->` marker to each reply, so a restart never posts one twice.
 
 ```text
 <comment prefix> Fixed in <sha>: <note>
@@ -178,7 +178,7 @@ With Prowl's **Fix my PRs** on, Prowl posts this on each thread a fix session fi
 
 ## Dispute reply
 
-On each thread a fix session disputed instead of changing the code, with `<note>` its evidence:
+On each thread a feedback round disputed instead of changing the code, with `<note>` its evidence:
 
 ```text
 <comment prefix> Not changed: <note>
@@ -186,10 +186,10 @@ On each thread a fix session disputed instead of changing the code, with `<note>
 
 ## Fix commit message
 
-The message of each commit a fix session makes. `<ticket>` is the ticket key, `<summary>` a short line on what changed, `<repo>#<n>` the PR and `<round>` the fix round.
+The message of each commit a feedback round makes. `<ticket>` is the ticket key, `<summary>` a short line on what changed, `<repo>#<n>` the PR and `<round>` the round.
 
 ```text
 <ticket>: <summary>
 
-Fixes review findings on <repo>#<n> (fix round <round>).
+Fixes review findings on <repo>#<n> (feedback round <round>).
 ```

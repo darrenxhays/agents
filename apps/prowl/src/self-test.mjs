@@ -1,5 +1,6 @@
-// node prowl.mjs --self-test: checks the logic that decides which tickets and PRs get touched.
-import assert from 'node:assert/strict';
+// node prowl.mjs --self-test: checks the logic that decides which tickets and PRs get touched. prowl.mjs runs it in a
+// throwaway PROWL_HOME. Each assert is counted, and the count printed.
+import nodeAssert from 'node:assert/strict';
 import { frontMatter, mentions, norm, swapTags, tagMatches } from './match.mjs';
 import { addedLabel, adfText, claimEntry, label } from './jira.mjs';
 import { htmlText } from './ado.mjs';
@@ -8,15 +9,25 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CONFIG_DIR } from './config.mjs';
-import { alive, awaitingHuman, buildPrompt, finalize, findingsOnly, isOwn, overdue, REPORTS_DIR, retryFailed, reviewArgs, reviewEnv, roundCapped, tidyLogs } from './reviews.mjs';
+import { CONFIG_DIR, HOME } from './config.mjs';
+import { alive, awaitingHuman, buildPrompt, failUnposted, finalize, findingsOnly, isOwn, overdue, postMarker, REPORTS_DIR, retryFailed, reviewArgs, reviewEnv, roundCapped, tidyLogs } from './reviewer/reviews.mjs';
 import { processStart } from './proc.mjs';
 import { createMascot, wrap } from './mascot.mjs';
 import { changelog, newer, syncConfigFiles } from './update.mjs';
-import { DISALLOWED, fenceDecision, fenceSettings } from './fence.mjs';
-import { checksState, detailsFromBodies, threadsFrom } from './github.mjs';
-import { actionable, buildBrief, daySpend, fill, fixArgs, fixEnv, globRe, guardFailures, matchChecks, needItem, outputTemplate, parkedUrls, pastAnswers, refusal,
-  repliesToPost, runChecks, runCommand, SECRET_PATTERNS, spendLevel, stripParked, template, ticketSpend, validateResult, wantsRound } from './fixes.mjs';
+import { DISALLOWED, fenceArgs, fenceDecision, fenceEnv, fenceSettings, lex, trackerHosts } from './fence.mjs';
+import { checksState, detailsFromBodies, reviewedIn, threadsFrom } from './github.mjs';
+import { globRe, matchChecks, runChecks, runCommand } from './checks.mjs';
+import { guardFailures, prRefusal, SECRET_PATTERNS } from './guards.mjs';
+import { actionable, parkedUrls, pastAnswers, repliesToPost, stripParked, validateFeedback } from './feedback.mjs';
+import { fill, outputTemplate, template } from './templates.mjs';
+
+let count = 0;
+// node:assert, counting each call.
+const assert = new Proxy(nodeAssert, {
+  apply(target, self, a) { count++; return Reflect.apply(target, self, a); },
+  get(target, k) { const v = target[k]; return typeof v === 'function' ? (...a) => { count++; return v.apply(target, a); } : v; },
+});
+assert.ok(HOME !== path.join(os.homedir(), '.prowl'), 'the self-test never runs against your own ~/.prowl');
 
 const T = 'Ready for Review';
 for (const t of ['Ready for Review', 'ready for review', 'Ready-For-Review', 'READY  FOR REVIEW', 'ReadyForReview', 'Ready for Reveiw', 'Redy for Review', 'Ready fro Reviw']) {
@@ -241,9 +252,10 @@ assert.equal(get(mine, 'review-axis-catalog.md'), 'my axes', 'a renamed file kee
 assert.ok(!fs.existsSync(path.join(mine, 'axis-catalog.md')) && !('axis-catalog.md' in synced));
 assert.deepEqual(notes.map(n => n.text), ['axis-catalog.md is now review-axis-catalog.md']);
 fs.rmSync(cfgTmp, { recursive: true });
-// prowl-fix's config defaults are synced into the same folder, so no file name may be in both skills' defaults.
+// prowl-work's config defaults are synced into the same folder, so no file name may be in both skills' defaults.
 const skillCfg = skill => fs.readdirSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'skills', skill, 'config'));
-assert.deepEqual(skillCfg('prowl-fix').filter(f => skillCfg('prowl-review').includes(f)), [], 'config file names are unique across skills');
+assert.deepEqual(skillCfg('prowl-work').filter(f => skillCfg('prowl-review').includes(f)), [], 'config file names are unique across skills');
+assert.ok(!fs.existsSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'skills', 'prowl-fix')), 'Fix my PRs is removed');
 
 // A pid saved by an earlier launch is the review only if its process started with the review (not a reused pid).
 const born = Date.now() - process.uptime() * 1000;
@@ -264,13 +276,18 @@ for (const mood of ['idle', 'poll', 'review', 'cheer', 'sleep', 'error']) {
   }
 }
 
-// The fix-session fence: pushes, GitHub writes and edits outside the worktree are denied; commits and reads are not.
+// The session fence (kind 'work'): pushes, GitHub and tracker writes, MCP tools outside the allow list and writes
+// outside the session's folders are denied; commits, reads and the temp folder are not.
 const fenceHome = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'prowl-test-')));
 const [wt, briefDir] = [path.join(fenceHome, 'wt'), path.join(fenceHome, 'brief')];
 fs.mkdirSync(wt);
 fs.mkdirSync(briefDir);
-const fenceEnv = { PROWL_SESSION: 'fix', PROWL_FIX_ROOTS: [wt, briefDir].join(path.delimiter) };
-const bash = command => fenceDecision({ tool_name: 'Bash', tool_input: { command } }, fenceEnv)?.hookSpecificOutput.permissionDecision || 'allow';
+const workEnv = fenceEnv('work', [wt, briefDir], ['mcp__docs__search', 'mcp__notes__*'], trackerHosts('https://example.atlassian.net'));
+assert.deepEqual(Object.keys(workEnv).sort(), ['PROWL_MCP_ALLOW', 'PROWL_SESSION', 'PROWL_TRACKER_HOSTS', 'PROWL_WORK_ROOTS']);
+assert.throws(() => fenceEnv('fix', [wt]), /no fence/, 'the fence is keyed by session kind');
+const aliases = { p: 'push --force-with-lease', sync: '!git fetch && git push', st: 'status' };
+const decide = (call, env = workEnv) => fenceDecision({ cwd: wt, ...call }, env, name => aliases[name] || '')?.hookSpecificOutput.permissionDecision || 'allow';
+const bash = command => decide({ tool_name: 'Bash', tool_input: { command } });
 for (const c of ['git push', 'git push origin HEAD:feature', 'cd x && git -C /tmp/r push -u origin b', 'git --no-pager push', 'git remote set-url origin x',
   'gh pr create --fill', 'gh pr merge 3', 'gh pr review --approve', 'gh pr comment 1 -b hi', 'gh api -X POST repos/o/r/issues/1/comments -f body=x',
   'gh api --method=PATCH repos/o/r/pulls/1', 'gh api repos/o/r/issues/1/comments -f body=hi', "gh api graphql -f query='mutation { resolveReviewThread(input:{threadId:\"x\"}) { clientMutationId } }'",
@@ -281,7 +298,52 @@ for (const c of ['git commit -m "AB#1: fix"', 'git status && git diff HEAD~1', '
   'gh api repos/o/r/pulls/1/comments', 'gh api -X GET search/issues -f q=x', "gh api graphql -f query='query { viewer { login } }'", 'git remote -v', 'echo "git pushes are Prowl\'s job"']) {
   assert.equal(bash(c), 'allow', `allows: ${c}`);
 }
-const write = (tool, file) => fenceDecision({ tool_name: tool, tool_input: tool === 'NotebookEdit' ? { notebook_path: file } : { file_path: file } }, fenceEnv) ? 'deny' : 'allow';
+// Every other way to push, or to change where a push goes.
+for (const c of ['git send-pack origin main', 'git subtree push --prefix lib origin main', 'git lfs push origin main', 'git p', 'git -C sub sync',
+  'git config alias.up push', "git config --global alias.ship '!git push origin'", 'git -c alias.x=push x', 'git config remote.origin.pushurl https://example.invalid/r.git',
+  'git config url.https://example.invalid/.insteadOf https://github.com/', 'git -c url.git@example.invalid:.pushInsteadOf=https://github.com/ push2']) {
+  assert.equal(bash(c), 'deny', `denies a push path: ${c}`);
+}
+assert.equal(bash('git st'), 'allow', "an alias that doesn't push");
+// curl and wget writes to GitHub's API, and GraphQL the fence can't read; reads are allowed.
+for (const c of ['curl -X POST https://api.github.com/repos/o/r/issues -d @body.json', 'curl -sS -XPATCH https://api.github.com/repos/o/r/pulls/1 --data "{}"',
+  'curl -H "Authorization: bearer x" https://api.github.com/graphql -d \'{"query":"query{viewer{login}}"}\'', 'wget --method=DELETE https://api.github.com/repos/o/r/git/refs/heads/b',
+  'wget --post-file=q.json https://api.github.com/graphql', 'gh api graphql -f query=@mutation.graphql', 'gh api graphql --input q.json',
+  'gh api graphql -f query="$(cat q.graphql)"', 'Q=$(cat m); gh api graphql -f query="$Q"']) {
+  assert.equal(bash(c), 'deny', `denies a GitHub write: ${c}`);
+}
+for (const c of ['curl https://api.github.com/repos/o/r/pulls/1', 'curl -s -X GET https://api.github.com/repos/o/r', 'wget -qO- https://api.github.com/repos/o/r',
+  "gh api graphql -F owner=o -f query='query($owner:String!){repositoryOwner(login:$owner){id}}'"]) {
+  assert.equal(bash(c), 'allow', `allows a GitHub read: ${c}`);
+}
+// Shell writes to either tracker, with reads allowed.
+for (const c of ['curl -X PATCH https://dev.azure.com/o/Shop/_apis/wit/workitems/1 -d @p.json', 'curl -d "{}" https://o.visualstudio.com/_apis/wit/workitems/1',
+  'curl -X PUT https://example.atlassian.net/rest/api/3/issue/PROJ-123 --json \'{"update":{}}\'', 'wget --post-data=x https://other.atlassian.net/rest/api/3/issue',
+  'az boards work-item update --id 1 --fields System.Tags=x', 'az devops invoke --area wit --http-method PATCH', 'acli jira workitem edit --key PROJ-123']) {
+  assert.equal(bash(c), 'deny', `denies a tracker write: ${c}`);
+}
+for (const c of ['curl https://dev.azure.com/o/Shop/_apis/wit/workitems/1', 'curl -s https://example.atlassian.net/rest/api/3/issue/PROJ-123', 'az boards work-item show --id 1']) {
+  assert.equal(bash(c), 'allow', `allows a tracker read: ${c}`);
+}
+// Writes outside the session's folders through a redirect, tee, cp, mv or rm; the temp folder is fine.
+// (The test's own folders are in the temp folder, which sessions may write in, so "outside" is the home folder or /etc here.)
+for (const c of ['echo x > /etc/x', 'echo x >> ~/outside.txt', 'ls | tee /etc/listing', `cp a ${path.join(os.homedir(), 'b')}`, 'mv notes.md ~/notes.md', 'rm -rf ~',
+  'rm -rf /', 'echo $(echo x > /etc/y)', 'sh -c "echo > /etc/z"', 'echo x > $SOMEWHERE/out', 'cd / && rm -rf other', 'echo x > "$HOME/.bashrc"']) {
+  assert.equal(bash(c), 'deny', `denies a write outside: ${c}`);
+}
+for (const c of ['echo x > notes.md', `echo x > ${path.join(briefDir, 'result.json')}`, 'cp a b', 'rm -rf build', 'mv a.js b.js', 'npm test 2>&1 | tee test.log',
+  `echo x > ${path.join(os.tmpdir(), 'prowl-scratch.txt')}`, 'echo x > "$TMPDIR/x"', 'ls 2>&1 >/dev/null', "cat > notes.md <<'EOF'\nfoo > /etc/passwd\nEOF"]) {
+  assert.equal(bash(c), 'allow', `allows a write inside: ${c}`);
+}
+assert.equal(lex("a 'b; c' | d").length, 2, 'quotes keep ; and | inside one word');
+// MCP tools: denied unless the allow list names them.
+assert.equal(decide({ tool_name: 'mcp__tracker__update_issue', tool_input: {} }), 'deny', 'an MCP tool not in the allow list');
+assert.equal(decide({ tool_name: 'mcp__docs__search', tool_input: {} }), 'allow', 'an MCP tool the allow list names');
+assert.equal(decide({ tool_name: 'mcp__notes__read', tool_input: {} }), 'allow', 'an MCP tool matching a * pattern');
+assert.equal(decide({ tool_name: 'mcp__docs__search', tool_input: {} }, fenceEnv('work', [wt])), 'deny', 'no allow list: no MCP tools');
+assert.deepEqual(fenceArgs([]).slice(-2), ['mcp__*', '--strict-mcp-config'], 'no MCP servers unless some are allowed');
+assert.ok(!fenceArgs(['mcp__docs__search']).includes('--strict-mcp-config') && fenceArgs([]).includes('Bash(git send-pack *)'));
+const write = (tool, file) => decide({ tool_name: tool, tool_input: tool === 'NotebookEdit' ? { notebook_path: file } : { file_path: file } });
 assert.equal(write('Edit', path.join(wt, 'src', 'new', 'a.js')), 'allow', 'a new file in the worktree');
 assert.equal(write('Write', path.join(briefDir, 'result.json')), 'allow');
 assert.equal(write('Write', path.join(fenceHome, 'elsewhere.txt')), 'deny');
@@ -291,28 +353,30 @@ let linked = true;
 try { fs.symlinkSync(fenceHome, path.join(wt, 'link'), 'junction'); } catch { linked = false; } // Windows may not allow links
 if (linked) assert.equal(write('Write', path.join(wt, 'link', 'out.txt')), 'deny', 'no symlink out of the worktree');
 assert.equal(fenceDecision({ tool_name: 'Bash', tool_input: { command: 'git push' } }, {}), null, 'review sessions are untouched');
-assert.equal(fenceDecision({ tool_name: 'Read', tool_input: { file_path: '/etc/hosts' } }, fenceEnv), null, 'reads are allowed');
+assert.equal(fenceDecision({ tool_name: 'Bash', tool_input: { command: 'git push' } }, { PROWL_SESSION: 'fix' }), null, "2.11.3's fix kind is gone");
+assert.equal(decide({ tool_name: 'Read', tool_input: { file_path: '/etc/hosts' } }), 'allow', 'reads are allowed');
 assert.ok(DISALLOWED.includes('Bash(git push *)') && DISALLOWED.includes('Bash(gh pr create *)'));
-assert.match(fenceSettings('/app', '/bin/node').hooks.PreToolUse[0].hooks[0].command, /^"\/bin\/node" "\/app\/hooks\/fix-guard\.mjs"$/);
+assert.match(fenceSettings('/app', '/bin/node').hooks.PreToolUse[0].hooks[0].command, /^"\/bin\/node" "\/app\/hooks\/fence-guard\.mjs"$/);
+assert.ok(new RegExp(fenceSettings('/app').hooks.PreToolUse[0].matcher).test('mcp__tracker__update_issue'), 'the hook sees MCP tools');
 // ...and the hook itself, run as Claude Code runs it.
-const hook = (call, env) => spawnSync(process.execPath, [path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'hooks', 'fix-guard.mjs')],
+const hook = (call, env) => spawnSync(process.execPath, [path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'hooks', 'fence-guard.mjs')],
   { input: JSON.stringify(call), env: { ...process.env, PROWL_SESSION: '', ...env }, encoding: 'utf8' });
-const denied = hook({ tool_name: 'Bash', tool_input: { command: 'git push' } }, fenceEnv);
+const denied = hook({ tool_name: 'Bash', tool_input: { command: 'git push' }, cwd: wt }, workEnv);
 assert.equal(denied.status, 0);
 assert.equal(JSON.parse(denied.stdout).hookSpecificOutput.permissionDecision, 'deny');
-assert.equal(hook({ tool_name: 'Bash', tool_input: { command: 'git push' } }, {}).stdout, '', 'not a fix session: no output');
+assert.equal(hook({ tool_name: 'Bash', tool_input: { command: 'git push' } }, {}).stdout, '', 'not a fenced session: no output');
 fs.rmSync(fenceHome, { recursive: true });
 
-// Fix rounds read a PR's threads, and a details file from a PR-Owl review posted by someone else's Prowl.
-const fixFixture = name => fixture(path.join('fix', name));
-const threads = threadsFrom(JSON.parse(fixFixture('threads.json')));
+// Feedback rounds read a PR's threads, and a details file from a PR-Owl review posted by someone else's Prowl.
+const fbFixture = name => fixture(path.join('feedback', name));
+const threads = threadsFrom(JSON.parse(fbFixture('threads.json')));
 assert.equal(threads.length, 6);
 assert.deepEqual(threads[1], { id: 'PRRT_bot1', resolved: false, path: 'src/load.js', line: 7, commentId: 1002, author: 'copilot-pull-request-reviewer', bot: true,
-  body: 'Consider handling a null response here.', url: 'https://github.com/acme/api/pull/12#discussion_r1002', lastAuthor: 'copilot-pull-request-reviewer', lastBody: 'Consider handling a null response here.' });
+  body: 'Consider handling a null response here.', url: 'https://github.com/octo-org/api/pull/12#discussion_r1002', lastAuthor: 'copilot-pull-request-reviewer', lastBody: 'Consider handling a null response here.', lastAt: '' });
 assert.ok(threads[3].resolved && !threads[2].bot);
-const reviewBody = fixFixture('review-body.md');
-const details = detailsFromBodies([{ body: 'LGTM', at: '2026-10-16T12:00:00Z' }, { body: reviewBody, at: '2026-10-16T10:00:00Z' }], [{ body: 'thanks' }, { body: fixFixture('part2.md') }], 'api-12');
-assert.ok(details.startsWith('# PR-Owl Review: acme/api#12') && details.includes('```js\nsave(a); save(b);\n```') && details.includes('## Parked'), 'the fenced details file, inner fences kept');
+const reviewBody = fbFixture('review-body.md');
+const details = detailsFromBodies([{ body: 'LGTM', at: '2026-10-16T12:00:00Z' }, { body: reviewBody, at: '2026-10-16T10:00:00Z' }], [{ body: 'thanks' }, { body: fbFixture('part2.md') }], 'api-12');
+assert.ok(details.startsWith('# PR-Owl Review: octo-org/api#12') && details.includes('```js\nsave(a); save(b);\n```') && details.includes('## Parked'), 'the fenced details file, inner fences kept');
 assert.ok(details.endsWith('- Correctness & Logic') && !details.includes('Continued in part 2'), 'joined with part 2');
 assert.equal(detailsFromBodies([{ body: reviewBody, at: '2026-10-16T10:00:00Z' }], [], 'api-1'), '', 'another PR: none');
 assert.equal(detailsFromBodies([{ body: '<summary>prowl-review-x-api-12.md</summary> no fence', at: '' }], [], 'api-12'), '', 'unparseable: none');
@@ -322,75 +386,79 @@ assert.equal(checksState([{ bucket: 'pass' }, { bucket: 'skipping' }]), 'green')
 assert.equal(checksState([{ bucket: 'pass' }, { bucket: 'pending' }]), 'pending');
 assert.equal(checksState([{ bucket: 'pending' }, { bucket: 'fail' }]), 'failing');
 
-// Fix my PRs. Off by default: no setting changes the review prompt, and the details-file line appears only when on.
-assert.equal(buildPrompt({ ...promptCases.first, detailsDir: '' }), fixture('first.prompt.md'), 'Fix my PRs off: the 2.7.0 prompt');
-assert.ok(buildPrompt({ ...promptCases.first, detailsDir: '/home/.prowl/reports/AB42-r1' }).includes(`Also copy each PR's details file (\`details/<repo>-<n>.md\` in your run folder) to /home/.prowl/reports/AB42-r1${path.sep}<repo>-<n>.md`));
+// The details-file copy for Fix my PRs is gone: no setting adds it to the review prompt.
+assert.ok(!buildPrompt({ ...promptCases.first, detailsDir: '/home/.prowl/reports/AB42-r1' }).includes("Also copy each PR's details file"));
 
-// Round planning: which threads a round takes on, by Fix comments from, and whether a PR needs a round at all.
+// A review that didn't post its review fails. GitHub files thread replies as empty COMMENT reviews, so only a review
+// carrying the run's marker counts; with no marker (a review started before 2.12.0), any review counts.
+const marker = postMarker('AB42-20261029T1000-r1');
+assert.equal(marker, '<!-- prowl-review AB42-20261029T1000-r1 review -->');
+const since = Date.parse('2026-10-29T10:00:00Z');
+const rows = [{ user: 'octocat', at: '2026-10-29T10:05:00Z', body: '' }, { user: 'octocat', at: '2026-10-29T10:06:00Z', body: '' },
+  { user: 'teammate', at: '2026-10-29T10:07:00Z', body: `x\n${marker}` }, { user: 'octocat', at: '2026-10-29T09:00:00Z', body: `old\n${marker}` }];
+assert.equal(reviewedIn(rows, 'octocat', since, marker), false, 'two empty replies, a teammate\'s marked review and an earlier one: not posted');
+assert.equal(reviewedIn(rows, 'octocat', since), true, 'without a marker, any review since counts');
+assert.equal(reviewedIn([...rows, { user: 'OctoCat', at: '2026-10-29T10:30:00Z', body: `🦉 verdict\n${marker}` }], 'octocat', since, marker), true, 'the marked review, any case');
+assert.equal(reviewedIn([...rows, { user: 'octocat', at: '2026-10-29T10:30:00Z', body: 'a review without it' }], 'octocat', since, marker), 'unmarked', 'counts, with a warning');
+const withMarker = buildPrompt({ ...promptCases.first, marker });
+assert.ok(withMarker.includes(`- End the body of each review you post with this line: ${marker}\n`) && !buildPrompt(promptCases.first).includes('End the body'));
+assert.equal(withMarker.replace(`- End the body of each review you post with this line: ${marker}\n`, ''), fixture('first.prompt.md'), 'the marker line is the only change');
+const posted = { status: 'done', prs: [{ url: 'https://github.com/o/a/pull/1', repo: 'o/a', number: 1 }], logPath: '/logs/AB42-r1.ndjson' };
+failUnposted(posted, []);
+assert.equal(posted.status, 'done', 'every review posted: still done');
+const unposted = { ...posted, status: 'done' };
+failUnposted(unposted, unposted.prs);
+assert.equal(unposted.status, 'failed');
+assert.match(unposted.error, /^no review posted on o\/a#1; .*\/logs\/AB42-r1\.ndjson/);
+assert.equal(retryFailed(unposted, 1), false, 'not retried: a retry would most likely be blocked again');
+
+// Round planning: which threads a round takes on, by Fix comments from.
 const parked = parkedUrls(details);
-assert.deepEqual(parked, ['https://github.com/acme/api/pull/12#discussion_r1005']);
+assert.deepEqual(parked, ['https://github.com/octo-org/api/pull/12#discussion_r1005']);
 const ids = (from, p = []) => actionable(threads, from, p).map(t => t.id);
 assert.deepEqual(ids('prowl'), ['PRRT_owl1', 'PRRT_parked1'], "Prowl's own threads; never resolved ones, nor one Prowl answered last");
 assert.deepEqual(ids('prowl+bots'), ['PRRT_owl1', 'PRRT_bot1', 'PRRT_parked1']);
 assert.deepEqual(ids('everyone', parked), ['PRRT_owl1', 'PRRT_bot1', 'PRRT_person1'], 'everyone, less the parked finding');
-assert.ok(wantsRound({ approved: false }), 'the review asked for changes');
-assert.ok(wantsRound({ approved: true, threads: actionable(threads, 'prowl+bots') }), 'approved, but a bot thread is open');
-assert.ok(!wantsRound({ approved: true, threads: [] }) && !wantsRound({}), 'approved, nothing open: no round');
-assert.ok(wantsRound({ reviewDecision: 'CHANGES_REQUESTED' }), "a teammate's review asked for changes (watched ticket)");
 assert.ok(!stripParked(details).includes('## Parked') && stripParked(details).includes('### F-01'));
-// Refusals: only the user's own PR, never a fork or a protected branch.
-const facts = { author: 'me', fork: false, headBranch: 'feature/save', defaultBranch: 'develop' };
-const pr12 = { url: 'https://github.com/acme/api/pull/12', repo: 'acme/api', number: 12, title: 'Add saving', author: 'me' };
-assert.equal(refusal(facts, pr12, 'Me', ['main', 'release/*']), '');
-assert.match(refusal({ ...facts, author: 'lead' }, pr12, 'me', []), /isn't yours/);
-assert.match(refusal({ ...facts, fork: true }, pr12, 'me', []), /fork/);
-assert.match(refusal({ ...facts, headBranch: 'develop' }, pr12, 'me', []), /default branch/);
-assert.match(refusal({ ...facts, headBranch: 'release/2.1' }, pr12, 'me', ['release/*']), /Branches never pushed/);
+// Refusals: only the user's own PR, never a draft, a fork or a protected branch.
+const facts = { author: 'octocat', fork: false, headBranch: 'feature/save', defaultBranch: 'develop' };
+const pr12 = { url: 'https://github.com/octo-org/api/pull/12', repo: 'octo-org/api', number: 12, title: 'Add saving', author: 'octocat' };
+assert.equal(prRefusal(facts, pr12, 'OctoCat', ['main', 'release/*']), '');
+assert.match(prRefusal({ ...facts, author: 'lead' }, pr12, 'octocat', []), /isn't yours/);
+assert.match(prRefusal({ ...facts, fork: true }, pr12, 'octocat', []), /fork/);
+assert.match(prRefusal({ ...facts, draft: true }, pr12, 'octocat', []), /draft/);
+assert.match(prRefusal({ ...facts, headBranch: 'develop' }, pr12, 'octocat', []), /default branch/);
+assert.match(prRefusal({ ...facts, headBranch: 'release/2.1' }, pr12, 'octocat', ['release/*']), /Branches never pushed/);
 assert.ok(globRe('.github/workflows/**').test('.github/workflows/ci.yml') && globRe('**/secrets.json').test('secrets.json') && globRe('**/secrets.json').test('a/b/secrets.json'));
 assert.ok(!globRe('**/secrets.json').test('mysecrets.json') && !globRe('release/*').test('release/a/b'));
 
-// The brief: the details file, the threads, past answers, the round and the commit it starts from.
-const answersLog = [{ ts: '2026-09-01T10:00:00Z', ticket: 'AB#7', repo: 'acme/api', question: 'Should save await the first write before the second?', answer: 'Yes, always await.' },
-  { ts: '2026-09-02T10:00:00Z', ticket: 'AB#8', repo: 'acme/web', question: 'Should save await the first write?', answer: 'n/a' },
-  { ts: '2026-09-03T10:00:00Z', ticket: 'AB#9', repo: 'acme/api', question: 'Which colour is the button?', answer: 'Blue.' }];
-const past = pastAnswers(answersLog, `${details} ${threads.map(t => t.body).join(' ')}`, 'acme/api');
+// Past answers: the same repos, shared keywords only.
+const answersLog = [{ ts: '2026-09-01T10:00:00Z', ticket: 'AB#7', repo: 'octo-org/api', question: 'Should save await the first write before the second?', answer: 'Yes, always await.' },
+  { ts: '2026-09-02T10:00:00Z', ticket: 'AB#8', repos: ['octo-org/web'], question: 'Should save await the first write?', answer: 'n/a' },
+  { ts: '2026-09-03T10:00:00Z', ticket: 'AB#9', repos: ['octo-org/api'], question: 'Which colour is the button?', answer: 'Blue.' }];
+const past = pastAnswers(answersLog, `${details} ${threads.map(t => t.body).join(' ')}`, ['octo-org/api']);
 assert.deepEqual(past.map(a => a.ticket), ['AB#7'], 'same repo, shared keywords only');
-const brief = buildBrief({ pr: pr12, ticket: { key: 'AB#42', title: 'Saving', url: 'https://dev.azure.com/o/p/_workitems/edit/42' }, round: 2, maxRounds: 3,
-  startSha: 'abc1234def', headBranch: 'feature/save', details: stripParked(details), threads: actionable(threads, 'everyone', parked), answers: past });
-assert.ok(brief.startsWith('# Fix brief: acme/api#12, round 2\n') && brief.includes('at its head, abc1234def (detached)') && brief.includes('Round 2 of at most 3.'));
-assert.ok(brief.includes('<details-file>\n# PR-Owl Review: acme/api#12') && !brief.includes('## Parked'));
-assert.ok(brief.includes('### Thread PRRT_bot1') && brief.includes('- Author: @copilot-pull-request-reviewer (bot)') && brief.includes('- Where: src/load.js:7') && brief.includes('> Consider handling a null response here.'));
-assert.ok(!brief.includes('PRRT_done1') && !brief.includes('<!-- prowl-review'), 'no resolved threads; markers stripped');
-assert.ok(brief.includes('A: Yes, always await.') && !brief.includes('Which colour'));
-assert.ok(buildBrief({ pr: pr12, ticket: { key: 'AB#42' }, round: 1, maxRounds: 3, startSha: 'a', headBranch: 'b', details: '', threads: [], answers: [] }).includes('No details file was found'));
+assert.deepEqual(pastAnswers(answersLog, 'save await first write', ['octo-org/web']).map(a => a.ticket), ['AB#8'], "a Builder answer's repos list");
 
-// The fix session's arguments and environment.
-const fixCfg = { claude: { ...claude, model: 'review-model', permissionMode: 'auto' }, fix: { model: '', effort: 'medium', maxBudgetUsd: 25, maxTurns: 0 }, allowMemoryWrites: true };
-const fa = fixArgs(fixCfg, '/app', '/b', '/b/settings.json', 'uuid-1');
-assert.deepEqual(fa.slice(0, 15), ['-p', '--plugin-dir', '/app', '--add-dir', '/b', '--add-dir', CONFIG_DIR, '--model', 'review-model', '--effort', 'medium', '--permission-mode', 'auto', '--session-id', 'uuid-1']);
-assert.deepEqual(fa.slice(15, 17), ['--max-budget-usd', '25']);
-assert.ok(!fa.includes('--max-turns') && fa.includes('Bash(git push *)') && fa[fa.indexOf('--settings') + 1] === '/b/settings.json' && fa.at(-1) === '--verbose');
-assert.ok(fixArgs({ ...fixCfg, fix: { ...fixCfg.fix, model: 'fix-model', maxTurns: 40 } }, '/app', '/b', '/s', 'u', true).join(' ').includes('--model fix-model --effort medium --permission-mode auto --resume u --max-budget-usd 25 --max-turns 40'));
-assert.deepEqual(fixEnv(fixCfg, ['/wt', '/b'], { PATH: '/bin' }), { PATH: '/bin', CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: '3600000', PROWL_SESSION: 'fix', PROWL_FIX_ROOTS: ['/wt', '/b'].join(path.delimiter) });
-
-// result.json: every status, and what makes one invalid (an ask without a Searched line is retried once).
-const fixedResult = JSON.parse(fixFixture('result-fixed.json'));
-assert.equal(validateResult(fixedResult), '');
-assert.equal(validateResult(JSON.parse(fixFixture('result-partial.json'))), '');
-assert.match(validateResult(JSON.parse(fixFixture('result-blocked.json'))), /has no Searched line/);
-assert.match(validateResult({ ...fixedResult, status: 'done' }), /status/);
-assert.match(validateResult({ ...fixedResult, items: [{ action: 'fixit' }] }), /no action/);
-assert.match(validateResult({ ...fixedResult, items: [{ thread: 'x', action: 'ask' }], questions: [] }), /ask item has no question/);
-assert.match(validateResult({ ...fixedResult, commit: 'not a sha' }), /commit/);
-assert.match(validateResult([]), /not a JSON object/);
+// A feedback round's result.json: every status, and what makes one invalid (an ask without a searched line is asked once more).
+const fixedResult = JSON.parse(fbFixture('result-fixed.json'));
+assert.equal(validateFeedback(fixedResult), '');
+assert.equal(validateFeedback(JSON.parse(fbFixture('result-partial.json'))), '');
+assert.match(validateFeedback(JSON.parse(fbFixture('result-blocked.json'))), /has no searched line/);
+assert.match(validateFeedback({ ...fixedResult, status: 'done' }), /status/);
+assert.match(validateFeedback({ ...fixedResult, items: [{ action: 'fixit' }] }), /no action/);
+assert.match(validateFeedback({ ...fixedResult, items: [{ thread: 'x', action: 'parked' }] }), /no action/, "the action is park");
+assert.match(validateFeedback({ ...fixedResult, items: [{ thread: 'x', action: 'ask' }], questions: [] }), /ask item has no question/);
+assert.match(validateFeedback({ ...fixedResult, commits: [{ pr: 'octo-org/api#12', sha: 'not a sha' }] }), /commit/);
+assert.match(validateFeedback([]), /not a JSON object/);
 
 // Replies: one per thread fixed (once pushed) or disputed, and none already posted, by its marker.
-const fixRec = { ticket: 'AB#42', round: 2, pushedSha: '3f2a1c9d0e', result: fixedResult, threads: actionable(threads, 'everyone', parked).map(t => ({ id: t.id, commentId: t.commentId })) };
-const todo = repliesToPost(fixRec, []);
-assert.deepEqual(todo.map(r => [r.thread, r.what, r.commentId]), [['PRRT_owl1', 'fixed', 1001], ['PRRT_bot1', 'fixed', 1002], ['PRRT_person1', 'disputed', 1003]]);
-assert.equal(todo[0].marker, '<!-- prowl-fix AB#42 r2 PRRT_owl1 fixed -->');
-assert.deepEqual(repliesToPost(fixRec, [`Fixed in 3f2a1c9\n${todo[0].marker}`, `x\n${todo[2].marker}`]).map(r => r.thread), ['PRRT_bot1'], 'a restart posts nothing twice');
-assert.deepEqual(repliesToPost({ ...fixRec, pushedSha: null }, []).map(r => r.what), ['disputed'], "nothing pushed: no 'fixed' replies");
+const roundThreads = actionable(threads, 'everyone', parked).map(t => ({ id: t.id, commentId: t.commentId }));
+const toPost = repliesToPost({ ticket: 'AB#42', round: 2, items: fixedResult.items, threads: roundThreads, pushed: '3f2a1c9d0e' }, []);
+assert.deepEqual(toPost.map(r => [r.thread, r.what, r.commentId]), [['PRRT_owl1', 'fixed', 1001], ['PRRT_bot1', 'fixed', 1002], ['PRRT_person1', 'disputed', 1003]]);
+assert.equal(toPost[0].marker, '<!-- prowl-fix AB#42 r2 PRRT_owl1 fixed -->');
+assert.deepEqual(repliesToPost({ ticket: 'AB#42', round: 2, items: fixedResult.items, threads: roundThreads, pushed: 'x' }, [`Fixed in 3f2a1c9\n${toPost[0].marker}`, `x\n${toPost[2].marker}`]).map(r => r.thread), ['PRRT_bot1'], 'a restart posts nothing twice');
+assert.deepEqual(repliesToPost({ ticket: 'AB#42', round: 2, items: fixedResult.items, threads: roundThreads, pushed: null }, []).map(r => r.what), ['disputed'], "nothing pushed: no 'fixed' replies");
 const outputMd = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'skills', 'prowl-review', 'config', 'output.md'), 'utf8');
 assert.equal(fill(template(outputMd, 'Fix reply'), { 'comment prefix': template(outputMd, 'Comment prefix'), sha: '3f2a1c9', note: 'save() awaits.' }), '🦉 **PR-Owl Review** · Fixed in 3f2a1c9: save() awaits.');
 const started = fill(template(outputMd, 'Review started'), { ticket: 'AB#42', 'ticket link': 'https://dev.azure.com/o/p/_workitems/edit/42' });
@@ -400,20 +468,20 @@ assert.ok(outputTemplate(appDir, 'Review started'), "the user's template, or the
 assert.equal(outputTemplate(appDir, 'No such section'), '');
 assert.equal(template('# x\n\n## Fix reply\n\nno fence\n\n## Next\n```\nnot this\n```\n', 'Fix reply'), null, 'a section without a template');
 assert.equal(template('', 'Fix reply'), null);
-// Prowl never resolves a thread: the only GraphQL its fix code sends is the threads query.
-for (const f of ['github.mjs', 'fixes.mjs', 'fence.mjs']) {
+// Prowl never resolves a thread: the only GraphQL its own code sends is the threads query.
+for (const f of ['github.mjs', 'fence.mjs', 'feedback.mjs', 'git.mjs', path.join('builder', 'builder.mjs'), path.join('reviewer', 'reviewer.mjs')]) {
   const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), f), 'utf8');
   assert.ok(!/resolveReviewThread|mutation\s*[({]/.test(src), `${f} builds no GraphQL mutation`);
 }
 
 // Checks before push: the first matching repo glob, setup then run, the output tail, and the timeout.
-const checksCfg = JSON.parse(fixFixture('checks.json'));
-assert.deepEqual(matchChecks(checksCfg, 'acme/web').run, ['make test'], 'first match wins');
-assert.equal(matchChecks(checksCfg, 'ACME/api').timeoutMinutes, 1, 'owner/* wildcard, any case');
+const checksCfg = JSON.parse(fbFixture('checks.json'));
+assert.deepEqual(matchChecks(checksCfg, 'octo-org/web').run, ['make test'], 'first match wins');
+assert.equal(matchChecks(checksCfg, 'OCTO-ORG/api').timeoutMinutes, 1, 'owner/* wildcard, any case');
 assert.ok(matchChecks(checksCfg, 'other/thing').run[0].includes('boom'));
-assert.equal(matchChecks({}, 'acme/api'), null, 'nothing matches: no checks');
+assert.equal(matchChecks({}, 'octo-org/api'), null, 'nothing matches: no checks');
 const checkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'prowl-test-'));
-assert.deepEqual(await runChecks(matchChecks(checksCfg, 'acme/api'), checkDir), { ok: true }, 'setup ran before run, in the worktree');
+assert.deepEqual(await runChecks(matchChecks(checksCfg, 'octo-org/api'), checkDir), { ok: true }, 'setup ran before run, in the worktree');
 const failedCheck = await runChecks(matchChecks(checksCfg, 'other/x'), checkDir);
 assert.ok(!failedCheck.ok && failedCheck.tail.includes('lint ok') && failedCheck.tail.includes('boom'), 'a failure keeps the output tail');
 const slow = await runCommand('node -e "setTimeout(() => {}, 10000)"', checkDir, {}, 300);
@@ -425,6 +493,9 @@ const okGuard = { base: 'aaa1111', head: 'bbb2222', ancestor: true, remote: 'aaa
 const limits = { maxChangedLines: 1000, protectedPaths: ['.github/workflows/**'] };
 assert.deepEqual(guardFailures(okGuard, limits), []);
 assert.deepEqual(guardFailures({ ...okGuard, remote: 'ccc3333' }, limits).map(g => g.kind), ['moved'], 'the remote moved: drop the round');
+assert.deepEqual(guardFailures({ ...okGuard, remote: '', expected: '' }, limits), [], 'a new branch: nothing on the remote yet');
+assert.match(guardFailures({ ...okGuard, remote: 'ccc3333', expected: '' }, limits)[0].text, /already exists/, 'a branch someone else pushed first');
+assert.match(guardFailures({ ...okGuard, onBranch: false }, limits)[0].text, /Prowl's branch/);
 assert.match(guardFailures({ ...okGuard, ancestor: false }, limits)[0].text, /history was rewritten/);
 assert.match(guardFailures({ ...okGuard, head: 'aaa1111' }, limits)[0].text, /no new commit/);
 assert.match(guardFailures({ ...okGuard, numstat: '900\t200\tsrc/big.js' }, limits)[0].text, /1100 lines/);
@@ -439,18 +510,193 @@ for (const line of ['password = getPassword()', 'const secret = process.env.SECR
 }
 assert.ok(SECRET_PATTERNS.length >= 10);
 
-// Spend: reviews plus fixes per ticket since its loop started, fixes per day, and the 70% warning.
-const now = Date.now();
-const spendState = { runs: [{ ticket: 'AB#42', startedAt: now - 1000, costUsd: 4 }, { ticket: 'AB#42', startedAt: now - 99e6, costUsd: 50 }, { ticket: 'AB#9', startedAt: now, costUsd: 7 }],
-  fixes: [{ ticket: 'AB#42', createdAt: now - 500, startedAt: now - 500, costUsd: 3.5 }, { ticket: 'AB#9', createdAt: now, startedAt: now, costUsd: 1 }, { ticket: 'AB#1', createdAt: 0, startedAt: 0, costUsd: 9 }] };
-assert.equal(ticketSpend(spendState, 'AB#42', now - 5000), 7.5, 'since the loop started only');
-assert.equal(daySpend(spendState, now), 4.5, 'fix sessions since midnight');
-assert.deepEqual([spendLevel(6, 10), spendLevel(7, 10), spendLevel(10, 10), spendLevel(1e6, 0)], ['', 'warn', 'over', ''], '70% warns; 0 = no cap');
-
-// Needs-you items, for each stop reason.
-for (const kind of ['question', 'cap', 'checks', 'guard', 'conflict', 'failed']) {
-  const item = needItem(kind, { ticket: 'AB#42', pr: pr12.url, question: `${kind}?`, context: ['a', 'b', 'c', 'd'] });
-  assert.ok(item.id.startsWith('AB#42:') && item.kind === kind && item.context.length === 3 && Array.isArray(item.options));
+// ---- Drafts: the Reviewer treats them as if they weren't there ----
+const { loadConfig, saveConfig, CONFIG_PATH } = await import('./config.mjs');
+const { createReviewer } = await import('./reviewer/reviewer.mjs');
+const rvTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'prowl-test-'));
+const prOf = (n, extra = {}) => ({ url: `https://github.com/octo-org/r${n}/pull/${n}`, title: `PR ${n}`, number: n, repo: `octo-org/r${n}`, author: 'teammate', draft: false, ...extra });
+/** A Reviewer with fake GitHub and board: `open` are the ticket's open PRs; resolves with what it claimed, started and logged. */
+async function reviewOnce(open, { runs = [], cfgOver = {}, me = 'octocat', switchOffAt = '' } = {}) {
+  const cfg = { ...loadConfig(), githubOwner: 'octo-org', workDir: rvTmp, ...cfgOver };
+  const seen = { claims: [], retags: [], started: [], logs: [] };
+  const ticket = { key: 'AB#42', title: 'Thing', url: 'https://dev.azure.com/o/Shop/_workitems/edit/42', tags: ['Ready for Review'], rev: 3, ref: { org: 'https://dev.azure.com/o', project: 'Shop', id: 42 } };
+  const app = { cfg, me, on: true, sideOn() { return this.on; }, tracker: () => tracker, boards: () => [{ project: 'Shop', team: 'Web' }], dryRun: () => false };
+  const tracker = {
+    name: 'Azure DevOps', boardLabel: b => `${b.project} / ${b.team}`,
+    findTickets: async () => ({ tickets: [ticket], variants: ['Ready for Review'] }),
+    claim: async (c, t, drop, add) => { seen.claims.push(add); if (switchOffAt === 'claim') app.on = false; },
+    retag: async (c, ref, drop, add) => { seen.retags.push(add); },
+    ticketText: async () => '',
+  };
+  const gh = { me: async () => me, openPrs: async () => open, headSha: async pr => `sha${pr.number}`, cloneMissing: async () => [], postComment: async () => '', humanApproved: async () => false };
+  const side = createReviewer(app, { log: (level, msg) => { seen.logs.push(msg); return true; }, forget() {}, hoot() {}, appDir, trackers: { ado: tracker }, github: gh });
+  side.state = { runs: structuredClone(runs), failures: {} };
+  side.startReview = (c, dir, opts) => {
+    seen.started.push(opts);
+    const run = { id: `AB42-r${(opts.prior?.reviewNo || 0) + 1}`, ticket: 'AB#42', prs: opts.prs, reviewNo: (opts.prior?.reviewNo || 0) + 1, status: 'running', startedAt: Date.now(), logPath: path.join(rvTmp, 'x.ndjson'), ticketUrl: ticket.url };
+    opts.prompt = buildPrompt({ ...run, title: 'Thing', reportPath: '/r/x.md', contextPrs: opts.approvedPrs, leftOut: opts.leftOut, prior: opts.prior, priorReport: 'F-01 [HIGH] old' });
+    return run;
+  };
+  await side.poll();
+  return seen;
 }
+const doneRun = (prs, extra = {}) => ({ ticket: 'AB#42', status: 'done', reviewNo: 1, endedAt: 1, prs, contextPrs: [], approved: {}, reviewedHeads: Object.fromEntries(prs.map(p => [p.url, `old${p.number}`])), reportPath: '/nowhere.md', ...extra });
+let seen = await reviewOnce([prOf(1), prOf(2, { draft: true })]);
+assert.deepEqual(seen.started[0].prs.map(p => p.number), [1], 'a mixed ticket: only the ready PR is reviewed');
+assert.ok(!seen.started[0].approvedPrs.length && !seen.started[0].leftOut.length, 'the draft is not context');
+assert.ok(!seen.logs.some(l => l.includes('r2') || l.includes('#2')), 'the draft is not named in the Log');
+seen = await reviewOnce([prOf(2, { draft: true }), prOf(3, { draft: true })]);
+assert.deepEqual([seen.claims, seen.started], [[], []], 'all drafts: waits, tagged and unclaimed');
+assert.match(seen.logs.at(-1), /no open, ready PR mentions AB#42 yet/);
+seen = await reviewOnce([prOf(1), prOf(4, { draft: true, author: 'octocat' })]);
+assert.equal(seen.started.length, 1, 'your own draft no longer makes the ticket yours');
+seen = await reviewOnce([prOf(1), prOf(2, { draft: true })], { runs: [doneRun([prOf(1), prOf(2)])] });
+assert.deepEqual(seen.started[0].leftOut.map(p => p.number), [2], 'back to draft: left out, its findings untouched');
+const leftPrompt = seen.started[0].prompt;
+assert.ok(leftPrompt.includes('## Left out of this review') && leftPrompt.includes(`- ${prOf(2).url}`) && !leftPrompt.split('\n')[0].includes(prOf(2).url));
+assert.ok(leftPrompt.includes("without re-verifying, replying on or resolving them"));
+seen = await reviewOnce([prOf(1), prOf(3)], { runs: [doneRun([prOf(1)])], cfgOver: { maxReviewRounds: 1 } });
+assert.deepEqual(seen.started[0].prs.map(p => p.number), [3], 'ready again past the cap: the PR no review covered gets its first review');
+assert.deepEqual(seen.started[0].leftOut.map(p => p.number), [1]);
+seen = await reviewOnce([prOf(1)], { runs: [doneRun([prOf(1)])], cfgOver: { maxReviewRounds: 1 } });
+assert.deepEqual(seen.claims, [], 'every PR covered, at the cap: left for a person');
+seen = await reviewOnce([prOf(1), prOf(2)], { runs: [doneRun([prOf(1)], { leftOut: [prOf(2)], approved: {} })] });
+assert.deepEqual(seen.started[0].prs.map(p => p.number), [1, 2], 'marked ready again: a re-tag reviews it');
+seen = await reviewOnce([prOf(1)], { switchOffAt: 'claim' });
+assert.deepEqual([seen.claims, seen.retags, seen.started], [['In Review'], ['Ready for Review'], []], 'switched off as it claimed: the trigger tag is put back');
+fs.rmSync(rvTmp, { recursive: true });
 
-console.log('self-test passed');
+// ---- The two sides: neither imports the other; the shell keeps one's errors from the other ----
+const srcDir = path.dirname(fileURLToPath(import.meta.url));
+const importsOf = dir => fs.readdirSync(path.join(srcDir, dir)).filter(f => f.endsWith('.mjs')).flatMap(f => [...fs.readFileSync(path.join(srcDir, dir, f), 'utf8').matchAll(/(?:from|import\()\s*['"]([^'"]+)['"]/g)].map(m => m[1]));
+assert.ok(!importsOf('reviewer').some(i => i.includes('builder')), "the Reviewer doesn't import the Builder");
+assert.ok(!importsOf('builder').some(i => i.includes('reviewer')), "the Builder doesn't import the Reviewer");
+const { createShell } = await import('./shell.mjs');
+const fakeSide = (name, fail) => ({ name, polls: 0, ticks: 0, paused: false, polling: false, nextPoll: 0, lastError: '',
+  async poll() { this.polls++; if (fail) throw new Error(`${name} broke`); }, tick() { this.ticks++; if (fail) throw new Error(`${name} tick broke`); } });
+let clockNow = 1_000_000;
+const shellLogs = [];
+const shellApp = { cfg: loadConfig(), sideOn: n => Boolean(shellApp.cfg[n]?.enabled) };
+const [r1, b1] = [fakeSide('reviewer', true), fakeSide('builder', false)];
+shellApp.cfg.builder.enabled = true;
+const shell = createShell(shellApp, [r1, b1], { log: (s, level, msg) => { shellLogs.push([s, level, msg]); return true; }, reload: () => {}, now: () => clockNow });
+shell.tick();
+await new Promise(r => setTimeout(r, 0));
+assert.deepEqual([r1.polls, b1.polls, r1.ticks, b1.ticks], [1, 1, 1, 1], "one side's error doesn't stop the other");
+assert.ok(shellLogs.some(([s, level, msg]) => s === 'reviewer' && level === 'error' && msg === 'reviewer broke'), 'logged on its own side');
+assert.ok(r1.lastError && !b1.lastError);
+// Both off: idle, and it says so; a switch turned on in config.json is picked up at the next poll interval.
+saveConfig({ ...loadConfig(), reviewer: { enabled: false }, builder: { ...loadConfig().builder, enabled: false } });
+const offApp = { cfg: loadConfig(), sideOn: n => Boolean(offApp.cfg[n]?.enabled) };
+const [r2, b2] = [fakeSide('reviewer'), fakeSide('builder')];
+const offLogs = [];
+const offShell = createShell(offApp, [r2, b2], { log: (s, level, msg) => { offLogs.push(msg); return true; }, reload: () => { offApp.cfg = loadConfig(); }, now: () => clockNow });
+offShell.tick();
+assert.deepEqual([r2.polls, b2.polls], [0, 0], 'both off: nothing polls');
+assert.ok(offLogs.some(m => /Both sides are off/.test(m)));
+const onFile = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+onFile.builder.enabled = true;
+fs.writeFileSync(CONFIG_PATH, JSON.stringify(onFile));
+offShell.tick();
+assert.equal(b2.polls, 0, 'not before the poll interval');
+clockNow += offApp.cfg.pollSeconds * 1000;
+offShell.tick();
+await new Promise(r => setTimeout(r, 0));
+assert.deepEqual([r2.polls, b2.polls], [0, 1], 'the file is re-read with both sides off, and the Builder comes on');
+saveConfig({ ...loadConfig(), reviewer: { enabled: true }, builder: { ...loadConfig().builder, enabled: false } });
+
+// ---- The TUI: two tabs at 80 columns, and each switch from the keyboard ----
+const { startTui } = await import('./tui.mjs');
+const tuiApp = {
+  cfg: loadConfig(), me: 'octocat', log: [], notes: null, override: {}, sideOn: n => tuiApp.override[n] ?? Boolean(tuiApp.cfg[n]?.enabled),
+  tracker: () => ({ name: 'Azure DevOps', boardLabel: b => `${b.project} / ${b.team}` }), boards: () => [{ project: 'Shop', team: 'Web' }], dryRun: () => false, hasToken: () => false, speech: () => null,
+};
+const mkSide = (extra) => ({ paused: false, polling: false, nextPoll: Date.now() + 60_000, lastError: '', running: () => [], needs: () => [], ...extra });
+const tuiSides = {
+  reviewer: mkSide({ state: { runs: [], fixes: [{ id: 'f1', kind: 'Fix my PRs', ticket: 'PROJ-123', tracker: 'jira', ref: { site: 'https://example.atlassian.net', key: 'PROJ-123' }, title: 'Old fix', pr: prOf(5), round: 1, status: 'stopped', note: 'Fix my PRs was removed', endedAt: 5, replies: [] }] }, finished: () => [], tagVariants: {} }),
+  builder: mkSide({
+    history: () => [{ uid: 'u1', key: 'AB#123', title: 'Add saving to the shop', status: 'following', prs: [prOf(6), prOf(7)], costUsd: 4.2, updatedAt: 9, briefDir: '/b', url: 'https://dev.azure.com/o/Shop/_workitems/edit/123', ready: true }],
+    needs: () => [{ id: 'n1', ticket: 'AB#124', kind: 'question', question: 'Keep the old cart format?', context: [], options: ['Yes', 'No'], recommended: 'Yes', createdAt: 9 }],
+  }),
+};
+const toggled = [];
+const tui = startTui(tuiApp, {
+  sides: tuiSides, pollNow() {}, togglePause() {}, saveConfig() {}, saveToken: () => '', quit() {},
+  toggleSide: n => { const now = !tuiApp.sideOn(n); tuiApp.cfg[n].enabled = now; delete tuiApp.override[n]; toggled.push([n, now]); return now; },
+}, { headless: true });
+const fits = (frame, what) => { for (const l of frame) assert.ok(l.length <= 80, `${what}: ${JSON.stringify(l)} is ${l.length} columns`); return frame.join('\n'); };
+let frame = fits(tui.frame(80, 30), 'Reviewer');
+assert.ok(/Reviewer · on/.test(frame) && /Builder · off/.test(frame), 'both tabs, each with its switch');
+tui.key('2');
+frame = fits(tui.frame(80, 30), 'Reviewer History');
+assert.ok(frame.includes('FIX MY PRS') && frame.includes('PROJ-123'), "past fixes stay readable in the Reviewer's History");
+tui.key('tab');
+assert.ok(fits(tui.frame(80, 30), 'Builder Running').includes('The Builder is off'), 'each side keeps its own view');
+tui.key('2');
+frame = fits(tui.frame(80, 30), 'Builder');
+assert.ok(frame.includes('READY TO MERGE') && frame.includes('AB#123'), "the Builder's History");
+assert.ok(/Builder · off · ⚑ 1/.test(frame), 'the Needs-you count on its tab');
+tui.key('4');
+frame = fits(tui.frame(80, 30), 'Builder Config, off');
+assert.ok(!frame.includes('Max parallel builds') && frame.includes('own settings show here once it is on'), "the Builder's rows are hidden while it's off");
+tui.key('e');
+frame = fits(tui.frame(80, 60), 'Builder Config, on');
+assert.ok(frame.includes('Max parallel builds') && /BUILDER/.test(frame) && /SHARED/.test(frame));
+assert.ok(frame.indexOf('Builder ') < frame.indexOf('SHARED') && frame.indexOf('SHARED') < frame.indexOf('Max parallel builds'), 'the switch, then Shared, then its own');
+tui.key('e');
+tui.key('R');
+tui.key('e');
+assert.deepEqual(toggled, [['builder', true], ['builder', false], ['reviewer', false]], 'e toggles the side in view');
+frame = fits(tui.frame(80, 30), 'both off');
+assert.ok(/Reviewer · off/.test(frame) && /Builder · off/.test(frame) && frame.includes('Reviewer off'), 'both off');
+tuiApp.override = { builder: true };
+assert.ok(fits(tui.frame(80, 30), 'override').includes('Builder · on'), '--builder-only overrides the switch for this launch');
+
+// ---- Fix my PRs removed: the first-launch migration ----
+const { migrateFixes, needsMigration } = await import('./migrate.mjs');
+const { hash } = await import('./update.mjs');
+const migHome = fs.mkdtempSync(path.join(os.tmpdir(), 'prowl-test-'));
+fs.mkdirSync(path.join(migHome, 'config'));
+const migWt = path.join(migHome, 'projects', '.prowl-worktrees', 'api-12');
+fs.mkdirSync(migWt, { recursive: true });
+const jiraRef = { site: 'https://example.atlassian.net', key: 'PROJ-123' };
+const migState = () => ({ runs: [], failures: {}, loops: { 'PROJ-123': {} }, needs: [{ id: 'x' }],
+  fixes: [{ id: 'fix-1', ticket: 'PROJ-123', tracker: 'jira', ref: structuredClone(jiraRef), pr: { repo: 'octo-org/api', number: 12, url: 'https://github.com/octo-org/api/pull/12' }, status: 'fixing', pid: 4242, worktree: migWt, pushedSha: null },
+    { id: 'fix-0', ticket: 'PROJ-123', tracker: 'jira', ref: structuredClone(jiraRef), pr: { repo: 'octo-org/api', number: 12 }, status: 'done', pushedSha: 'abc1234' }] });
+const migCfg = () => ({ workDir: path.join(migHome, 'projects'), fix: { enabled: true, from: 'prowl', mcpAllow: ['mcp__docs__search'], maxRounds: 2 } });
+const removed = [];
+const deps = (stopped, saved) => ({ home: migHome, saveConfig: c => saved.push(structuredClone(c)), saveState: () => {}, isRunning: f => f.pid === 4242, stop: async () => stopped,
+  remove: async (clone, wt) => { removed.push([clone, wt]); fs.rmSync(wt, { recursive: true, force: true }); } });
+// An exit that can't be confirmed: the fix keeps its status, pid and worktree, and the next launch tries again.
+let st = migState();
+let mc = migCfg();
+let saved = [];
+await migrateFixes(mc, st, deps(false, saved));
+assert.deepEqual([st.fixes[0].status, st.fixes[0].pid, fs.existsSync(migWt)], ['fixing', 4242, true], 'unconfirmed exit: kept for the next launch');
+assert.ok(needsMigration(mc, st, migHome), 'and the migration runs again');
+// Confirmed: marked stopped, nothing pushed, its worktree removed; the settings moved to the backup.
+st = migState();
+mc = migCfg();
+saved = [];
+fs.writeFileSync(path.join(migHome, 'config', 'fix.md'), 'default rules');
+fs.writeFileSync(path.join(migHome, 'seen.json'), JSON.stringify({ version: '2.11.3', defaults: { 'fix.md': hash('default rules'), 'review.md': 'h' } }));
+const migNotes = await migrateFixes(mc, st, deps(true, saved));
+assert.deepEqual([st.fixes[0].status, st.fixes[0].pushedSha], ['stopped', null], 'a running fix stopped, with nothing pushed');
+assert.ok(!fs.existsSync(migWt) && removed.some(([, wt]) => wt === migWt), 'its worktree removed');
+assert.deepEqual(st.fixes[0].ref, jiraRef, 'a Jira ref survives');
+assert.ok(st.fixes.every(f => f.kind === 'Fix my PRs') && !st.loops && !st.needs, 'past fixes kept for History; loops and Needs you items gone');
+assert.ok(!('fix' in mc) && !('fix' in saved.at(-1)), 'the fix.* settings left config.json');
+assert.deepEqual(JSON.parse(fs.readFileSync(path.join(migHome, 'config.fix-backup.json'), 'utf8')).fix.mcpAllow, ['mcp__docs__search'], 'and are in config.fix-backup.json, fix.mcpAllow included');
+assert.ok(!fs.existsSync(path.join(migHome, 'config', 'fix.md')), 'an unedited fix.md is deleted');
+assert.ok(!('fix.md' in JSON.parse(fs.readFileSync(path.join(migHome, 'seen.json'), 'utf8')).defaults));
+assert.ok(migNotes.some(n => /Stopped 1 Fix my PRs session/.test(n.text)) && migNotes.some(n => /config\.fix-backup\.json/.test(n.text)), 'the Update Notes say what happened');
+assert.ok(!needsMigration(mc, st, migHome), 'done: nothing left to migrate');
+// An edited fix.md is kept.
+fs.writeFileSync(path.join(migHome, 'config', 'fix.md'), 'my own rules');
+fs.writeFileSync(path.join(migHome, 'seen.json'), JSON.stringify({ defaults: { 'fix.md': hash('default rules') } }));
+assert.ok((await migrateFixes({ workDir: migHome }, { runs: [] }, deps(true, []))).some(n => /edited fix\.md/.test(n.text)) && fs.existsSync(path.join(migHome, 'config', 'fix.md')));
+fs.rmSync(migHome, { recursive: true });
+
+await (await import('./builder/self-test.mjs')).run(assert);
+
+console.log(`self-test passed: ${count} asserts`);

@@ -4,8 +4,8 @@ import path from 'node:path';
 
 export const HOME = process.env.PROWL_HOME || path.join(os.homedir(), '.prowl');
 export const CONFIG_PATH = path.join(HOME, 'config.json');
-export const CONFIG_DIR = path.join(HOME, 'config'); // the user's copies of prowl-review's config files
-export const CHECKS_PATH = path.join(CONFIG_DIR, 'checks.json'); // the user's own checks to run before a fix is pushed
+export const CONFIG_DIR = path.join(HOME, 'config'); // the user's copies of the skills' config files
+export const CHECKS_PATH = path.join(CONFIG_DIR, 'checks.json'); // the user's own checks to run before Prowl pushes
 
 // Every setting and its default. CONFIG_PATH overrides these; the Config view (4) edits that file.
 const DEFAULTS = {
@@ -18,7 +18,10 @@ const DEFAULTS = {
     site: '', // https://<company>.atlassian.net
     email: '', // your Atlassian account; its API token is kept in the OS credential store (prowl --setup)
     boards: [], // [{ "board": "My Team board" }]: a board name or id
+    // Custom field ids (e.g. customfield_10042) the Builder reads into ticket.md; '' leaves the section out.
+    fields: { acceptanceCriteria: '', reproSteps: '' },
   },
+  reviewer: { enabled: true }, // the Reviewer: reviews the PRs of tickets tagged for review
   tags: { trigger: 'Ready for Review', inProgress: 'In Review', done: 'Reviewed' },
   tagMatchMaxTypos: 2,
   githubOwner: '', // GitHub org whose PRs get reviewed
@@ -40,25 +43,35 @@ const DEFAULTS = {
   caffeinate: false, // macOS: keep the Mac from idle-sleeping while a review runs (caffeinate -i)
   logRetentionDays: 0, // delete review logs older than this, and roll poller.log over past 5 MB; 0 = keep everything. Reports are always kept
   ticketContext: false, // add the ticket's description (and Azure DevOps acceptance criteria) to the review prompt
-  // Fix my PRs: after a review asks for changes on your own PRs, a capped Claude Code session per PR fixes them in a
-  // worktree; Prowl's code then runs your checks, pushes, replies on the threads it addressed, waits for CI and re-tags.
-  fix: {
-    enabled: false, // the switch; every other fix setting applies only while it is on
-    from: 'everyone', // whose unresolved threads get fixed: 'prowl' (Prowl's own), 'prowl+bots', 'everyone'
-    maxRounds: 3, // fix rounds per ticket; then it goes to Needs you
-    maxBudgetUsd: 25, // spend cap per fix session in USD (--max-budget-usd); 0 = no cap
-    maxTurns: 0, // turn cap per fix session (--max-turns); 0 = no cap
-    timeoutMinutes: 60, // stop a fix session running longer than this; 0 = no limit
-    ticketBudgetUsd: 0, // reviews plus fixes per ticket since its loop started; 0 = no cap
-    dailyBudgetUsd: 0, // fix sessions since local midnight; 0 = no cap
-    waitForChecksMinutes: 30, // wait this long for a PR's required checks after a push before re-tagging; 0 = re-tag at once
-    maxChangedLines: 1000, // a round that changes more lines than this isn't pushed
-    protectedPaths: ['.github/workflows/**'], // globs: a round that changes one isn't pushed
+  // The Builder: builds tickets tagged Ready to Start and opens their PRs, then follows the PRs through review.
+  builder: {
+    enabled: false, // the switch; the Builder claims and starts nothing while it is off
+    tags: { start: 'Ready to Start', inProgress: 'In Development', done: 'Ready for Review', reviewing: 'In Review' }, // done is the Reviewer's trigger
+    assignedToMe: true, // only tickets assigned to you
+    maxConcurrent: 1, // tickets built at once, counted from the claim until their PRs open (Needs you included)
+    approvePlans: 'auto', // 'auto': Prowl approves a plan with no open questions; 'ask': every plan waits for you
+    base: {}, // { "<owner/name glob>": "<branch or branch glob>" }: the first match is the base branch; else the plan's, else the default branch
+    branchTemplate: 'prowl/{id}-{slug}',
+    extraOwners: [], // GitHub owners besides githubOwner whose repos a session may ask for
+    maxRepos: 6, // repos per ticket
+    command: '', // a slash command to build with instead of /prowl:prowl-work; it must keep the result contract
+    model: '', // '' = claude.model
+    effort: 'high',
+    maxBudgetUsd: 50, // spend cap per session in USD (all its turns); 0 = no cap
+    maxTurns: 0, // turn cap per session turn (--max-turns); 0 = no cap
+    timeoutMinutes: 240, // stop a session turn running longer than this; 0 = no limit
+    dailyBudgetUsd: 0, // Builder sessions since local midnight; 0 = no cap
+    ticketBudgetUsd: 0, // every Builder session on one ticket; 0 = no cap
+    maxChangedLines: 3000, // a push that changes more lines than this goes to Needs you
+    protectedPaths: ['.github/workflows/**'], // globs: a push that changes one goes to Needs you
     protectedBranches: ['main', 'master', 'release/*'], // globs never pushed to, as well as each repo's default branch
-    maxConcurrent: 1, // fix sessions at once, apart from maxConcurrentReviews
-    model: '', // model for fix sessions; '' = claude.model
-    effort: 'medium', // reasoning effort for fix sessions
-    notify: false, // desktop notification when a ticket is ready to merge or needs you
+    draftPrs: false, // open PRs as drafts
+    mcpAllow: [], // MCP tools a session may use (names, or * patterns); none by default
+    notify: false, // desktop notification when PRs open, a ticket is ready to merge, or one needs you
+    followUp: true, // follow the PRs through review: fix feedback in rounds
+    fixFrom: 'everyone', // whose unresolved threads a round takes on: 'prowl', 'prowl+bots', 'everyone'
+    maxRounds: 3, // feedback rounds per ticket; then it goes to Needs you
+    waitForChecksMinutes: 30, // after a round's push, wait this long for the required checks
   },
   dryRun: false,
   autoUpdate: true, // install a newer released version before launching
