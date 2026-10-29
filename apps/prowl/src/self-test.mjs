@@ -327,7 +327,7 @@ for (const c of ['curl -X POST https://api.github.com/repos/o/r/issues -d @body.
   'gh api graphql -f query="$(cat q.graphql)"', 'Q=$(cat m); gh api graphql -f query="$Q"', 'curl --config request.conf https://api.github.com/graphql',
   'curl -K req.conf', 'export CURL_HOME=.; curl https://api.github.com/graphql', 'wget -e post_data=x https://api.github.com/graphql',
   'curl -sK request.conf https://api.github.com/graphql', 'curl -sd @q.json https://api.github.com/graphql', 'curl -sXPOST https://api.github.com/repos/o/r/issues',
-  'curl -X POST --url=https://api.github.com/repos/o/r/issues/1/comments -d \'{"body":"done"}\'']) {
+  'curl -X POST --url=https://api.github.com/repos/o/r/issues/1/comments -d \'{"body":"done"}\'', 'curl -X POST --url="$API_URL" -d x']) {
   assert.equal(bash(c), 'deny', `denies a GitHub write: ${c}`);
 }
 for (const c of ['curl https://api.github.com/repos/o/r/pulls/1', 'curl -s -X GET https://api.github.com/repos/o/r', 'wget -qO- https://api.github.com/repos/o/r',
@@ -338,7 +338,8 @@ for (const c of ['curl https://api.github.com/repos/o/r/pulls/1', 'curl -s -X GE
 // Shell writes to either tracker, with reads allowed.
 for (const c of ['curl -X PATCH https://dev.azure.com/o/Shop/_apis/wit/workitems/1 -d @p.json', 'curl -d "{}" https://o.visualstudio.com/_apis/wit/workitems/1',
   'curl -X PUT https://example.atlassian.net/rest/api/3/issue/PROJ-123 --json \'{"update":{}}\'', 'wget --post-data=x https://other.atlassian.net/rest/api/3/issue',
-  'az boards work-item update --id 1 --fields System.Tags=x', 'az devops invoke --area wit --http-method PATCH', 'acli jira workitem edit --key PROJ-123']) {
+  'az boards work-item update --id 1 --fields System.Tags=x', 'az devops invoke --area wit --http-method PATCH', 'az devops invoke --area wit --http-method=PATCH --in-file p.json',
+  'acli jira workitem edit --key PROJ-123']) {
   assert.equal(bash(c), 'deny', `denies a tracker write: ${c}`);
 }
 for (const c of ['curl https://dev.azure.com/o/Shop/_apis/wit/workitems/1', 'curl -s https://example.atlassian.net/rest/api/3/issue/PROJ-123', 'az boards work-item show --id 1']) {
@@ -350,11 +351,12 @@ for (const c of ['echo x > /etc/x', 'echo x >> ~/outside.txt', 'ls | tee /etc/li
   'rm -rf /', 'echo $(echo x > /etc/y)', 'sh -c "echo > /etc/z"', 'echo x > $SOMEWHERE/out', 'cd / && rm -rf other', 'echo x > "$HOME/.bashrc"',
   "bash -lc 'rm -f /etc/notes.txt'", 'zsh -ec "echo > /etc/z"', `printf '%s' "$(rm -f /etc/notes.txt)"`, 'echo "`rm -f /etc/notes.txt`"', '(rm -rf /etc/other)', 'true && (cd / && rm -rf other)',
   'if rm -rf /etc/other; then echo cleaned; fi', 'while true; do rm -f /etc/x; done', '{ rm -rf /etc/other; }', 'if cd /etc; then rm -rf build; fi',
-  'command -- rm -rf /etc/other', 'env -i rm -f /etc/x']) {
+  'command -- rm -rf /etc/other', 'env -i rm -f /etc/x', 'cd -- /etc && rm -rf build', 'cd "$SOMEWHERE" && rm -rf build', 'env -u NODE_OPTIONS rm -rf /etc/other',
+  "env -S 'rm -rf /etc/other'"]) {
   assert.equal(bash(c), 'deny', `denies a write outside: ${c}`);
 }
 for (const c of ['echo x > notes.md', `echo x > ${path.join(briefDir, 'result.json')}`, 'cp a b', 'rm -rf build', 'mv a.js b.js', 'npm test 2>&1 | tee test.log',
-  `echo x > ${path.join(os.tmpdir(), 'prowl-scratch.txt')}`, '(cd sub && rm -rf build)', 'echo x > "$TMPDIR/x"', 'ls 2>&1 >/dev/null', "cat > notes.md <<'EOF'\nfoo > /etc/passwd\nEOF"]) {
+  `echo x > ${path.join(os.tmpdir(), 'prowl-scratch.txt')}`, '(cd sub && rm -rf build)', 'cd "$TMPDIR" && rm -rf scratch', 'cd -P sub && rm -rf build', 'echo x > "$TMPDIR/x"', 'ls 2>&1 >/dev/null', "cat > notes.md <<'EOF'\nfoo > /etc/passwd\nEOF"]) {
   assert.equal(bash(c), 'allow', `allows a write inside: ${c}`);
 }
 assert.equal(lex("a 'b; c' | d").length, 2, 'quotes keep ; and | inside one word');

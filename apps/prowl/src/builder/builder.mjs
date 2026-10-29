@@ -233,7 +233,27 @@ export function createBuilder(app, deps) {
    * is neither stranded In Development nor built twice; enter goes on with `retry`.
    */
   function unsure(w, ticket, e, retry) {
-    raise(w, 'conflict', `Prowl couldn't confirm its claim on ${ticket.key} (${e.message}). If no one else is working on it, enter goes on; s ends it and takes '${b().tags.inProgress}' off.`, { retry });
+    w.unsureOf = retry; // what enter goes on with, through reclaim()
+    const item = raise(w, 'conflict', `Prowl couldn't confirm its claim on ${ticket.key} (${e.message}). If no one else is working on it, enter goes on (claiming it again if it isn't '${b().tags.inProgress}'); s ends it and leaves the tags as they are.`, { retry: 'reclaim' });
+    item.keepTags = true; // the In Development there may be someone else's
+    save();
+  }
+
+  /** enter on an unconfirmed claim: the ticket In Development is taken as ours; one that isn't is claimed again. */
+  async function reclaim(w) {
+    const ticket = await trackerOf(w).readItem(cfg(), w.ref);
+    const held = tags().has(ticket.tags, b().tags.inProgress);
+    const then = w.unsureOf;
+    w.unsureOf = null;
+    if (then === 'round') {
+      w.roundClaimed = held; // not held: round() claims it as usual
+      return next(w, 'round');
+    }
+    if (held) return next(w, 'adopt');
+    w.ticket = ticket;
+    const claimed = await claim(ticket, w.source, w);
+    touch(w);
+    return claimed ? adoptOrRead(claimed) : undefined;
   }
 
   /** Switched off as it claimed `ticket`: puts back what the claim took off. */
@@ -682,7 +702,6 @@ export function createBuilder(app, deps) {
         await tracker.claim(cfg(), ticket, tags().owned, b().tags.inProgress);
       } catch (e) {
         if (e.lost) return back(`the ticket changed or someone else claimed it (${e.message})`);
-        w.roundClaimed = true; // enter goes on with the round, without claiming again
         return unsure(w, ticket, e, 'round');
       }
       if (!on()) {
@@ -913,7 +932,7 @@ export function createBuilder(app, deps) {
     if (['question', 'repos'].includes(item.kind)) return side.answer(item, '');
     const w = records().find(r => r.uid === item.recordId);
     if (!w) { side.state.needs = side.state.needs.filter(n => n.id !== item.id); return save(); }
-    return stopNow(w, 'ended by you');
+    return stopNow(w, 'ended by you', !item.keepTags);
   };
 
   /** t in Needs you: hands the ticket back with its start tag; not reclaimed until someone re-tags it. */
@@ -974,7 +993,7 @@ export function createBuilder(app, deps) {
   // ---- Driven by the shell ----
 
   const STEPS = { claim: claimQueued, adopt: adoptOrRead, read, turn, settle, repos, approve, publish, round, 'push-round': pushRound, ci, 'end-round': endRound,
-    retag: w => retagSoon(w, w.retagTo) };
+    retag: w => retagSoon(w, w.retagTo), reclaim };
 
   /** Once a second, on or off: tails sessions, settles ended turns, runs due steps. Claims and turns wait while off or paused. */
   side.tick = function tick() {
@@ -993,9 +1012,9 @@ export function createBuilder(app, deps) {
         }
         continue;
       }
-      if (['claim', 'turn', 'round'].includes(w.step) && (!on() || side.paused)) continue;
+      if (['claim', 'reclaim', 'turn', 'round'].includes(w.step) && (!on() || side.paused)) continue;
       // In dry run, saved work that would spend, push, post or tag waits; a queued claim ends itself.
-      if (['turn', 'round', 'publish', 'push-round', 'end-round', 'retag'].includes(w.step) && app.dryRun()) continue;
+      if (['reclaim', 'turn', 'round', 'publish', 'push-round', 'end-round', 'retag'].includes(w.step) && app.dryRun()) continue;
       if (w.stopRequested) { step(w, async x => stopNow(x)); continue; }
       step(w, STEPS[w.step]);
     }

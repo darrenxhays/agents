@@ -21,7 +21,7 @@ const DENY = [
   [/\bgh\s+repo\s+(?:create|delete|edit|fork|rename|archive|unarchive|sync|set-default|deploy-key|autolink)\b/, 'changing a repository'],
   [/\bgh\s+issue\s+(?:create|close|comment|delete|edit|lock|pin|reopen|transfer|unlock|unpin|develop)\b/, 'changing an issue'],
   [/\baz\s+boards\s+(?:work-item\s+(?:create|update|delete|relation\s+(?:add|remove))|(?:area|iteration)\s+\S+\s+(?:create|update|delete|add|remove))\b/, 'a write to the tracker: Prowl tags the ticket itself'],
-  [/\baz\s+devops\s+invoke\b[^;&|\n]*--http-method\s+['"]?(?:POST|PUT|PATCH|DELETE)\b/i, 'a write to the tracker: Prowl tags the ticket itself'],
+  [/\baz\s+devops\s+invoke\b[^;&|\n]*--http-method[\s=]+['"]?(?:POST|PUT|PATCH|DELETE)\b/i, 'a write to the tracker: Prowl tags the ticket itself'],
   [/\bacli\s+jira\s+\S+\s+(?:create|edit|delete|transition|assign|comment|link|clone|archive)\b/, 'a write to the tracker: Prowl tags the ticket itself'],
 ];
 const WRITE_METHOD = /(?:^|\s)(?:-X|--method)[\s=]*['"]?(?:POST|PATCH|PUT|DELETE)\b/i;
@@ -175,10 +175,16 @@ function writeTargets(cmd) {
   }
   let at = 0;
   const lead = ['sudo', 'env', 'command', 'builtin', 'exec', 'nohup', 'time', 'if', 'then', 'else', 'elif', 'while', 'until', 'do', '!', '{'];
-  const wrappers = ['sudo', 'env', 'command', 'builtin', 'exec', 'nohup', 'time'];
+  // Each wrapper's options, and those of them that take a value (env -u NAME, sudo -u user). env -S runs its value.
+  const wrappers = { sudo: /^-[ughpCDRTU]$/, env: /^(?:-[uCS]|--(?:unset|chdir|split-string))$/, command: null, builtin: null, exec: /^-a$/, nohup: null, time: /^-[of]$/ };
+  let split = null;
   while (at < words.length && (/^\w+=/.test(words[at].text) || lead.includes(words[at].text))) {
-    at++;
-    if (wrappers.includes(words[at - 1].text)) while (at < words.length && /^-/.test(words[at].text)) at++; // command -- rm, env -i rm
+    const wrapper = words[at++].text;
+    if (!Object.hasOwn(wrappers, wrapper)) continue;
+    while (at < words.length && /^-/.test(words[at].text)) { // command -- rm, env -i rm, env -u NAME rm
+      if (/^(?:-S|--split-string)$/.test(words[at].text)) split = words[at + 1];
+      at += wrappers[wrapper]?.test(words[at].text) ? 2 : 1;
+    }
   }
   const name = path.basename(words[at]?.text || '');
   const args = words.slice(at + 1);
@@ -188,10 +194,10 @@ function writeTargets(cmd) {
   else if (name === 'mv') targets.push(...operands); // a move also removes its sources
   else if (name === 'cp' && dirFlag >= 0) targets.push(args[dirFlag].text.includes('=') ? { ...args[dirFlag], text: args[dirFlag].text.split('=')[1] } : args[dirFlag + 1]);
   else if (name === 'cp' && operands.length > 1) targets.push(operands.at(-1));
-  return { name, words, args, targets: targets.filter(Boolean) };
+  return { name, words, args, split, targets: targets.filter(Boolean) };
 }
 
-/** `p` as an absolute path, or '' when it depends on something the shell expands. */
+/** `p` as an absolute path, or '' when it depends on something the shell expands (or on a cwd the fence lost: null). */
 function resolvePath(word, cwd) {
   let p = word.text;
   if (word.dynamic) {
@@ -199,6 +205,7 @@ function resolvePath(word, cwd) {
     if (/[$`]/.test(p)) return '';
   }
   if (p === '~' || p.startsWith('~/')) p = path.join(os.homedir(), p.slice(1));
+  if (cwd == null && !path.isAbsolute(p)) return '';
   return path.resolve(cwd, p);
 }
 
@@ -239,7 +246,7 @@ function webWrite(cmd, trackerHosts, text) {
       if (hostIn(host, trackerHosts)) return 'a write to the tracker: Prowl tags the ticket itself';
     }
   }
-  if (urls.some(u => u.dynamic && /^\$|^https?:\/\/\$/.test(u.text))) return "a web write to an address the fence can't read";
+  if (urls.some(u => u.dynamic && /^\$|^https?:\/\/\$/.test(u.text)) || cmd.some(t => t.dynamic && /^--url=(?:https?:\/\/)?\$/.test(t.text))) return "a web write to an address the fence can't read";
   return '';
 }
 
@@ -257,7 +264,7 @@ export function deniedCommand(command, ctx = {}) {
   }
   const roots = (ctx.roots || []).filter(Boolean);
   const writable = [...roots, os.tmpdir(), ...(process.platform === 'win32' ? [] : ['/tmp'])];
-  let cwd = ctx.cwd || process.cwd();
+  let cwd = ctx.cwd === null ? null : ctx.cwd || process.cwd(); // null: lost (cd to a dir the fence can't read)
   const cmds = lex(text);
   for (const sub of cmds.subs) {
     const why = deniedCommand(sub, { ...ctx, cwd });
@@ -267,12 +274,16 @@ export function deniedCommand(command, ctx = {}) {
   for (const cmd of cmds) {
     if (cmd[0]?.group) {
       if (cmd[0].group === '(') outer.push(cwd);
-      else cwd = outer.pop() ?? cwd;
+      else if (outer.length) cwd = outer.pop();
       continue;
     }
     const web = webWrite(cmd, ctx.trackerHosts || [], text);
     if (web) return web;
-    const { name, words, args, targets } = writeTargets(cmd);
+    const { name, words, args, split, targets } = writeTargets(cmd);
+    if (split) { // env -S 'rm -rf x': the value is the command
+      const why = deniedCommand(split.text, { ...ctx, cwd });
+      if (why) return why;
+    }
     const dashC = ['sh', 'bash', 'zsh', 'dash', 'ksh'].includes(name) ? args.findIndex(x => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(x.text)) : -1; // -c, -lc, -ec
     if (dashC >= 0 && args[dashC + 1]) {
       const why = deniedCommand(args[dashC + 1].text, { ...ctx, cwd });
@@ -306,7 +317,7 @@ export function deniedCommand(command, ctx = {}) {
         const why = k >= 0 && pushConfig(rest[k], rest.slice(k + 1).join(' '));
         if (why) return why;
       }
-      if (sub && ctx.alias && !GIT_BUILTINS.has(sub) && /\b(?:push|send-pack)\b/.test(ctx.alias(sub, dir) || '')) return `the git alias '${sub}', which pushes`;
+      if (sub && ctx.alias && !GIT_BUILTINS.has(sub) && /\b(?:push|send-pack)\b/.test(ctx.alias(sub, dir ?? ctx.cwd) || '')) return `the git alias '${sub}', which pushes`;
     }
     if (!roots.length) continue;
     for (const t of targets) {
@@ -315,7 +326,10 @@ export function deniedCommand(command, ctx = {}) {
       if (!file) return `writing to ${t.text}, a path the fence can't resolve`;
       if (!insideRoots(file, writable)) return `writing outside the session's folders (${file})`;
     }
-    if (name === 'cd' && args[0] && !args[0].dynamic) cwd = resolvePath(args[0], cwd) || cwd; // after if, then and the like too
+    if (name === 'cd') { // after if, then and the like too; cd -- dir, cd -P dir; a dir it can't read leaves the cwd unknown
+      const dir = args.find(a => a.dynamic || !/^-/.test(a.text));
+      cwd = dir ? resolvePath(dir, cwd) || null : os.homedir();
+    }
   }
   return '';
 }
