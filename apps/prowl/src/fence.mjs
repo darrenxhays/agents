@@ -171,20 +171,28 @@ function writeTargets(cmd) {
     if (target) i++;
     if (!target || t.op.startsWith('<')) continue; // input, or a heredoc
     if (t.op.endsWith('&') && /^(?:\d+|-)$/.test(target.text)) continue; // 2>&1: a descriptor, not a file
-    targets.push(target);
+    targets.push({ ...target, redirect: true }); // the shell opens it, where the shell is (not env -C's folder)
   }
   let at = 0;
   const lead = ['sudo', 'env', 'command', 'builtin', 'exec', 'nohup', 'time', 'if', 'then', 'else', 'elif', 'while', 'until', 'do', '!', '{'];
   // Each wrapper's options, and those of them that take a value (env -u NAME, sudo -u user). env -S runs its value.
   const wrappers = { sudo: /^-[ughpCDRTU]$/, env: /^(?:-[uCS]|--(?:unset|chdir|split-string))$/, command: null, builtin: null, exec: /^-a$/, nohup: null, time: /^-[of]$/ };
   let split = null;
+  let chdir = null; // env -C dir: where the command runs
   while (at < words.length && (/^\w+=/.test(words[at].text) || lead.includes(words[at].text))) {
     const wrapper = words[at++].text;
     if (!Object.hasOwn(wrappers, wrapper)) continue;
     while (at < words.length && /^-/.test(words[at].text)) { // command -- rm, env -i rm, env -u NAME rm
       if (/^(?:-S|--split-string)$/.test(words[at].text)) split = words[at + 1];
+      if (wrapper === 'env' && /^(?:-C|--chdir)$/.test(words[at].text)) chdir = words[at + 1];
+      if (wrapper === 'env' && words[at].text.startsWith('--chdir=')) chdir = { ...words[at], text: words[at].text.slice(8) };
       at += wrappers[wrapper]?.test(words[at].text) ? 2 : 1;
     }
+  }
+  if (split) {
+    // env -S 'rm -rf' x: the split string and the words after it make one command line.
+    const quote = x => (x.dynamic ? `"${x.text.replace(/["\\]/g, '\\$&')}"` : `'${x.text.replace(/'/g, "'\\''")}'`);
+    return { name: '', words, args: [], chdir, split: [split.text, ...words.slice(at).map(quote)].join(' '), targets: targets.filter(Boolean) };
   }
   const name = path.basename(words[at]?.text || '');
   const args = words.slice(at + 1);
@@ -194,7 +202,7 @@ function writeTargets(cmd) {
   else if (name === 'mv') targets.push(...operands); // a move also removes its sources
   else if (name === 'cp' && dirFlag >= 0) targets.push(args[dirFlag].text.includes('=') ? { ...args[dirFlag], text: args[dirFlag].text.split('=')[1] } : args[dirFlag + 1]);
   else if (name === 'cp' && operands.length > 1) targets.push(operands.at(-1));
-  return { name, words, args, split, targets: targets.filter(Boolean) };
+  return { name, words, args, chdir, split: '', targets: targets.filter(Boolean) };
 }
 
 /** `p` as an absolute path, or '' when it depends on something the shell expands (or on a cwd the fence lost: null). */
@@ -279,25 +287,26 @@ export function deniedCommand(command, ctx = {}) {
     }
     const web = webWrite(cmd, ctx.trackerHosts || [], text);
     if (web) return web;
-    const { name, words, args, split, targets } = writeTargets(cmd);
+    const { name, words, args, chdir, split, targets } = writeTargets(cmd);
+    const here = chdir ? resolvePath(chdir, cwd) || null : cwd; // where this one command runs
     if (split) { // env -S 'rm -rf x': the value is the command
-      const why = deniedCommand(split.text, { ...ctx, cwd });
+      const why = deniedCommand(split, { ...ctx, cwd: here });
       if (why) return why;
     }
     const dashC = ['sh', 'bash', 'zsh', 'dash', 'ksh'].includes(name) ? args.findIndex(x => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(x.text)) : -1; // -c, -lc, -ec
     if (dashC >= 0 && args[dashC + 1]) {
-      const why = deniedCommand(args[dashC + 1].text, { ...ctx, cwd });
+      const why = deniedCommand(args[dashC + 1].text, { ...ctx, cwd: here });
       if (why) return why;
     }
     if (['sh', 'bash', 'zsh', 'dash', 'ksh'].includes(name) && dashC < 0) {
       for (const body of cmd.bodies || []) { // bash <<'SH' … SH: the heredoc is the script
-        const why = deniedCommand(body, { ...ctx, cwd });
+        const why = deniedCommand(body, { ...ctx, cwd: here });
         if (why) return why;
       }
     }
     if (name === 'git') {
       let i = 0; // in git's own words, after env, command and the like
-      let dir = cwd; // the alias is looked up where git runs: -C moves it
+      let dir = here; // the alias is looked up where git runs: -C moves it
       while (args[i] && /^-/.test(args[i].text)) {
         if (args[i].text === '-C' && args[i + 1]) dir = resolvePath(args[i + 1], dir) || dir;
         if (args[i].text === '-c' && args[i + 1]) { // -c 'alias.x=push …', -c remote.origin.pushurl=…
@@ -317,12 +326,15 @@ export function deniedCommand(command, ctx = {}) {
         const why = k >= 0 && pushConfig(rest[k], rest.slice(k + 1).join(' '));
         if (why) return why;
       }
-      if (sub && ctx.alias && !GIT_BUILTINS.has(sub) && /\b(?:push|send-pack)\b/.test(ctx.alias(sub, dir ?? ctx.cwd) || '')) return `the git alias '${sub}', which pushes`;
+      if (sub && ctx.alias && !GIT_BUILTINS.has(sub)) {
+        if (dir == null) return `the git command '${sub}', which may be an alias, in a folder the fence can't read`;
+        if (/\b(?:push|send-pack)\b/.test(ctx.alias(sub, dir) || '')) return `the git alias '${sub}', which pushes`;
+      }
     }
     if (!roots.length) continue;
     for (const t of targets) {
       if (/^\/dev\/(?:null|stdout|stderr|tty|fd\/\d+)$/.test(t.text)) continue;
-      const file = resolvePath(t, cwd);
+      const file = resolvePath(t, t.redirect ? cwd : here);
       if (!file) return `writing to ${t.text}, a path the fence can't resolve`;
       if (!insideRoots(file, writable)) return `writing outside the session's folders (${file})`;
     }
