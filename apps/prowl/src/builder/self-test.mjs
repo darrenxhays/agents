@@ -593,8 +593,38 @@ async function builds(assert) {
   assert.ok(!h.session.turns.length && h.logs.some(l => /turns running now may spend the rest of today's cap/.test(l)), 'none left: it waits');
   h.done();
 
-  // Validation: an entry that isn't an object is an unusable result, not a crash.
+  // Validation: an entry that isn't an object, or a plan that isn't a path, is an unusable result, not a crash.
   assert.match(rules.validateBuild({ status: 'needs-approval', plan: 'plan.md', openQuestions: [null] }, '/'), /openQuestions must be a list of objects/);
+  assert.match(rules.validateBuild({ status: 'needs-approval', plan: {}, openQuestions: [] }, '/'), /plan must be text/);
+
+  // A secret in any commit pushed stops the push, even when a later commit takes it out again.
+  h = harness('ado', (w, prompt) => {
+    if (!prompt.startsWith('approve')) return twoRepoBuild()(w, prompt);
+    const commits = ['octo-org/web', 'octo-org/api'].map(repo => {
+      const wt = worktreeOf(w, repo);
+      commit(wt, { 'src/config.js': `export const token = 'ghp_${'a'.repeat(36)}';\n` }, `${w.key}: config`);
+      return { repo, sha: commit(wt, { 'src/config.js': 'export const token = process.env.TOKEN;\n' }, `${w.key}: read the token from the environment`) };
+    });
+    return { result: { status: 'done', commits, prs: commits.map(c => ({ repo: c.repo, title: `${w.key}: Config` })), checks: [] } };
+  });
+  await h.poll();
+  assert.match(h.b.needs()[0]?.question || '', /a GitHub token/, 'a secret in an earlier commit');
+  assert.ok(!remoteHas(h.bares['octo-org/web'], branch), 'nothing pushed');
+  h.done();
+
+  // Dry run, switched on while a session ran: its result waits; nothing is pushed, opened or tagged.
+  h = harness('ado', (w, prompt) => { if (prompt.startsWith('approve')) h.app.dryRun = () => true; return twoRepoBuild()(w, prompt); });
+  await h.poll();
+  assert.deepEqual([h.b.history()[0].step, h.gh.prs.length, remoteHas(h.bares['octo-org/web'], branch)], ['publish', 0, false], 'dry run: publishing waits');
+  h.done();
+
+  // --work on a ticket someone is working on already (In Development) builds nothing.
+  h = harness('ado', twoRepoBuild());
+  h.server.setTags(123, ['Web', 'In Development']);
+  await h.b.enqueue('AB#123', 'manual');
+  await h.b.drain();
+  assert.deepEqual([h.b.history()[0].status, h.session.turns.length, h.server.tags(123)], ['ended', 0, ['Web', 'In Development']], "--work leaves another's claim alone");
+  h.done();
 
   // Stopped while the tracker is down: In Development comes off once the tracker answers again.
   let down = false;
@@ -881,6 +911,52 @@ async function feedback(assert) {
   await h.poll();
   assert.ok(h.session.turns.some(t => t.prompt.startsWith('checks failed:\nocto-org/web#1: build')), 'failing required checks: one more turn, with the log');
   assert.deepEqual([h.b.needs()[0]?.kind, h.gh.prs[0].replies.length], ['checks', 2], 'failing again: Needs you, and no reply posted twice');
+  const repairs = () => h.session.turns.filter(t => t.prompt.startsWith('checks failed:')).length;
+  h.b.answer(h.b.needs()[0], '');
+  await h.b.drain();
+  assert.deepEqual([repairs(), h.b.needs()[0]?.kind, h.server.tags(123).includes('In Development')], [2, 'checks', true], 'enter checks again, with one more turn; never Ready for Review while they fail');
+  h.done();
+
+  // A round whose preparation fails after its claim keeps the claim: the retry goes on with it.
+  h = harness('ado', roundScript());
+  await h.poll();
+  addFeedback(h, h.gh.prs[0].url);
+  h.server.setTags(123, ['Web', 'Reviewed']);
+  const facts = h.gh.prFacts;
+  let failed = false;
+  h.gh.prFacts = async pr => { const x = h.b.history()[0]; if (x.step === 'round' && x.roundClaimed && !failed) { failed = true; throw new Error('502 Bad Gateway'); } return facts(pr); };
+  await h.poll();
+  assert.deepEqual([failed, h.b.history()[0].rounds], [true, 0]);
+  h.b.history()[0]._retryAt = 0;
+  await h.b.drain();
+  assert.equal(h.b.history()[0].rounds, 1, 'the retry starts the round');
+  h.done();
+
+  // Feedback posted while a round runs is the next round's, not lost when the round ends.
+  h = harness('ado', roundScript(() => {
+    h.gh.prs.find(p => p.repo === 'octo-org/api').reviews.push({ user: 'lead', state: 'CHANGES_REQUESTED', at: new Date().toISOString(), body: 'And the API, please.' });
+  }));
+  await h.poll();
+  const first = addFeedback(h, h.gh.prs.find(p => p.repo === 'octo-org/web').url);
+  h.server.setTags(123, ['Web', 'Reviewed']);
+  await h.poll();
+  assert.equal(h.b.history()[0].rounds, 1);
+  for (const t of first.threads) t.resolved = true; // the first round's feedback, settled
+  first.reviews.length = 0;
+  h.server.setTags(123, ['Web', 'Reviewed']);
+  await h.poll();
+  assert.equal(h.b.history()[0].rounds, 2, 'a second round for the feedback posted during the first');
+  h.done();
+
+  // A push URL changed after the round started: nothing pushed there.
+  h = harness('ado', roundScript(p => git(p.clone, 'config', 'remote.origin.pushurl', 'https://example.invalid/someone/web.git')));
+  await h.poll();
+  addFeedback(h, h.gh.prs[0].url);
+  h.server.setTags(123, ['Web', 'Reviewed']);
+  const before = execFileSync('git', ['ls-remote', h.bares['octo-org/web'], `refs/heads/${h.gh.prs[0].head}`], { encoding: 'utf8' });
+  await h.poll();
+  assert.equal(execFileSync('git', ['ls-remote', h.bares['octo-org/web'], `refs/heads/${h.gh.prs[0].head}`], { encoding: 'utf8' }), before, 'not pushed');
+  assert.ok(h.logs.some(l => /pushes to https:\/\/example\.invalid\/someone\/web\.git/.test(l)) && !h.gh.prs[0].replies.length);
   h.done();
 
   // The same on Jira: a two-repo build, a round another copy of Prowl claims first, then the round once it's done.

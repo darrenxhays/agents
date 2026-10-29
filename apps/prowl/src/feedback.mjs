@@ -53,6 +53,7 @@ const ACTIONS = ['fix', 'dispute', 'ask', 'park'];
 export function validateFeedback(r) {
   if (!r || typeof r !== 'object' || Array.isArray(r)) return 'it is not a JSON object';
   if (!['fixed', 'partial', 'blocked'].includes(r.status)) return 'status must be fixed, partial or blocked';
+  if (r.summary != null && typeof r.summary !== 'string') return 'summary must be text';
   for (const k of ['items', 'commits', 'questions']) if ((k === 'items' || r[k] != null) && (!Array.isArray(r[k]) || r[k].some(x => !x || typeof x !== 'object'))) return `${k} must be a list of objects`;
   const bad = r.items.find(it => !ACTIONS.includes(it?.action));
   if (bad) return `item ${bad?.thread || bad?.finding || '?'} has no action (fix, dispute, ask or park)`;

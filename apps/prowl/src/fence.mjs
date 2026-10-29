@@ -114,6 +114,10 @@ export function lex(text) {
       Object.assign(w(), { dynamic: true }).text += c;
     } else if (c === '#' && !word) {
       while (i + 1 < text.length && text[i + 1] !== '\n') i++;
+    } else if ((c === '(' || c === ')') && !word) {
+      next(); // a subshell: ( cmd ) runs cmd
+    } else if (c === ')' && word) {
+      next();
     } else if (c === '\n' || c === ';' || c === '|' || (c === '&' && text[i + 1] !== '>')) {
       next();
       if ((c === '&' || c === '|') && text[i + 1] === c) i++;
@@ -253,7 +257,7 @@ export function deniedCommand(command, ctx = {}) {
       const why = deniedCommand(args[dashC + 1].text, { ...ctx, cwd });
       if (why) return why;
     }
-    if (name === 'git' && ctx.alias) {
+    if (name === 'git') {
       let i = 0; // in git's own words, after env, command and the like
       let dir = cwd; // the alias is looked up where git runs: -C moves it
       while (args[i] && /^-/.test(args[i].text)) {
@@ -261,7 +265,11 @@ export function deniedCommand(command, ctx = {}) {
         i += /^(?:-[Cc]|--(?:git-dir|work-tree|namespace|exec-path|config-env))$/.test(args[i].text) ? 2 : 1;
       }
       const sub = args[i]?.text;
-      if (sub && !GIT_BUILTINS.has(sub) && /\b(?:push|send-pack)\b/.test(ctx.alias(sub, dir) || '')) return `the git alias '${sub}', which pushes`;
+      const then = args[i + 1]?.text;
+      // The same as DENY, for options the regexes can't step over (a quoted -C "My App", say).
+      if (sub === 'push' || sub === 'send-pack' || (['subtree', 'lfs'].includes(sub) && then === 'push')) return 'pushing: Prowl pushes the work itself once it has checked it';
+      if (sub === 'remote' && /^(?:add|remove|rm|rename|set-url|set-head|set-branches|prune|update)$/.test(then || '')) return 'changing git remotes';
+      if (sub && ctx.alias && !GIT_BUILTINS.has(sub) && /\b(?:push|send-pack)\b/.test(ctx.alias(sub, dir) || '')) return `the git alias '${sub}', which pushes`;
     }
     if (!roots.length) continue;
     for (const t of targets) {

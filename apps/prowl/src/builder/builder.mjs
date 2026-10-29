@@ -493,7 +493,7 @@ export function createBuilder(app, deps) {
         ancestor: await succeeds(rec.worktree, 'merge-base', '--is-ancestor', base(rec), 'HEAD'),
         onBranch: onBranch ? (await git(rec.worktree, 'symbolic-ref', '--short', 'HEAD').catch(() => '')).trim() === rec.branch : true,
         numstat: await git(rec.worktree, 'diff', '--numstat', '-z', `${base(rec)}..HEAD`), // -z: paths unquoted
-        diff: await git(rec.worktree, 'diff', '-U0', `${base(rec)}..HEAD`),
+        diff: await git(rec.worktree, 'log', '-p', '-U0', '--format=', `${base(rec)}..HEAD`), // every commit pushed, not just the end state
       }, b());
       if (failed[0]?.kind === 'moved') return { moved: `${rec.repo}: ${failed[0].text}` };
       if (failed.length) throw new NeedsYou('guard', `Prowl didn't push ${w.key} to ${rec.repo}: ${failed.map(x => x.text).join('; ')}.`, { retry: 'continue' });
@@ -671,14 +671,16 @@ export function createBuilder(app, deps) {
         Object.assign(w, { status: 'following', step: null });
         return release(w, ticket);
       }
+      w.roundClaimed = true; // ours until the round ends: a retry of this step doesn't claim it again
+      touch(w);
     }
-    w.roundClaimed = false;
     Object.assign(w, { status: 'active', claimedRoundAt: Date.now() });
     if (w.rounds >= b().maxRounds) throw new NeedsYou('cap', `Feedback rounds per ticket reached (${b().maxRounds}) for ${w.key}: fix the rest yourself, or raise the cap.`, { retry: 'round' });
     if (rules.spendLevel(rules.ticketSpend(records(), w.key), b().ticketBudgetUsd) === 'over') throw new NeedsYou('cap', `Spend cap per ticket reached ($${b().ticketBudgetUsd}) for ${w.key}.`, { retry: 'round' });
     const n = w.rounds + 1; // counted once the round is ready to start, so a retry doesn't count it twice
     const prs = [];
     const answersText = [];
+    const collectedAt = Date.now(); // feedback after this is the next round's
     for (const pr of w.roundPrs || []) {
       const facts = await gh.prFacts(pr);
       if (facts.state !== 'OPEN' || prRefusal(facts, pr, app.me, b().protectedBranches)) continue;
@@ -694,7 +696,7 @@ export function createBuilder(app, deps) {
         defaultBranch: facts.defaultBranch });
     }
     if (!prs.length) {
-      Object.assign(w, { status: 'following', step: 'end-round' });
+      Object.assign(w, { status: 'following', step: 'end-round', roundClaimed: false });
       touch(w);
       return undefined;
     }
@@ -704,11 +706,11 @@ export function createBuilder(app, deps) {
     fs.writeFileSync(feedbackPath, brief.feedbackMd({ ticket: w, round: n, maxRounds: b().maxRounds, prs, answers }));
     w.rounds = n;
     w.round = {
-      n, startedAt: Date.now(), feedbackPath,
+      n, startedAt: Date.now(), collectedAt, feedbackPath,
       prs: prs.map(p => ({ repo: p.repo, number: p.number, url: p.url, title: p.title, branch: p.branch, headSha: p.headSha, worktree: p.worktree, clone: p.clone,
         defaultBranch: p.defaultBranch, threads: p.threads.map(t => ({ id: t.id, commentId: t.commentId, url: t.url })) })),
     };
-    Object.assign(w, { sessionId: randomUUID(), sessionStarted: false, sessionCostUsd: 0, turnKind: 'round', checkFails: 0, ciFails: 0, invalidAsked: false });
+    Object.assign(w, { sessionId: randomUUID(), sessionStarted: false, sessionCostUsd: 0, turnKind: 'round', checkFails: 0, ciFails: 0, invalidAsked: false, roundClaimed: false });
     log('ok', `${w.key}: feedback round ${w.rounds} on ${prs.map(p => prName(p)).join(', ')}`);
     return next(w, 'turn', brief.feedbackPrompt({ briefDir: w.briefDir, feedbackPath }));
   }
@@ -808,7 +810,7 @@ export function createBuilder(app, deps) {
     }
     if (failing.length) {
       w.ciFails = (w.ciFails || 0) + 1;
-      if (w.ciFails > 1) throw new NeedsYou('checks', `Required checks still fail on ${failing.map(f => prName(f.p)).join(', ')} after one more turn.`, { retry: 'end-round' });
+      if (w.ciFails > 1) throw new NeedsYou('checks', `Required checks still fail on ${failing.map(f => prName(f.p)).join(', ')} after one more turn.`, { retry: 'ci' });
       const out = [];
       for (const f of failing) out.push({ repo: prName(f.p), command: f.bad.map(c => `${c.name} (${c.link || 'no link'})`).join(', '), output: await gh.failedLog(f.bad[0]?.link) });
       log('warn', `${w.key}: required checks failed on ${failing.map(f => prName(f.p)).join(', ')}; one more session turn`);
@@ -823,7 +825,8 @@ export function createBuilder(app, deps) {
     checkStop(w);
     await trackerOf(w).retag(cfg(), w.ref, tags().owned, b().tags.done);
     if (w.round) await tidy(w, [], w.round.prs);
-    Object.assign(w, { status: 'following', step: null, lastActivityAt: Date.now(), round: null, roundPrs: [] });
+    // Feedback since the round collected its own (posted during its session or CI wait, say) is still due.
+    Object.assign(w, { status: 'following', step: null, lastActivityAt: w.round?.collectedAt || Date.now(), round: null, roundPrs: [] });
     touch(w);
     log('ok', `${w.key}: marked '${b().tags.done}'${w.rounds ? ` after feedback round ${w.rounds}` : ''}; following its PRs`);
   }
@@ -871,6 +874,7 @@ export function createBuilder(app, deps) {
       w.preFailures = 0;
       if (!item.retry || item.retry === 'continue') next(w, 'turn', brief.resume.continue(text));
       else next(w, item.retry);
+      if (item.retry === 'ci') { w.ciSince = Date.now(); touch(w); } // checks again, with the wait from now
       return undefined;
     }
     if (!itemsOf(w).length) resumeWithCollected(w);
@@ -920,6 +924,12 @@ export function createBuilder(app, deps) {
       return log('info', `${w.key}: would ${w.source === 'follow' ? 'follow its PRs' : `build "${w.title}"`} (dry run)`);
     }
     const ticket = await trackerOf(w).readItem(cfg(), w.ref);
+    if (tags().has(ticket.tags, b().tags.inProgress)) {
+      // Someone (another copy of Prowl, say) is working on it now.
+      Object.assign(w, { status: 'ended', step: null, endedAt: Date.now(), note: `it is '${b().tags.inProgress}' already` });
+      touch(w);
+      return log('warn', `${w.key}: not ${w.source === 'follow' ? 'followed' : 'built'}: it is '${b().tags.inProgress}' already, so someone is working on it`);
+    }
     if (w.source === 'follow') {
       w.ticket = ticket;
       return adoptOrRead(w);
@@ -958,7 +968,8 @@ export function createBuilder(app, deps) {
         continue;
       }
       if (['claim', 'turn', 'round'].includes(w.step) && (!on() || side.paused)) continue;
-      if (['turn', 'round'].includes(w.step) && app.dryRun()) continue; // saved work waits; a queued claim ends itself in dry run
+      // In dry run, saved work that would spend, push, post or tag waits; a queued claim ends itself.
+      if (['turn', 'round', 'publish', 'push-round', 'end-round', 'retag'].includes(w.step) && app.dryRun()) continue;
       if (w.stopRequested) { step(w, async x => stopNow(x)); continue; }
       step(w, STEPS[w.step]);
     }

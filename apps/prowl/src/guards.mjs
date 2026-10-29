@@ -52,7 +52,7 @@ export const SECRET_PATTERNS = [
  * What stops a push: [{ kind, text }]. `moved` (the remote branch isn't at `expected`, the commit Prowl last saw
  * there, or '' for a branch that doesn't exist yet) drops the push; any other failure goes to Needs you.
  * `ancestor`: `base` is an ancestor of HEAD. `onBranch`: HEAD is the tip of the branch being pushed. `numstat` (-z)
- * and `diff` (-U0) cover everything from `base`.
+ * covers everything from `base`, and `diff` (-U0) each commit since it, so a secret a later commit removes still counts.
  */
 export function guardFailures({ base, head, ancestor, onBranch = true, remote, expected = base, numstat, diff }, { maxChangedLines, protectedPaths = [] }) {
   const out = [];

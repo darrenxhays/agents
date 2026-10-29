@@ -29,15 +29,17 @@ export async function migrateFixes(cfg, state, deps) {
   const notes = [];
   let stopped = 0;
   let kept = 0;
+  const live = new Set(); // sessions whose exit isn't confirmed: their worktrees stay
   for (const fix of state.fixes || []) {
-    if (ENDED.includes(fix.status)) continue;
+    // Ended ones too: 2.11.3 marked a fix taken over as stopped as soon as it signalled it, before it had exited.
     if (fix.pid && isRunning(fix)) {
-      if (!(await stop(fix.pid))) { kept++; continue; } // not confirmed: keep its status, pid and worktree, and try again next launch
+      if (!(await stop(fix.pid))) { kept++; live.add(fix); continue; } // not confirmed: keep its status, pid and worktree, and try again next launch
       stopped++;
     }
+    if (ENDED.includes(fix.status)) continue;
     Object.assign(fix, { status: 'stopped', note: 'Fix my PRs was removed in 2.12.0; nothing was pushed', endedAt: fix.endedAt || Date.now() });
   }
-  for (const fix of (state.fixes || []).filter(f => f.worktree && ENDED.includes(f.status))) {
+  for (const fix of (state.fixes || []).filter(f => f.worktree && ENDED.includes(f.status) && !live.has(f))) {
     if (!fs.existsSync(fix.worktree)) continue;
     await remove(path.join(cfg.workDir, fix.pr.repo.split('/')[1]), fix.worktree).catch(() => fs.rmSync(fix.worktree, { recursive: true, force: true }));
   }

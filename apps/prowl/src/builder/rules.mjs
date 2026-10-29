@@ -97,6 +97,8 @@ export function validateBuild(r, briefDir) {
   for (const k of ['repos', 'changes', 'openQuestions', 'commits', 'prs', 'checks']) if (!isList(r[k]) || r[k]?.some(x => !x || typeof x !== 'object')) return `${k} must be a list of objects`;
   const badRepo = [...(r.repos || []), ...(r.changes || []), ...(r.commits || []), ...(r.prs || []), ...(r.checks || [])].find(x => !REPO.test(x?.repo || ''));
   if (badRepo) return `"${badRepo?.repo || ''}" isn't a repo, as owner/name`;
+  const notText = ['plan', 'investigation', 'summary', 'reason'].find(k => r[k] != null && typeof r[k] !== 'string');
+  if (notText) return `${notText} must be text`;
   if (r.status === 'needs-repos' && !r.repos?.length) return 'needs-repos lists no repos';
   if (r.status === 'needs-approval') {
     if (!r.plan || !fs.existsSync(path.resolve(briefDir, r.plan))) return `the plan file ${r.plan || '(none)'} isn't in the brief folder`;

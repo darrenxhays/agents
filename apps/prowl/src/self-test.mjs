@@ -311,6 +311,7 @@ const aliasIn = (name, dir) => (name === 'ship' && dir === other ? 'push --force
 const inDir = command => fenceDecision({ cwd: wt, tool_name: 'Bash', tool_input: { command } }, workEnv, aliasIn)?.hookSpecificOutput.permissionDecision || 'allow';
 assert.deepEqual([inDir(`git -C ${other} ship`), inDir('git ship'), inDir(`env git -C ${other} ship`)], ['deny', 'allow', 'deny'], "a pushing alias in -C's repo");
 assert.equal(bash(`git -C ${wt} -P push --force origin HEAD:main`), 'deny', 'a push after a short global option');
+assert.deepEqual([bash(`git -C "${wt}/My App" push --force origin HEAD:main`), bash(`git -C "${wt}/My App" remote set-url origin x`)], ['deny', 'deny'], 'after a quoted path with a space');
 // curl and wget writes to GitHub's API, and GraphQL the fence can't read; reads are allowed.
 for (const c of ['curl -X POST https://api.github.com/repos/o/r/issues -d @body.json', 'curl -sS -XPATCH https://api.github.com/repos/o/r/pulls/1 --data "{}"',
   'curl -H "Authorization: bearer x" https://api.github.com/graphql -d \'{"query":"query{viewer{login}}"}\'', 'wget --method=DELETE https://api.github.com/repos/o/r/git/refs/heads/b',
@@ -338,11 +339,11 @@ for (const c of ['curl https://dev.azure.com/o/Shop/_apis/wit/workitems/1', 'cur
 // (The test's own folders are in the temp folder, which sessions may write in, so "outside" is the home folder or /etc here.)
 for (const c of ['echo x > /etc/x', 'echo x >> ~/outside.txt', 'ls | tee /etc/listing', `cp a ${path.join(os.homedir(), 'b')}`, 'mv notes.md ~/notes.md', 'rm -rf ~',
   'rm -rf /', 'echo $(echo x > /etc/y)', 'sh -c "echo > /etc/z"', 'echo x > $SOMEWHERE/out', 'cd / && rm -rf other', 'echo x > "$HOME/.bashrc"',
-  "bash -lc 'rm -f /etc/notes.txt'", 'zsh -ec "echo > /etc/z"', `printf '%s' "$(rm -f /etc/notes.txt)"`, 'echo "`rm -f /etc/notes.txt`"']) {
+  "bash -lc 'rm -f /etc/notes.txt'", 'zsh -ec "echo > /etc/z"', `printf '%s' "$(rm -f /etc/notes.txt)"`, 'echo "`rm -f /etc/notes.txt`"', '(rm -rf /etc/other)', 'true && (cd / && rm -rf other)']) {
   assert.equal(bash(c), 'deny', `denies a write outside: ${c}`);
 }
 for (const c of ['echo x > notes.md', `echo x > ${path.join(briefDir, 'result.json')}`, 'cp a b', 'rm -rf build', 'mv a.js b.js', 'npm test 2>&1 | tee test.log',
-  `echo x > ${path.join(os.tmpdir(), 'prowl-scratch.txt')}`, 'echo x > "$TMPDIR/x"', 'ls 2>&1 >/dev/null', "cat > notes.md <<'EOF'\nfoo > /etc/passwd\nEOF"]) {
+  `echo x > ${path.join(os.tmpdir(), 'prowl-scratch.txt')}`, '(cd sub && rm -rf build)', 'echo x > "$TMPDIR/x"', 'ls 2>&1 >/dev/null', "cat > notes.md <<'EOF'\nfoo > /etc/passwd\nEOF"]) {
   assert.equal(bash(c), 'allow', `allows a write inside: ${c}`);
 }
 assert.equal(lex("a 'b; c' | d").length, 2, 'quotes keep ; and | inside one word');
@@ -710,6 +711,10 @@ let saved = [];
 await migrateFixes(mc, st, deps(false, saved));
 assert.deepEqual([st.fixes[0].status, st.fixes[0].pid, fs.existsSync(migWt)], ['fixing', 4242, true], 'unconfirmed exit: kept for the next launch');
 assert.ok(needsMigration(mc, st, migHome), 'and the migration runs again');
+st = migState();
+st.fixes[0].status = 'stopped'; // 2.11.3's take-over: signalled, and marked stopped at once
+await migrateFixes(migCfg(), st, deps(false, []));
+assert.ok(fs.existsSync(migWt), 'taken over but still running: its worktree stays');
 // Confirmed: marked stopped, nothing pushed, its worktree removed; the settings moved to the backup.
 st = migState();
 mc = migCfg();
