@@ -172,6 +172,9 @@ function resolvePath(word, cwd) {
 const URLS = /\b(?:https?:\/\/)?((?:[\w-]+\.)+[a-z]{2,})(?::\d+)?(\/[^\s'"]*)?/gi;
 const CURL_WRITE = /(?:^|\s)(?:-X\s*|--request[\s=]+)['"]?(?:POST|PUT|PATCH|DELETE)\b|(?:^|\s)(?:-d|-F|-T|--data[\w-]*|--form[\w-]*|--upload-file|--json)(?:[\s=]|$|(?<=-[dFT])\S)/i;
 const WGET_WRITE = /(?:^|\s)--(?:method[\s=]+['"]?(?:POST|PUT|PATCH|DELETE)\b|post-data|post-file|body-data|body-file)/i;
+// Options a config file adds, which can make any call a write: curl's -K, and wget's --config, or a -e that sets them.
+const UNREAD_CONFIG = { curl: /(?:^|\s)(?:-K|--config\b)/, wget: /(?:^|\s)--config\b|(?:^|\s)(?:-e|--execute)[\s=]*['"]?(?:method|post|body|header|input|config)/i };
+const CONFIG_ENV = /\b(?:CURL_HOME|XDG_CONFIG_HOME|WGETRC)\b/; // where curl and wget look for their config files
 const PS_WRITE = /-Method\s+['"]?(?:Post|Put|Patch|Delete)\b|-Body\b|-InFile\b/i;
 
 /** True when `host` is GitHub's API (api.github.com, or GitHub Enterprise's /api/) and `route` the path after it. */
@@ -182,11 +185,15 @@ const hostIn = (host, list) => list.some(h => {
   return want.startsWith('*.') ? host.toLowerCase().endsWith(want.slice(1)) : host.toLowerCase() === want;
 });
 
-/** Why a curl, wget or PowerShell web call writes to GitHub or the tracker, or ''. Reads (GETs) are allowed. */
-function webWrite(cmd, trackerHosts) {
+/**
+ * Why a curl, wget or PowerShell web call writes to GitHub or the tracker, or ''. Reads (GETs) are allowed. `text` is
+ * the whole command line, where an earlier command may have pointed curl or wget at another config file.
+ */
+function webWrite(cmd, trackerHosts, text) {
   const raw = cmd.map(t => t.op || t.text).join(' ');
   const tool = /(?:^|[\s/])(curl|wget)(?:\.exe)?\s/i.exec(` ${raw} `)?.[1]?.toLowerCase() || (/\b(?:Invoke-RestMethod|Invoke-WebRequest|irm|iwr)\b/i.test(raw) ? 'ps' : '');
   if (!tool) return '';
+  if (tool !== 'ps' && (UNREAD_CONFIG[tool].test(raw) || CONFIG_ENV.test(text))) return `${tool} options from a config file the fence can't read`;
   const writes = tool === 'curl' ? CURL_WRITE.test(raw) : tool === 'wget' ? WGET_WRITE.test(raw) : PS_WRITE.test(raw);
   if (!writes) return '';
   const urls = cmd.filter(t => !t.op && !t.text.startsWith('-'));
@@ -221,19 +228,23 @@ export function deniedCommand(command, ctx = {}) {
     if (why) return why;
   }
   for (const cmd of cmds) {
-    const web = webWrite(cmd, ctx.trackerHosts || []);
+    const web = webWrite(cmd, ctx.trackerHosts || [], text);
     if (web) return web;
     const { name, words, targets } = writeTargets(cmd);
-    const script = ['sh', 'bash', 'zsh'].includes(name) && words[words.findIndex(x => x.text === '-c') + 1];
-    if (script && words.some(x => x.text === '-c')) {
-      const why = deniedCommand(script.text, { ...ctx, cwd });
+    const dashC = ['sh', 'bash', 'zsh', 'dash', 'ksh'].includes(name) ? words.findIndex(x => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(x.text)) : -1; // -c, -lc, -ec
+    if (dashC > 0 && words[dashC + 1]) {
+      const why = deniedCommand(words[dashC + 1].text, { ...ctx, cwd });
       if (why) return why;
     }
     if (name === 'git' && ctx.alias) {
       let i = 1;
-      while (words[i] && /^-/.test(words[i].text)) i += /^-[Cc]$/.test(words[i].text) ? 2 : 1;
+      let dir = cwd; // the alias is looked up where git runs: -C moves it
+      while (words[i] && /^-/.test(words[i].text)) {
+        if (words[i].text === '-C' && words[i + 1]) dir = resolvePath(words[i + 1], dir) || dir;
+        i += /^-[Cc]$/.test(words[i].text) ? 2 : 1;
+      }
       const sub = words[i]?.text;
-      if (sub && !GIT_BUILTINS.has(sub) && /\b(?:push|send-pack)\b/.test(ctx.alias(sub, cwd) || '')) return `the git alias '${sub}', which pushes`;
+      if (sub && !GIT_BUILTINS.has(sub) && /\b(?:push|send-pack)\b/.test(ctx.alias(sub, dir) || '')) return `the git alias '${sub}', which pushes`;
     }
     if (!roots.length) continue;
     for (const t of targets) {

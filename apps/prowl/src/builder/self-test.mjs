@@ -12,6 +12,7 @@ import { CHECKS_PATH, loadConfig } from '../config.mjs';
 import { mentions } from '../match.mjs';
 import * as brief from './brief.mjs';
 import { createBuilder } from './builder.mjs';
+import { ensureClone } from './repos.mjs';
 import * as rules from './rules.mjs';
 import { workArgs, workEnv } from './session.mjs';
 
@@ -114,7 +115,7 @@ function jiraServer() {
       if (!it) return json({ errorMessages: ['Issue does not exist'] }, 404);
       if (method === 'PUT') {
         const ops = body.update.labels;
-        if (rival && ops.some(op => op.remove === 'Ready-to-Start')) {
+        if (rival && ops.some(op => /^prowl-claim-/.test(op.add || ''))) {
           rival = false;
           edit(m[1], [{ remove: 'Ready-to-Start' }, { add: 'In-Development' }, { add: 'prowl-claim-rival' }]);
         }
@@ -147,6 +148,7 @@ function githubFake(bares) {
       prs.push({ repo, number, url, title: d.title, body: d.body, head: d.head, base: d.base, draft: d.draft, state: 'OPEN', author: 'octocat', reviews: [], threads: [], checks: [], replies: [] });
       return { url, number };
     },
+    prForBranch: async (repo, branch) => { const p = prs.find(x => x.repo === repo && x.head === branch && x.state === 'OPEN'); return p ? { url: p.url, number: p.number } : null; },
     editPr: async (pr, file) => { find(pr).body = JSON.parse(read(file)).body; },
     prFacts: async pr => {
       const p = find(pr);
@@ -540,6 +542,59 @@ async function builds(assert) {
   assert.equal(h.session.turns[0].budget, 1.5);
   assert.equal(h.session.turns[1].budget, 0.5, "each turn gets what's left of the session's cap");
   h.done();
+  h = harness('ado', twoRepoBuild(), { cfgOver: { maxBudgetUsd: 50, ticketBudgetUsd: 10, dailyBudgetUsd: 9.5 } });
+  await h.poll();
+  assert.deepEqual(h.session.turns.slice(0, 2).map(t => t.budget), [9.5, 8.5], "a turn gets what's left of the tightest cap: the ticket's or the day's too");
+  h.done();
+  // A question Needs you can't show is an unusable result.
+  h = harness('ado', () => ({ result: { status: 'question', question: { id: 'Q1', question: 'Choose?', options: 'Yes' } } }));
+  await h.poll();
+  assert.ok(h.session.turns[1]?.prompt.startsWith("result.json invalid: the question's options must be a list of text"));
+  assert.equal(h.b.needs()[0]?.kind, 'failed');
+  h.done();
+
+  // Dry run: --work and --follow claim and start nothing.
+  h = harness('ado', twoRepoBuild());
+  h.app.dryRun = () => true;
+  await h.b.enqueue('AB#123', 'manual');
+  await h.b.drain();
+  assert.deepEqual([h.b.history()[0].status, h.session.turns.length, h.server.tags(123)], ['ended', 0, ['Ready to Start', 'Web']], 'dry run: --work claims nothing');
+  assert.ok(h.logs.some(l => /would build/.test(l)));
+  h.done();
+
+  // A PR whose create went through but whose answer was lost is found on the retry, not opened twice.
+  h = harness('ado', twoRepoBuild());
+  const create = h.gh.createPr;
+  let lost = true;
+  h.gh.createPr = async (...a) => { const pr = await create(...a); if (lost) { lost = false; throw new Error('connection reset'); } return pr; };
+  await h.poll();
+  w = h.b.history()[0];
+  w._retryAt = 0;
+  await h.b.drain();
+  assert.deepEqual([h.gh.prs.length, w.status, w.prs.length], [2, 'following', 2], 'the earlier PR is used');
+  h.done();
+
+  // Stopped while the tracker is down: In Development comes off once the tracker answers again.
+  let down = false;
+  h = harness('ado', twoRepoBuild(), { cfgOver: { approvePlans: 'ask' }, trackerWrap: t => ({ ...t, retag: async (...a) => { if (down) throw new Error('503 Service Unavailable'); return t.retag(...a); } }) });
+  await h.poll();
+  down = true;
+  await h.b.skip(h.b.needs()[0]);
+  w = h.b.history()[0];
+  assert.deepEqual([w.status, w.step, h.server.tags(123).includes('In Development')], ['stopped', 'retag', true], 'the untag waits for the tracker');
+  down = false;
+  w._retryAt = 0;
+  await h.b.drain();
+  assert.deepEqual([w.step, h.server.tags(123)], [null, ['Web']], 'and then In Development is removed');
+  h.done();
+
+  // A clone whose push URL leads somewhere else isn't used.
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'prowl-builder-')));
+  const bare = makeRemote(root, 'octo-org/web');
+  execFileSync('git', ['clone', '-q', bare, path.join(root, 'web')], { stdio: 'ignore' });
+  git(path.join(root, 'web'), 'config', 'remote.origin.pushurl', 'https://example.invalid/someone/web.git');
+  await assert.rejects(ensureClone({ workDir: root }, 'octo-org/web'), /pushes to https:\/\/example\.invalid\/someone\/web\.git, not octo-org\/web/);
+  fs.rmSync(root, { recursive: true, force: true });
 
   // Plans with Approve plans set to ask: enter with nothing approves; a note sends it back.
   h = harness('ado', twoRepoBuild(), { cfgOver: { approvePlans: 'ask' } });
@@ -607,9 +662,10 @@ async function builds(assert) {
 
 async function feedback(assert) {
   const roundScript = (moved = null) => (w, prompt) => {
-    if (!prompt.startsWith('/prowl:prowl-work feedback ')) return twoRepoBuild()(w, prompt);
+    if (w.turnKind !== 'round') return twoRepoBuild()(w, prompt);
     const p = w.round.prs[0];
-    const sha = commit(p.worktree, { 'src/cart.js': 'export const save = cart => (cart.length ? cart : null);\n' }, `${w.key}: handle empty carts`);
+    const again = prompt.startsWith('/prowl:prowl-work feedback ') ? '' : `// turn ${w.turns.length}\n`; // a repair turn commits on top
+    const sha = commit(p.worktree, { 'src/cart.js': `export const save = cart => (cart.length ? cart : null);\n${again}` }, `${w.key}: handle empty carts`);
     if (moved) moved(p);
     return { result: { status: 'fixed', summary: 'Empty carts are not saved.', commits: [{ pr: `${p.repo}#${p.number}`, sha }], checks: [],
       items: [{ pr: `${p.repo}#${p.number}`, thread: 'PRRT_1', finding: '', action: 'fix', note: 'save() skips an empty cart now.' },
@@ -708,13 +764,76 @@ async function feedback(assert) {
   assert.ok(!h.b.history()[0].adopted && h.gh.prs.length === 3, 'a draft is not adopted: the ticket is built');
   h.done();
 
-  // --follow (or w in History) claims nothing, and leaves a review asked for or under way alone.
+  // --follow (or w in History) claims nothing, and leaves a review asked for or under way alone, even with feedback waiting.
   h = harness('ado', roundScript());
   h.gh.prs.push({ repo: 'octo-org/web', number: 9, url: 'https://github.com/octo-org/web/pull/9', title: 'AB#123: Save the cart', body: '', head: 'feature/cart', base: 'main', draft: false, state: 'OPEN', author: 'octocat', reviews: [], threads: [], checks: [], replies: [] });
+  addFeedback(h, 'https://github.com/octo-org/web/pull/9');
   h.server.setTags(123, ['Web', 'In Review']);
   await h.b.enqueue('AB#123', 'follow');
   await h.b.drain();
-  assert.deepEqual([h.b.history()[0].status, h.server.tags(123)], ['following', ['Web', 'In Review']], 'following, tags untouched');
+  assert.deepEqual([h.b.history()[0].status, h.b.history()[0].rounds, h.server.tags(123)], ['following', 0, ['Web', 'In Review']], 'following, no round, tags untouched');
+  h.done();
+
+  // A round that only disputes is dropped too when the branch moved: its replies would answer an old head.
+  h = harness('ado', (w, prompt) => {
+    if (w.turnKind !== 'round') return twoRepoBuild()(w, prompt);
+    const p = w.round.prs[0];
+    const other = path.join(h.root, 'other');
+    execFileSync('git', ['clone', '-q', '-b', p.branch, h.bares[p.repo], other], { stdio: 'ignore' });
+    commit(other, { 'NOTES.md': 'mine\n' }, 'A teammate pushes');
+    git(other, 'push', '-q', 'origin', `HEAD:${p.branch}`);
+    return { result: { status: 'fixed', summary: '', commits: [], checks: [], questions: [],
+      items: [{ pr: `${p.repo}#${p.number}`, thread: 'PRRT_2', finding: '', action: 'dispute', note: 'cart.js:1 already returns early.' }] } };
+  });
+  await h.poll();
+  addFeedback(h, h.gh.prs[0].url);
+  h.server.setTags(123, ['Web', 'Reviewed']);
+  await h.poll();
+  assert.deepEqual([h.gh.prs[0].replies.length, h.server.tags(123)], [0, ['Web', 'Reviewed']], 'a dispute-only round on a moved branch: no replies');
+  assert.ok(h.logs.some(l => /round 1 dropped, nothing pushed: octo-org\/web: the remote branch moved/.test(l)));
+  h.done();
+
+  // Switched off as a round claimed the ticket: its tags go back, and the round waits until the Builder is on again.
+  let claims = 0;
+  h = harness('ado', roundScript(), { trackerWrap: t => ({ ...t, claim: async (...a) => { await t.claim(...a); if (++claims === 2) h.app.on = false; } }) });
+  await h.poll();
+  addFeedback(h, h.gh.prs[0].url);
+  h.server.setTags(123, ['Web', 'Reviewed']);
+  await h.poll();
+  assert.deepEqual([h.b.history()[0].rounds, h.b.history()[0].status, h.server.tags(123)], [0, 'following', ['Web', 'Reviewed']], 'the round claim released');
+  h.app.on = true;
+  await h.poll();
+  assert.equal(h.b.history()[0].rounds, 1, 'on again: the round starts');
+  h.done();
+
+  // Required checks after a round's push: one more turn when they fail, then Needs you.
+  h = harness('ado', roundScript(), { cfgOver: { waitForChecksMinutes: 30 } });
+  await h.poll();
+  addFeedback(h, h.gh.prs[0].url).checks = [{ name: 'build', bucket: 'fail', link: '' }];
+  h.server.setTags(123, ['Web', 'Reviewed']);
+  await h.poll();
+  assert.ok(h.session.turns.some(t => t.prompt.startsWith('checks failed:\nocto-org/web#1: build')), 'failing required checks: one more turn, with the log');
+  assert.deepEqual([h.b.needs()[0]?.kind, h.gh.prs[0].replies.length], ['checks', 2], 'failing again: Needs you, and no reply posted twice');
+  h.done();
+
+  // The same on Jira: a two-repo build, a round another copy of Prowl claims first, then the round once it's done.
+  h = harness('jira', roundScript());
+  await h.poll();
+  const jw = h.b.history()[0];
+  assert.deepEqual([jw.key, h.gh.prs.length, h.server.labels('PROJ-123')], ['PROJ-123', 2, ['web', 'Ready-for-Review']], 'Jira: two linked PRs, the done label on');
+  assert.ok(h.gh.prs[0].body.includes(h.gh.prs[1].url) && remoteHas(h.bares['octo-org/api'], 'prowl/PROJ-123-save-the-cart-between-visits'), 'Jira: pushed and linked');
+  const jWeb = h.gh.prs.find(p => p.repo === 'octo-org/web');
+  addFeedback(h, jWeb.url);
+  h.server.edit('PROJ-123', [{ remove: 'Ready-for-Review' }, { add: 'Reviewed' }]);
+  h.server.rivalNext();
+  await h.poll();
+  assert.deepEqual([jw.rounds, jw.status, h.session.turns.filter(t => t.prompt.startsWith('/prowl:prowl-work feedback')).length], [0, 'following', 0], 'Jira: the round claim lost, nothing started');
+  assert.ok(h.logs.some(l => /round not started.*another copy of Prowl/.test(l)));
+  await h.poll();
+  assert.equal(jw.rounds, 0, "Jira: waits while someone else's In-Development is on");
+  h.server.edit('PROJ-123', [{ remove: 'In-Development' }, { remove: 'prowl-claim-rival' }]);
+  await h.poll();
+  assert.deepEqual([jw.rounds, jWeb.replies.length, h.server.labels('PROJ-123')], [1, 2, ['web', 'Reviewed', 'Ready-for-Review']], 'Jira: then the round, its replies, and the done label');
   h.done();
 
   // The round cap: a ticket past Rounds per ticket goes to Needs you, keeping In Development.

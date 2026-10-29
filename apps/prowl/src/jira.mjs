@@ -139,7 +139,8 @@ export async function readItem(cfg, ref) {
 }
 
 /**
- * Swaps the trigger label for the in-progress one; throws if another poller claimed the ticket first. The same write
+ * Swaps the trigger label for the in-progress one; throws if another poller claimed the ticket first. `ticket.rev` is
+ * the revision it was read at. The same write
  * adds a one-off prowl-claim-… label, which marks the winning changelog entry as ours: the author can't, as two
  * copies of Prowl can sign in as the same account. A later write still adds its own label, so it never looks like the winner.
  */
@@ -150,8 +151,15 @@ export async function claim(cfg, ticket, drop, add) {
   try {
     await new Promise(r => setTimeout(r, claimWait.ms)); // two writes at the same moment: both are in the changelog by then
     const { total } = await api(cfg, `/rest/api/3/issue/${enc(ticket.key)}/changelog?maxResults=1`);
-    const recent = await api(cfg, `/rest/api/3/issue/${enc(ticket.key)}/changelog?startAt=${Math.max(0, total - 20)}&maxResults=20`);
-    const entry = claimEntry(recent.values, remove);
+    let entry;
+    if (remove.length) {
+      const recent = await api(cfg, `/rest/api/3/issue/${enc(ticket.key)}/changelog?startAt=${Math.max(0, total - 20)}&maxResults=20`);
+      entry = claimEntry(recent.values, remove);
+    } else {
+      // Nothing to take off (a feedback round): the first write since `ticket` was read that put the in-progress label on claimed it.
+      const since = await api(cfg, `/rest/api/3/issue/${enc(ticket.key)}/changelog?startAt=${ticket.rev ?? Math.max(0, total - 20)}&maxResults=50`);
+      entry = since.values.find(h => addedLabel(h, label(add))) || null;
+    }
     if (entry && !addedLabel(entry, mine)) {
       // Another Prowl's claim, or a person removed the trigger label by hand. In that case our in-progress
       // label is the only one: take it back off.

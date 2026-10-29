@@ -3,7 +3,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { globRe } from '../checks.mjs';
-import { actionable } from '../feedback.mjs';
+import { actionable, questionShape } from '../feedback.mjs';
 import { checksState } from '../github.mjs';
 import { norm, tagMatches } from '../match.mjs';
 
@@ -102,8 +102,14 @@ export function validateBuild(r, briefDir) {
     if (!r.plan || !fs.existsSync(path.resolve(briefDir, r.plan))) return `the plan file ${r.plan || '(none)'} isn't in the brief folder`;
     const q = (r.openQuestions || []).find(x => !x?.id || !String(x?.question || '').trim());
     if (q) return 'each open question needs an id and a question';
+    const shape = (r.openQuestions || []).map(x => questionShape(x, 'default')).find(Boolean);
+    if (shape) return `an open question's ${shape}`;
   }
-  if (r.status === 'question' && (!r.question?.id || !String(r.question?.question || '').trim())) return 'a question needs an id and a question';
+  if (r.status === 'question') {
+    if (!r.question?.id || !String(r.question?.question || '').trim()) return 'a question needs an id and a question';
+    const shape = questionShape(r.question, 'default');
+    if (shape) return `the question's ${shape}`;
+  }
   if (r.status === 'blocked' && !String(r.reason || '').trim()) return 'blocked needs a reason';
   if (r.status === 'done') {
     if (!r.commits?.length) return 'done lists no commits';

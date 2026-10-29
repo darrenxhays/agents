@@ -3,6 +3,11 @@
 import fs from 'node:fs';
 import { replyMarker } from './templates.mjs';
 
+const isText = v => v == null || typeof v === 'string';
+/** Why a question's optional fields can't be shown in Needs you, or '': its options a list of text, `defaultKey` and context text. */
+export const questionShape = (q, defaultKey) => ((q.options != null && !(Array.isArray(q.options) && q.options.every(o => typeof o === 'string'))) ? 'options must be a list of text'
+  : !isText(q[defaultKey]) || !(isText(q.context) || (Array.isArray(q.context) && q.context.every(c => typeof c === 'string'))) ? `${defaultKey} and context must be text` : '');
+
 /** The comment-thread URLs listed in a details file's *Parked* section: those findings are left to a person. */
 export function parkedUrls(details) {
   const m = /^## Parked[ \t]*\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(details || '');
@@ -58,6 +63,8 @@ export function validateFeedback(r) {
   const qs = r.questions || [];
   const q = qs.find(x => !String(x?.text || '').trim() || !String(x?.searched || '').trim());
   if (q) return `the question "${String(q?.text || '').slice(0, 80)}" has no ${q?.text ? 'searched line' : 'text'}`;
+  const shape = qs.map(x => questionShape(x, 'recommended')).find(Boolean);
+  if (shape) return `a question's ${shape}`;
   if (r.items.some(it => it.action === 'ask') && !qs.length) return 'an ask item has no question';
   return '';
 }
@@ -69,8 +76,9 @@ export function validateFeedback(r) {
  */
 export function repliesToPost({ ticket, round, items = [], threads = [], pushed }, posted) {
   const known = new Map(threads.map(t => [t.id, t]));
+  const once = new Set(); // two items on one thread (two findings fixed together) still get one reply
   return items
-    .filter(it => known.has(it.thread) && (it.action === 'dispute' || (it.action === 'fix' && pushed)))
+    .filter(it => known.has(it.thread) && (it.action === 'dispute' || (it.action === 'fix' && pushed)) && !once.has(it.thread) && once.add(it.thread))
     .map(it => {
       const what = it.action === 'fix' ? 'fixed' : 'disputed';
       return { thread: it.thread, commentId: known.get(it.thread).commentId, what, note: it.note || '', marker: replyMarker(ticket, round, it.thread, what) };

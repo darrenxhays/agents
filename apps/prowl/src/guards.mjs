@@ -10,6 +10,29 @@ function numstatPaths(file) {
   return file.includes(' => ') ? file.split(' => ') : [file];
 }
 
+/**
+ * The rows of `git diff --numstat`: [{ add, del, paths }]. With -z (what the Builder runs) paths come as they are,
+ * never quoted, and a rename as its two paths; without it, as the self-test writes them, a rename is old => new.
+ */
+function numstatRows(numstat) {
+  const text = String(numstat);
+  if (!text.includes('\0')) {
+    return text.split('\n').filter(Boolean).map(row => {
+      const [add, del, ...rest] = row.split('\t');
+      return { add, del, paths: numstatPaths(rest.join('\t')) };
+    });
+  }
+  const parts = text.split('\0');
+  const rows = [];
+  for (let i = 0; i < parts.length; i++) {
+    if (!parts[i]) continue;
+    const [add, del, ...rest] = parts[i].split('\t');
+    const file = rest.join('\t');
+    rows.push({ add, del, paths: file ? [file] : [parts[++i], parts[++i]].filter(Boolean) });
+  }
+  return rows;
+}
+
 // Secrets that must never be pushed. One list, so it is easy to extend.
 export const SECRET_PATTERNS = [
   [/-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/, 'a private key'],
@@ -28,8 +51,8 @@ export const SECRET_PATTERNS = [
 /**
  * What stops a push: [{ kind, text }]. `moved` (the remote branch isn't at `expected`, the commit Prowl last saw
  * there, or '' for a branch that doesn't exist yet) drops the push; any other failure goes to Needs you.
- * `ancestor`: `base` is an ancestor of HEAD. `onBranch`: HEAD is the tip of the branch being pushed. `numstat` and
- * `diff` (-U0) cover everything from `base`.
+ * `ancestor`: `base` is an ancestor of HEAD. `onBranch`: HEAD is the tip of the branch being pushed. `numstat` (-z)
+ * and `diff` (-U0) cover everything from `base`.
  */
 export function guardFailures({ base, head, ancestor, onBranch = true, remote, expected = base, numstat, diff }, { maxChangedLines, protectedPaths = [] }) {
   const out = [];
@@ -41,10 +64,9 @@ export function guardFailures({ base, head, ancestor, onBranch = true, remote, e
   if (!onBranch) out.push({ kind: 'guard', text: "the commits aren't on Prowl's branch" });
   let lines = 0;
   const files = [];
-  for (const row of String(numstat).split('\n').filter(Boolean)) {
-    const [add, del, ...rest] = row.split('\t');
+  for (const { add, del, paths } of numstatRows(numstat)) {
     lines += (Number(add) || 0) + (Number(del) || 0); // binary files show "-"
-    files.push(...numstatPaths(rest.join('\t')));
+    files.push(...paths);
   }
   if (lines > maxChangedLines) out.push({ kind: 'guard', text: `it changes ${lines} lines, over Max lines changed (${maxChangedLines})` });
   const hit = files.filter(f => protectedPaths.some(g => globRe(g).test(f)));

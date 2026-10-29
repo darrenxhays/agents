@@ -150,6 +150,13 @@ export async function createPr(repo, file) {
   return { url, number: Number(number) };
 }
 
+/** The open PR from `branch` in `repo` (owner/name), as { url, number }, or null: one a create made before its answer was lost. */
+export async function prForBranch(repo, branch) {
+  const out = (await run('gh', ['api', `repos/${repo}/pulls?state=open&head=${repo.split('/')[0]}:${encodeURIComponent(branch)}`, '--jq', '.[0] | [.html_url, .number] | @tsv'])).trim();
+  const [url, number] = out.split('\t');
+  return url ? { url, number: Number(number) } : null;
+}
+
 /** Replaces a PR's body with the one in `file` ({ body }). */
 export async function editPr(pr, file) {
   await run('gh', ['api', '-X', 'PATCH', `repos/${pr.repo}/pulls/${pr.number}`, '--input', file, '--jq', '.number']);

@@ -194,7 +194,7 @@ export function createBuilder(app, deps) {
   /** Claims `ticket` (start tag → In Development); the loser backs off. Resolves with its record, or null. */
   async function claim(ticket, source, w = null) {
     const tracker = trackerOf(w);
-    const { owned, isStart } = tags();
+    const { owned } = tags();
     try {
       await tracker.claim(cfg(), ticket, owned, b().tags.inProgress);
     } catch (e) {
@@ -207,17 +207,38 @@ export function createBuilder(app, deps) {
     touch(w);
     deps.forget?.(`pick:${ticket.key}`);
     if (!on()) {
-      // Switched off as it claimed: put back what the claim took off.
-      const hadStart = (ticket.tags || []).some(isStart);
-      await tracker.retag(cfg(), w.ref, owned, hadStart ? b().tags.start : '').catch(e => log('error', `${w.key}: couldn't put its tags back (${e.message})`));
       Object.assign(w, { status: 'ended', step: null, note: 'the Builder was switched off as it claimed this ticket' });
-      touch(w);
-      log('info', `${w.key}: the Builder was switched off as it claimed this ticket; its tags are back as they were`);
+      await release(w, ticket);
       return null;
     }
     log('ok', `${w.key}: claimed, marked '${b().tags.inProgress}'`);
     hoot(`Picking up ${w.title}, marking as '${b().tags.inProgress}'`);
     return w;
+  }
+
+  /** Switched off as it claimed `ticket`: puts back what the claim took off. */
+  async function release(w, ticket) {
+    touch(w);
+    const hadStart = (ticket.tags || []).some(tags().isStart);
+    if (await retagSoon(w, hadStart ? b().tags.start : '')) log('info', `${w.key}: the Builder was switched off as it claimed this ticket; its tags are back as they were`);
+  }
+
+  /** Sets the tags Prowl owns on `w`'s ticket to `add` ('' for none); while the tracker fails, again each minute. Resolves true once done. */
+  async function retagSoon(w, add) {
+    try {
+      await trackerOf(w).retag(cfg(), w.ref, tags().owned, add);
+    } catch (e) {
+      Object.assign(w, { step: 'retag', retagTo: add, _retryAt: Date.now() + 60_000 });
+      touch(w);
+      log('error', `${w.key}: couldn't change its tags (${e.message}); retrying in a minute`, `work:${w.uid}`);
+      return false;
+    }
+    if (w.step === 'retag') {
+      Object.assign(w, { step: null, retagTo: undefined });
+      touch(w);
+      log('ok', `${w.key}: its tags are set now`);
+    }
+    return true;
   }
 
   /**
@@ -238,8 +259,9 @@ export function createBuilder(app, deps) {
     }
     Object.assign(w, { prs: mine.map(p => ({ repo: p.repo, number: p.number, url: p.url, title: p.title })), prsOpenedAt: Date.now(), lastActivityAt: 0, adopted: true });
     log('ok', `${w.key}: following its PRs ${mine.map(prName).join(', ')} instead of building it`);
-    const due = await dueFeedback(w);
+    // Followed by hand while a review is asked for or under way: that review finishes first, as in follow().
     const reviewing = !w.claimedAt && [b().tags.done, b().tags.reviewing].some(t => tags().has(w.ticket?.tags || [], t));
+    const due = reviewing ? [] : await dueFeedback(w);
     Object.assign(w, { roundPrs: due, lastActivityAt: due.length ? 0 : Date.now(), step: due.length ? 'round' : reviewing ? null : 'end-round', status: due.length || !reviewing ? 'active' : 'following' });
     touch(w);
     return undefined;
@@ -285,11 +307,14 @@ export function createBuilder(app, deps) {
     checkStop(w);
     const c = b();
     const spent = rules.ticketSpend(records(), w.key);
+    const today = rules.daySpend(records());
     if (rules.spendLevel(spent, c.ticketBudgetUsd) === 'over') throw new NeedsYou('cap', `Spend cap per ticket reached ($${c.ticketBudgetUsd}): no more sessions for ${w.key}.`, { retry: 'turn' });
-    if (rules.spendLevel(rules.daySpend(records()), c.dailyBudgetUsd) === 'over') throw new NeedsYou('cap', `Spend cap per day reached ($${c.dailyBudgetUsd}): no more sessions today.`, { retry: 'turn' });
-    const budget = c.maxBudgetUsd > 0 ? c.maxBudgetUsd - (w.sessionCostUsd || 0) : 0;
-    if (c.maxBudgetUsd > 0 && budget <= 0) throw new NeedsYou('cap', `The session for ${w.key} reached its spend cap ($${c.maxBudgetUsd}).`, { retry: 'turn' });
-    w._budget = budget;
+    if (rules.spendLevel(today, c.dailyBudgetUsd) === 'over') throw new NeedsYou('cap', `Spend cap per day reached ($${c.dailyBudgetUsd}): no more sessions today.`, { retry: 'turn' });
+    if (c.maxBudgetUsd > 0 && c.maxBudgetUsd - (w.sessionCostUsd || 0) <= 0) throw new NeedsYou('cap', `The session for ${w.key} reached its spend cap ($${c.maxBudgetUsd}).`, { retry: 'turn' });
+    // The turn may spend what's left of the tightest cap: the session's, the ticket's and the day's.
+    const left = [[c.maxBudgetUsd, w.sessionCostUsd || 0], [c.ticketBudgetUsd, spent], [c.dailyBudgetUsd, today]].filter(([cap]) => cap > 0).map(([cap, used]) => cap - used);
+    const budget = left.length ? Math.min(...left) : 0; // 0: no cap
+    w.turnBudgetUsd = budget;
     session.start(cfg(), appDir, w, w.prompt, budget);
     w.turns.push({ startedAt: w.startedAt, kind: w.turnKind, logPath: w.logPath, costUsd: 0 });
     w.step = 'session';
@@ -309,7 +334,7 @@ export function createBuilder(app, deps) {
     }
     touch(w);
     checkStop(w);
-    const capped = w.capped || capHit(r, { maxBudgetUsd: b().maxBudgetUsd, maxTurns: b().maxTurns });
+    const capped = w.capped || capHit(r, { maxBudgetUsd: w.turnBudgetUsd || b().maxBudgetUsd, maxTurns: b().maxTurns });
     if (capped) throw new NeedsYou('cap', `The session for ${w.key} stopped: ${capped}. It isn't retried.`, { retry: 'continue' });
     const file = path.join(w.briefDir, 'result.json');
     const result = readJson(file);
@@ -447,7 +472,7 @@ export function createBuilder(app, deps) {
         base: base(rec), head, remote: await remoteSha(rec.worktree, rec.branch), expected: expected(rec),
         ancestor: await succeeds(rec.worktree, 'merge-base', '--is-ancestor', base(rec), 'HEAD'),
         onBranch: onBranch ? (await git(rec.worktree, 'symbolic-ref', '--short', 'HEAD').catch(() => '')).trim() === rec.branch : true,
-        numstat: await git(rec.worktree, 'diff', '--numstat', `${base(rec)}..HEAD`),
+        numstat: await git(rec.worktree, 'diff', '--numstat', '-z', `${base(rec)}..HEAD`), // -z: paths unquoted
         diff: await git(rec.worktree, 'diff', '-U0', `${base(rec)}..HEAD`),
       }, b());
       if (failed[0]?.kind === 'moved') return { moved: `${rec.repo}: ${failed[0].text}` };
@@ -469,6 +494,7 @@ export function createBuilder(app, deps) {
       if (refused) throw new NeedsYou('guard', `Prowl won't push to ${rec.repo}'s ${refused}.`, { retry: 'publish' });
       const head = (await git(rec.worktree, 'rev-parse', 'HEAD')).trim();
       if (rec.pushedSha !== head) {
+        await ensureClone(cfg(), rec.repo, clone); // its push URL still leads to the repo
         await push(rec.worktree, rec.branch); // never forced
         rec.pushedSha = head;
         touch(w);
@@ -481,7 +507,8 @@ export function createBuilder(app, deps) {
       const title = mentions(spec.title, w.key) ? spec.title : `${w.key}: ${spec.title || w.title}`;
       const file = path.join(w.briefDir, `pr-${rec.repo.split('/')[1]}.json`);
       writeJson(file, { title, head: rec.branch, base: rec.base, body: spec.body || '', draft: Boolean(b().draftPrs) });
-      rec.pr = { ...(await gh.createPr(rec.repo, file)), repo: rec.repo, title };
+      // A retry first looks for the PR an earlier create opened before its answer was lost.
+      rec.pr = { ...((await gh.prForBranch(rec.repo, rec.branch)) || (await gh.createPr(rec.repo, file))), repo: rec.repo, title };
       rec.prBody = spec.body || '';
       touch(w);
       log('ok', `${w.key}: opened ${rec.pr.url}`);
@@ -552,13 +579,18 @@ export function createBuilder(app, deps) {
       if (!b().followUp) continue;
       try {
         const item = await trackerOf(w).readItem(cfg(), w.ref);
-        // A review asked for or under way finishes first. (Tags compare without case or punctuation, so Jira's Ready-for-Review matches.)
-        const waiting = [b().tags.done, b().tags.reviewing].some(t => tags().has(item.tags, t));
+        // A review asked for or under way finishes first, and so does work someone else claimed (In Development).
+        // (Tags compare without case or punctuation, so Jira's Ready-for-Review matches.)
+        const waiting = [b().tags.done, b().tags.reviewing, b().tags.inProgress].some(t => tags().has(item.tags, t));
         const due = waiting ? [] : await dueFeedback(w);
         if (!w.prs.length) {
           Object.assign(w, { status: 'done', endedAt: Date.now(), note: 'its PRs are merged or closed' });
           touch(w);
           log('ok', `${w.key}: its PRs are merged or closed; Prowl stops following it`);
+          continue;
+        }
+        if (due.length && app.dryRun()) {
+          log('info', `${w.key}: would start a feedback round on ${due.map(prName).join(', ')} (dry run)`, `follow:${w.uid}`);
           continue;
         }
         if (due.length) {
@@ -604,6 +636,10 @@ export function createBuilder(app, deps) {
       Object.assign(w, { step: null, status: 'following' });
       touch(w);
       return log('warn', `${w.key}: round not started, the ticket changed or someone else claimed it (${e.message})`);
+    }
+    if (!on()) {
+      Object.assign(w, { status: 'following', step: null });
+      return release(w, ticket);
     }
     Object.assign(w, { status: 'active', claimedRoundAt: Date.now() });
     if (w.rounds >= b().maxRounds) throw new NeedsYou('cap', `Feedback rounds per ticket reached (${b().maxRounds}) for ${w.key}: fix the rest yourself, or raise the cap.`, { retry: 'round' });
@@ -665,18 +701,26 @@ export function createBuilder(app, deps) {
   /** Checks, guards, pushes and replies for a round. A branch that moved since the round started drops the round. */
   async function pushRound(w) {
     checkStop(w);
+    const drop = async why => {
+      await trackerOf(w).retag(cfg(), w.ref, tags().owned, '');
+      await tidy(w, [], w.round.prs);
+      Object.assign(w, { status: 'following', step: null, lastActivityAt: Date.now() });
+      touch(w);
+      return log('warn', `${w.key}: round ${w.rounds} dropped, nothing pushed: ${why}`);
+    };
     const changed = [];
-    for (const p of w.round.prs) if ((await git(p.worktree, 'rev-parse', 'HEAD')).trim() !== (p.pushedSha || p.headSha)) changed.push(p);
+    for (const p of w.round.prs) {
+      if ((await git(p.worktree, 'rev-parse', 'HEAD')).trim() !== (p.pushedSha || p.headSha)) changed.push(p);
+      else {
+        // No commit here, but a dispute written against a head that has since moved is stale too.
+        const remote = await remoteSha(p.worktree, p.branch);
+        if (remote !== (p.pushedSha || p.headSha)) return drop(`${p.repo}: the remote branch ${remote ? `moved to ${short(remote)}` : 'was deleted'} since ${short(p.pushedSha || p.headSha)}`);
+      }
+    }
     if (changed.length) {
       const ok = await checkAll(w, changed, { base: p => p.headSha, expected: p => p.pushedSha || p.headSha, onBranch: false });
       if (ok === false) return undefined;
-      if (ok.moved) {
-        await trackerOf(w).retag(cfg(), w.ref, tags().owned, '');
-        await tidy(w, [], w.round.prs);
-        Object.assign(w, { status: 'following', step: null, lastActivityAt: Date.now() });
-        touch(w);
-        return log('warn', `${w.key}: round ${w.rounds} dropped, nothing pushed: ${ok.moved}`);
-      }
+      if (ok.moved) return drop(ok.moved);
       for (const p of changed) {
         checkStop(w);
         const refused = branchRefusal(p.branch, p.defaultBranch, b().protectedBranches);
@@ -759,9 +803,9 @@ export function createBuilder(app, deps) {
     side.state.needs = side.state.needs.filter(n => n.recordId !== w.uid);
     Object.assign(w, { status: 'stopped', step: null, stopRequested: false, endedAt: Date.now(), note: why });
     touch(w);
-    if (untag) await trackerOf(w).retag(cfg(), w.ref, tags().owned, '').catch(e => log('error', `${w.key}: couldn't take '${b().tags.inProgress}' off (${e.message})`));
+    const untagged = untag && (await retagSoon(w, ''));
     await tidy(w, (w.repos || []).filter(r => !r.pr), w.round?.prs || []).catch(() => {});
-    log('warn', `${w.key}: ${why}${untag ? `; '${b().tags.inProgress}' removed` : ''}`);
+    log('warn', `${w.key}: ${why}${untagged ? `; '${b().tags.inProgress}' removed` : ''}`);
   }
 
   /** s on a running ticket: it stops before its next push, PR, tag or turn. */
@@ -836,6 +880,11 @@ export function createBuilder(app, deps) {
   };
 
   async function claimQueued(w) {
+    if (app.dryRun()) {
+      Object.assign(w, { status: 'ended', step: null, endedAt: Date.now(), note: 'dry run' });
+      touch(w);
+      return log('info', `${w.key}: would ${w.source === 'follow' ? 'follow its PRs' : `build "${w.title}"`} (dry run)`);
+    }
     const ticket = await trackerOf(w).readItem(cfg(), w.ref);
     if (w.source === 'follow') {
       w.ticket = ticket;
@@ -854,7 +903,8 @@ export function createBuilder(app, deps) {
 
   // ---- Driven by the shell ----
 
-  const STEPS = { claim: claimQueued, adopt: adoptOrRead, read, turn, settle, repos, approve, publish, round, 'push-round': pushRound, ci, 'end-round': endRound };
+  const STEPS = { claim: claimQueued, adopt: adoptOrRead, read, turn, settle, repos, approve, publish, round, 'push-round': pushRound, ci, 'end-round': endRound,
+    retag: w => retagSoon(w, w.retagTo) };
 
   /** Once a second, on or off: tails sessions, settles ended turns, runs due steps. Claims and turns wait while off or paused. */
   side.tick = function tick() {

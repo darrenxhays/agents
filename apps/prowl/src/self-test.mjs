@@ -305,14 +305,21 @@ for (const c of ['git send-pack origin main', 'git subtree push --prefix lib ori
   assert.equal(bash(c), 'deny', `denies a push path: ${c}`);
 }
 assert.equal(bash('git st'), 'allow', "an alias that doesn't push");
+// An alias is looked up where git runs, so in the folder -C names.
+const other = path.join(fenceHome, 'other-repo');
+const aliasIn = (name, dir) => (name === 'ship' && dir === other ? 'push --force' : '');
+const inDir = command => fenceDecision({ cwd: wt, tool_name: 'Bash', tool_input: { command } }, workEnv, aliasIn)?.hookSpecificOutput.permissionDecision || 'allow';
+assert.deepEqual([inDir(`git -C ${other} ship`), inDir('git ship')], ['deny', 'allow'], "a pushing alias in -C's repo");
 // curl and wget writes to GitHub's API, and GraphQL the fence can't read; reads are allowed.
 for (const c of ['curl -X POST https://api.github.com/repos/o/r/issues -d @body.json', 'curl -sS -XPATCH https://api.github.com/repos/o/r/pulls/1 --data "{}"',
   'curl -H "Authorization: bearer x" https://api.github.com/graphql -d \'{"query":"query{viewer{login}}"}\'', 'wget --method=DELETE https://api.github.com/repos/o/r/git/refs/heads/b',
   'wget --post-file=q.json https://api.github.com/graphql', 'gh api graphql -f query=@mutation.graphql', 'gh api graphql --input q.json',
-  'gh api graphql -f query="$(cat q.graphql)"', 'Q=$(cat m); gh api graphql -f query="$Q"']) {
+  'gh api graphql -f query="$(cat q.graphql)"', 'Q=$(cat m); gh api graphql -f query="$Q"', 'curl --config request.conf https://api.github.com/graphql',
+  'curl -K req.conf', 'export CURL_HOME=.; curl https://api.github.com/graphql', 'wget -e post_data=x https://api.github.com/graphql']) {
   assert.equal(bash(c), 'deny', `denies a GitHub write: ${c}`);
 }
 for (const c of ['curl https://api.github.com/repos/o/r/pulls/1', 'curl -s -X GET https://api.github.com/repos/o/r', 'wget -qO- https://api.github.com/repos/o/r',
+  'wget -e robots=off -qO- https://api.github.com/repos/o/r',
   "gh api graphql -F owner=o -f query='query($owner:String!){repositoryOwner(login:$owner){id}}'"]) {
   assert.equal(bash(c), 'allow', `allows a GitHub read: ${c}`);
 }
@@ -328,7 +335,8 @@ for (const c of ['curl https://dev.azure.com/o/Shop/_apis/wit/workitems/1', 'cur
 // Writes outside the session's folders through a redirect, tee, cp, mv or rm; the temp folder is fine.
 // (The test's own folders are in the temp folder, which sessions may write in, so "outside" is the home folder or /etc here.)
 for (const c of ['echo x > /etc/x', 'echo x >> ~/outside.txt', 'ls | tee /etc/listing', `cp a ${path.join(os.homedir(), 'b')}`, 'mv notes.md ~/notes.md', 'rm -rf ~',
-  'rm -rf /', 'echo $(echo x > /etc/y)', 'sh -c "echo > /etc/z"', 'echo x > $SOMEWHERE/out', 'cd / && rm -rf other', 'echo x > "$HOME/.bashrc"']) {
+  'rm -rf /', 'echo $(echo x > /etc/y)', 'sh -c "echo > /etc/z"', 'echo x > $SOMEWHERE/out', 'cd / && rm -rf other', 'echo x > "$HOME/.bashrc"',
+  "bash -lc 'rm -f /etc/notes.txt'", 'zsh -ec "echo > /etc/z"']) {
   assert.equal(bash(c), 'deny', `denies a write outside: ${c}`);
 }
 for (const c of ['echo x > notes.md', `echo x > ${path.join(briefDir, 'result.json')}`, 'cp a b', 'rm -rf build', 'mv a.js b.js', 'npm test 2>&1 | tee test.log',
@@ -459,6 +467,7 @@ assert.deepEqual(toPost.map(r => [r.thread, r.what, r.commentId]), [['PRRT_owl1'
 assert.equal(toPost[0].marker, '<!-- prowl-fix AB#42 r2 PRRT_owl1 fixed -->');
 assert.deepEqual(repliesToPost({ ticket: 'AB#42', round: 2, items: fixedResult.items, threads: roundThreads, pushed: 'x' }, [`Fixed in 3f2a1c9\n${toPost[0].marker}`, `x\n${toPost[2].marker}`]).map(r => r.thread), ['PRRT_bot1'], 'a restart posts nothing twice');
 assert.deepEqual(repliesToPost({ ticket: 'AB#42', round: 2, items: fixedResult.items, threads: roundThreads, pushed: null }, []).map(r => r.what), ['disputed'], "nothing pushed: no 'fixed' replies");
+assert.equal(repliesToPost({ ticket: 'AB#42', round: 2, items: [fixedResult.items[0], { ...fixedResult.items[0], finding: 'F-02' }], threads: roundThreads, pushed: 'x' }, []).length, 1, 'two items on one thread: one reply');
 const outputMd = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'skills', 'prowl-review', 'config', 'output.md'), 'utf8');
 assert.equal(fill(template(outputMd, 'Fix reply'), { 'comment prefix': template(outputMd, 'Comment prefix'), sha: '3f2a1c9', note: 'save() awaits.' }), '🦉 **PR-Owl Review** · Fixed in 3f2a1c9: save() awaits.');
 const started = fill(template(outputMd, 'Review started'), { ticket: 'AB#42', 'ticket link': 'https://dev.azure.com/o/p/_workitems/edit/42' });
@@ -501,6 +510,10 @@ assert.match(guardFailures({ ...okGuard, head: 'aaa1111' }, limits)[0].text, /no
 assert.match(guardFailures({ ...okGuard, numstat: '900\t200\tsrc/big.js' }, limits)[0].text, /1100 lines/);
 assert.match(guardFailures({ ...okGuard, numstat: '1\t0\t.github/workflows/ci.yml' }, limits)[0].text, /\.github\/workflows\/ci\.yml/);
 assert.match(guardFailures({ ...okGuard, numstat: '1\t0\t{src => .github/workflows}/ci.yml' }, limits)[0].text, /Paths that need a person/, 'a rename into a protected path');
+// The Builder's numstat -z: paths unquoted (git quotes é without it), and a rename as its two paths.
+assert.match(guardFailures({ ...okGuard, numstat: '1\t0\t.github/workflows/deploy-é.yml\0' }, limits)[0]?.text || '', /deploy-é\.yml/, 'numstat -z: a path git would quote');
+assert.match(guardFailures({ ...okGuard, numstat: '0\t0\t\0ci.yml\0.github/workflows/ci.yml\0' }, limits)[0]?.text || '', /Paths that need a person/, 'numstat -z: a rename');
+assert.deepEqual(guardFailures({ ...okGuard, numstat: '3\t1\tsrc/a.js\0' }, limits), [], 'numstat -z: a plain change');
 for (const [line, what] of [['-----BEGIN RSA PRIVATE KEY-----', 'a private key'], ['key = "AKIAABCDEFGHIJKLMNOP"', 'an AWS access key'],
   [`token: ghp_${'a'.repeat(36)}`, 'a GitHub token'], ['password = "hunter22"', 'a password or secret'], ['DB_PASSWORD=s3cretvalue', 'a password or secret']]) {
   assert.match(guardFailures({ ...okGuard, diff: `+${line}\n` }, limits)[0].text, new RegExp(what), `secret scan: ${what}`);
@@ -564,6 +577,18 @@ seen = await reviewOnce([prOf(1), prOf(2)], { runs: [doneRun([prOf(1)], { leftOu
 assert.deepEqual(seen.started[0].prs.map(p => p.number), [1, 2], 'marked ready again: a re-tag reviews it');
 seen = await reviewOnce([prOf(1)], { switchOffAt: 'claim' });
 assert.deepEqual([seen.claims, seen.retags, seen.started], [['In Review'], ['Ready for Review'], []], 'switched off as it claimed: the trigger tag is put back');
+{
+  // Settled at launch (or by --once) before any poll has read your GitHub login: the posted review is still found.
+  const report = path.join(rvTmp, 'report.md');
+  fs.writeFileSync(report, '---\nverdict: approve\n---\n');
+  const app = { cfg: { ...loadConfig(), githubOwner: 'octo-org' }, me: '', sideOn: () => true, tracker: () => ({}), boards: () => [], dryRun: () => false };
+  const gh = { me: async () => 'octocat', reviewedSince: async (pr, me) => me === 'octocat', isOpen: async () => true };
+  const side = createReviewer(app, { log: () => true, forget() {}, hoot() {}, appDir, trackers: {}, github: gh });
+  const run = { id: 'AB42-r1', ticket: 'AB#42', status: 'running', reviewNo: 1, prs: [prOf(1)], startedAt: 1, marker: postMarker('AB42-r1'), reportPath: report, _result: { subtype: 'success', is_error: false, total_cost_usd: 1 } };
+  side.state = { runs: [run], failures: {} };
+  await side.finish(run);
+  assert.deepEqual([run.status, app.me], ['done', 'octocat'], 'a settle before the first poll reads your login first');
+}
 fs.rmSync(rvTmp, { recursive: true });
 
 // ---- The two sides: neither imports the other; the shell keeps one's errors from the other ----

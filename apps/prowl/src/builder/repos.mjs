@@ -16,6 +16,9 @@ export async function ensureClone(cfg, repo, clone = ghClone) {
   if (!fs.existsSync(dir)) await clone(repo, dir);
   const origin = (await git(dir, 'remote', 'get-url', 'origin')).trim();
   if (!sameRepo(origin, repo)) throw new Error(`${dir} is a clone of ${origin}, not ${repo}`);
+  // Pushes go to the push URL, which a pushurl or pushInsteadOf can point somewhere else.
+  const pushTo = (await git(dir, 'remote', 'get-url', '--push', 'origin')).trim();
+  if (!sameRepo(pushTo, repo)) throw new Error(`${dir} pushes to ${pushTo}, not ${repo}`);
   return dir;
 }
 

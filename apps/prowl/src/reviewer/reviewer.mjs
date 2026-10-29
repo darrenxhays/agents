@@ -212,7 +212,7 @@ export function createReviewer(app, { log, forget, hoot, appDir, trackers, githu
       if (run.reviewedPrs.includes(pr.url)) continue;
       let got;
       try {
-        got = await gh.reviewedSince(pr, app.me, run.startedAt, run.marker || '');
+        got = await gh.reviewedSince(pr, (app.me ||= await gh.me()), run.startedAt, run.marker || ''); // settle can run before the first poll
       } catch (e) {
         unchecked.push(pr.url);
         log('warn', `${run.ticket}: couldn't check ${pr.repo}#${pr.number} for a posted review (${e.message})`, `posted:${run.id}`);

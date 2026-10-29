@@ -12,14 +12,14 @@ export const LOGS_DIR = path.join(HOME, 'logs');
 /** The folders a session may write in: its worktrees and its brief folder. */
 export const rootsOf = w => [...(w.turnKind === 'round' ? (w.round?.prs || []) : (w.repos || [])).map(r => r.worktree), w.briefDir].filter(Boolean);
 
-/** The `claude` arguments for a turn. `budget` is what is left of the session's spend cap (0 = no cap). */
+/** The `claude` arguments for a turn. `budget` is what is left of the tightest spend cap (0 = no cap). */
 export function workArgs(cfg, appDir, w, settingsPath, budget) {
   const b = cfg.builder;
   return [
     '-p', '--plugin-dir', appDir, ...rootsOf(w).flatMap(d => ['--add-dir', d]), '--add-dir', CONFIG_DIR,
     '--model', b.model || cfg.claude.model, '--effort', b.effort, '--permission-mode', cfg.claude.permissionMode,
     ...(w.sessionStarted ? ['--resume', w.sessionId] : ['--session-id', w.sessionId]),
-    ...(budget > 0 ? ['--max-budget-usd', String(Math.round(budget * 100) / 100)] : []),
+    ...(budget > 0 ? ['--max-budget-usd', String(Math.max(0.01, Math.round(budget * 100) / 100))] : []),
     ...(b.maxTurns > 0 ? ['--max-turns', String(b.maxTurns)] : []),
     ...fenceArgs(b.mcpAllow),
     '--settings', settingsPath,
