@@ -573,6 +573,28 @@ async function builds(assert) {
   await h.b.drain();
   assert.deepEqual([h.gh.prs.length, w.status, w.prs.length], [2, 'following', 2], 'the earlier PR is used');
   h.done();
+  // s while that lookup waits on GitHub: no PR is opened after it.
+  h = harness('ado', twoRepoBuild());
+  h.gh.prForBranch = async () => { h.b.stop(h.b.history()[0]); return null; };
+  await h.poll();
+  assert.deepEqual([h.gh.prs.length, h.b.history()[0].status], [0, 'stopped'], 'stopped before the PR');
+  h.done();
+
+  // Turns still running hold back what they may spend from the day's cap.
+  h = harness('ado', twoRepoBuild(), { cfgOver: { dailyBudgetUsd: 10 } });
+  const other = { uid: 'other', key: 'AB#999', status: 'active', step: 'session', turnBudgetUsd: 9, turns: [], _busy: true };
+  h.b.state.records.push(other);
+  await h.poll();
+  assert.equal(h.session.turns[0]?.budget, 1, "a turn gets the day's cap less what running turns may spend");
+  h.done();
+  h = harness('ado', twoRepoBuild(), { cfgOver: { dailyBudgetUsd: 10 } });
+  h.b.state.records.push({ ...other, turnBudgetUsd: 10 });
+  await h.poll();
+  assert.ok(!h.session.turns.length && h.logs.some(l => /turns running now may spend the rest of today's cap/.test(l)), 'none left: it waits');
+  h.done();
+
+  // Validation: an entry that isn't an object is an unusable result, not a crash.
+  assert.match(rules.validateBuild({ status: 'needs-approval', plan: 'plan.md', openQuestions: [null] }, '/'), /openQuestions must be a list of objects/);
 
   // Stopped while the tracker is down: In Development comes off once the tracker answers again.
   let down = false;
@@ -587,13 +609,29 @@ async function builds(assert) {
   await h.b.drain();
   assert.deepEqual([w.step, h.server.tags(123)], [null, ['Web']], 'and then In Development is removed');
   h.done();
+  // …unless the ticket was claimed again since: then its tags are the newer run's.
+  down = false;
+  h = harness('ado', twoRepoBuild(), { cfgOver: { approvePlans: 'ask' }, trackerWrap: t => ({ ...t, retag: async (...a) => { if (down) throw new Error('503 Service Unavailable'); return t.retag(...a); } }) });
+  await h.poll();
+  down = true;
+  await h.b.skip(h.b.needs()[0]);
+  down = false;
+  h.server.setTags(123, ['Web', 'Ready to Start']);
+  await h.poll();
+  w = h.b.history().find(r => r.status === 'stopped');
+  assert.equal(h.b.history().length, 2, 'claimed again by a new run');
+  w._retryAt = 0;
+  await h.b.drain();
+  assert.deepEqual([w.step, h.server.tags(123).includes('In Development')], [null, true], "the old retry leaves the new run's tags alone");
+  h.done();
 
   // A clone whose push URL leads somewhere else isn't used.
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'prowl-builder-')));
   const bare = makeRemote(root, 'octo-org/web');
   execFileSync('git', ['clone', '-q', bare, path.join(root, 'web')], { stdio: 'ignore' });
-  git(path.join(root, 'web'), 'config', 'remote.origin.pushurl', 'https://example.invalid/someone/web.git');
-  await assert.rejects(ensureClone({ workDir: root }, 'octo-org/web'), /pushes to https:\/\/example\.invalid\/someone\/web\.git, not octo-org\/web/);
+  git(path.join(root, 'web'), 'config', 'remote.origin.pushurl', bare);
+  git(path.join(root, 'web'), 'config', '--add', 'remote.origin.pushurl', 'https://example.invalid/someone/web.git');
+  await assert.rejects(ensureClone({ workDir: root }, 'octo-org/web'), /pushes to https:\/\/example\.invalid\/someone\/web\.git, not octo-org\/web/, 'every push URL is checked');
   fs.rmSync(root, { recursive: true, force: true });
 
   // Plans with Approve plans set to ask: enter with nothing approves; a note sends it back.
@@ -767,11 +805,40 @@ async function feedback(assert) {
   // --follow (or w in History) claims nothing, and leaves a review asked for or under way alone, even with feedback waiting.
   h = harness('ado', roundScript());
   h.gh.prs.push({ repo: 'octo-org/web', number: 9, url: 'https://github.com/octo-org/web/pull/9', title: 'AB#123: Save the cart', body: '', head: 'feature/cart', base: 'main', draft: false, state: 'OPEN', author: 'octocat', reviews: [], threads: [], checks: [], replies: [] });
-  addFeedback(h, 'https://github.com/octo-org/web/pull/9');
+  git(path.join(h.root, 'seed', 'octo-org/web'), 'push', '-q', 'origin', 'HEAD:refs/heads/feature/cart');
+  const early = addFeedback(h, 'https://github.com/octo-org/web/pull/9');
+  for (const x of [...early.reviews, ...early.threads]) x.at = x.lastAt = new Date(Date.now() - 3_600_000).toISOString(); // posted before the follow
   h.server.setTags(123, ['Web', 'In Review']);
+  h.app.me = ''; // before the first poll has read your login
   await h.b.enqueue('AB#123', 'follow');
   await h.b.drain();
   assert.deepEqual([h.b.history()[0].status, h.b.history()[0].rounds, h.server.tags(123)], ['following', 0, ['Web', 'In Review']], 'following, no round, tags untouched');
+  h.server.setTags(123, ['Web', 'Reviewed']);
+  await h.poll();
+  assert.equal(h.b.history()[0].rounds, 1, 'the review over, the feedback from before the follow gets its round');
+  h.done();
+
+  // A round re-reads the ticket before claiming it: a review asked for since follow() looked goes first.
+  let reads = 0;
+  h = harness('ado', roundScript(), { trackerWrap: t => ({ ...t, readItem: async (...a) => { if (h.flip && ++reads === 2) h.server.setTags(123, ['Web', 'Reviewed', 'In Review']); return t.readItem(...a); } }) });
+  await h.poll();
+  addFeedback(h, h.gh.prs[0].url);
+  h.server.setTags(123, ['Web', 'Reviewed']);
+  h.flip = true;
+  await h.poll();
+  assert.deepEqual([h.b.history()[0].rounds, h.server.tags(123)], [0, ['Web', 'Reviewed', 'In Review']], 'no round, no claim');
+  assert.ok(h.logs.some(l => /round not started, the ticket carries 'In Review' now/.test(l)));
+  // Dry run: a saved round waits; t on a ticket with a round queued stops it instead.
+  h.server.setTags(123, ['Web', 'Reviewed']);
+  const fw = h.b.history()[0];
+  Object.assign(fw, { step: 'round', roundPrs: [h.gh.prs[0]] });
+  h.app.dryRun = () => true;
+  await h.b.drain();
+  assert.deepEqual([fw.rounds, fw.step], [0, 'round'], 'dry run: a saved round waits');
+  h.app.dryRun = () => false;
+  h.b.stopFollowing(fw);
+  await h.b.drain();
+  assert.deepEqual([fw.rounds, fw.status, h.session.turns.filter(t => t.prompt.startsWith('/prowl:prowl-work feedback')).length], [0, 'stopped', 0], 'stop following: the queued round never runs');
   h.done();
 
   // A round that only disputes is dropped too when the branch moved: its replies would answer an old head.

@@ -53,13 +53,11 @@ const ACTIONS = ['fix', 'dispute', 'ask', 'park'];
 export function validateFeedback(r) {
   if (!r || typeof r !== 'object' || Array.isArray(r)) return 'it is not a JSON object';
   if (!['fixed', 'partial', 'blocked'].includes(r.status)) return 'status must be fixed, partial or blocked';
-  if (!Array.isArray(r.items)) return 'items must be a list';
+  for (const k of ['items', 'commits', 'questions']) if ((k === 'items' || r[k] != null) && (!Array.isArray(r[k]) || r[k].some(x => !x || typeof x !== 'object'))) return `${k} must be a list of objects`;
   const bad = r.items.find(it => !ACTIONS.includes(it?.action));
   if (bad) return `item ${bad?.thread || bad?.finding || '?'} has no action (fix, dispute, ask or park)`;
-  if (r.commits != null && !Array.isArray(r.commits)) return 'commits must be a list';
   const c = (r.commits || []).find(x => !/^[0-9a-f]{7,40}$/i.test(x?.sha || ''));
   if (c) return `the commit for ${c?.pr || c?.repo || '?'} is not a commit sha`;
-  if (r.questions != null && !Array.isArray(r.questions)) return 'questions must be a list';
   const qs = r.questions || [];
   const q = qs.find(x => !String(x?.text || '').trim() || !String(x?.searched || '').trim());
   if (q) return `the question "${String(q?.text || '').slice(0, 80)}" has no ${q?.text ? 'searched line' : 'text'}`;

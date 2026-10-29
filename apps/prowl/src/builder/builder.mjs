@@ -73,6 +73,8 @@ export function createBuilder(app, deps) {
   const current = key => records().find(r => r.key === key && !['done', 'stopped', 'ended'].includes(r.status));
   // Tickets being built, from the claim until their PRs open, Needs you included: the ones Max parallel builds counts.
   const building = () => records().filter(r => ['active', 'needs-you'].includes(r.status) && !r.prsOpenedAt && r.claimedAt);
+  let claiming = 0; // claims awaiting the tracker, which hold a slot too
+  const slotsUsed = (but = null) => building().filter(r => r !== but).length + claiming;
   side.running = () => records().filter(r => r.status === 'active');
   side.history = () => [...records()].sort((x, y) => (y.updatedAt || 0) - (x.updatedAt || 0));
   side.needs = () => side.state.needs;
@@ -178,7 +180,7 @@ export function createBuilder(app, deps) {
       delete side.state.handedBack[ticket.key];
       save();
     }
-    if (building().length >= b().maxConcurrent) {
+    if (slotsUsed() >= b().maxConcurrent) {
       log('info', `${ticket.key}: waiting, ${b().maxConcurrent} ticket${b().maxConcurrent > 1 ? 's are' : ' is'} already being built`, key);
       return;
     }
@@ -195,12 +197,15 @@ export function createBuilder(app, deps) {
   async function claim(ticket, source, w = null) {
     const tracker = trackerOf(w);
     const { owned } = tags();
+    claiming++;
     try {
       await tracker.claim(cfg(), ticket, owned, b().tags.inProgress);
     } catch (e) {
       log('warn', `${ticket.key}: not claimed (changed or claimed by someone else): ${e.message}`, `pick:${ticket.key}`);
       if (w) Object.assign(w, { status: 'ended', step: null, note: `not claimed: ${e.message}` });
       return null;
+    } finally {
+      claiming--;
     }
     w ||= newRecord(ticket, source);
     Object.assign(w, { claimedAt: Date.now(), step: 'adopt', status: 'active' });
@@ -225,6 +230,13 @@ export function createBuilder(app, deps) {
 
   /** Sets the tags Prowl owns on `w`'s ticket to `add` ('' for none); while the tracker fails, again each minute. Resolves true once done. */
   async function retagSoon(w, add) {
+    const newer = current(w.key);
+    if (w.step === 'retag' && newer && newer !== w) {
+      // Since claimed again, by a newer run: its tags are its own now.
+      Object.assign(w, { step: null, retagTo: undefined });
+      touch(w);
+      return true;
+    }
     try {
       await trackerOf(w).retag(cfg(), w.ref, tags().owned, add);
     } catch (e) {
@@ -246,6 +258,7 @@ export function createBuilder(app, deps) {
    * (--follow, w) claims nothing: a round claims the ticket when it starts, and a review asked for or under way is left be.
    */
   async function adoptOrRead(w) {
+    app.me ||= await gh.me(); // --follow and --work can run before the first poll
     const mine = (await gh.openPrs(cfg().githubOwner, w.key)).filter(p => !p.draft && isOwn(p));
     if (!mine.length) {
       if (w.source === 'follow') {
@@ -262,7 +275,8 @@ export function createBuilder(app, deps) {
     // Followed by hand while a review is asked for or under way: that review finishes first, as in follow().
     const reviewing = !w.claimedAt && [b().tags.done, b().tags.reviewing].some(t => tags().has(w.ticket?.tags || [], t));
     const due = reviewing ? [] : await dueFeedback(w);
-    Object.assign(w, { roundPrs: due, lastActivityAt: due.length ? 0 : Date.now(), step: due.length ? 'round' : reviewing ? null : 'end-round', status: due.length || !reviewing ? 'active' : 'following' });
+    // Waiting for a review, its feedback so far is still to come (lastActivityAt 0). A round straight after a claim holds it already.
+    Object.assign(w, { roundPrs: due, lastActivityAt: due.length || reviewing ? 0 : Date.now(), roundClaimed: due.length > 0 && Boolean(w.claimedAt), step: due.length ? 'round' : reviewing ? null : 'end-round', status: due.length || !reviewing ? 'active' : 'following' });
     touch(w);
     return undefined;
   }
@@ -311,8 +325,14 @@ export function createBuilder(app, deps) {
     if (rules.spendLevel(spent, c.ticketBudgetUsd) === 'over') throw new NeedsYou('cap', `Spend cap per ticket reached ($${c.ticketBudgetUsd}): no more sessions for ${w.key}.`, { retry: 'turn' });
     if (rules.spendLevel(today, c.dailyBudgetUsd) === 'over') throw new NeedsYou('cap', `Spend cap per day reached ($${c.dailyBudgetUsd}): no more sessions today.`, { retry: 'turn' });
     if (c.maxBudgetUsd > 0 && c.maxBudgetUsd - (w.sessionCostUsd || 0) <= 0) throw new NeedsYou('cap', `The session for ${w.key} reached its spend cap ($${c.maxBudgetUsd}).`, { retry: 'turn' });
+    // Turns still running may yet spend what they were given: the day's cap holds that back, and this turn waits for it.
+    const running = records().filter(r => r !== w && r.status === 'active' && ['session', 'settle'].includes(r.step)).reduce((n, r) => n + (r.turnBudgetUsd || 0), 0);
+    if (c.dailyBudgetUsd > 0 && running > 0 && today + running >= c.dailyBudgetUsd) {
+      w._retryAt = Date.now() + 60_000;
+      return log('info', `${w.key}: waiting: the turns running now may spend the rest of today's cap ($${c.dailyBudgetUsd})`, `work:${w.uid}`);
+    }
     // The turn may spend what's left of the tightest cap: the session's, the ticket's and the day's.
-    const left = [[c.maxBudgetUsd, w.sessionCostUsd || 0], [c.ticketBudgetUsd, spent], [c.dailyBudgetUsd, today]].filter(([cap]) => cap > 0).map(([cap, used]) => cap - used);
+    const left = [[c.maxBudgetUsd, w.sessionCostUsd || 0], [c.ticketBudgetUsd, spent], [c.dailyBudgetUsd, today + running]].filter(([cap]) => cap > 0).map(([cap, used]) => cap - used);
     const budget = left.length ? Math.min(...left) : 0; // 0: no cap
     w.turnBudgetUsd = budget;
     session.start(cfg(), appDir, w, w.prompt, budget);
@@ -508,7 +528,9 @@ export function createBuilder(app, deps) {
       const file = path.join(w.briefDir, `pr-${rec.repo.split('/')[1]}.json`);
       writeJson(file, { title, head: rec.branch, base: rec.base, body: spec.body || '', draft: Boolean(b().draftPrs) });
       // A retry first looks for the PR an earlier create opened before its answer was lost.
-      rec.pr = { ...((await gh.prForBranch(rec.repo, rec.branch)) || (await gh.createPr(rec.repo, file))), repo: rec.repo, title };
+      const opened = await gh.prForBranch(rec.repo, rec.branch);
+      if (!opened) checkStop(w);
+      rec.pr = { ...(opened || (await gh.createPr(rec.repo, file))), repo: rec.repo, title };
       rec.prBody = spec.body || '';
       touch(w);
       log('ok', `${w.key}: opened ${rec.pr.url}`);
@@ -583,6 +605,7 @@ export function createBuilder(app, deps) {
         // (Tags compare without case or punctuation, so Jira's Ready-for-Review matches.)
         const waiting = [b().tags.done, b().tags.reviewing, b().tags.inProgress].some(t => tags().has(item.tags, t));
         const due = waiting ? [] : await dueFeedback(w);
+        if (w.status !== 'following' || w.step) continue; // stopped following (t) while this looked
         if (!w.prs.length) {
           Object.assign(w, { status: 'done', endedAt: Date.now(), note: 'its PRs are merged or closed' });
           touch(w);
@@ -629,18 +652,27 @@ export function createBuilder(app, deps) {
   async function round(w) {
     checkStop(w);
     const tracker = trackerOf(w);
-    const ticket = await tracker.readItem(cfg(), w.ref);
-    try {
-      await tracker.claim(cfg(), ticket, tags().owned, b().tags.inProgress);
-    } catch (e) {
-      Object.assign(w, { step: null, status: 'following' });
-      touch(w);
-      return log('warn', `${w.key}: round not started, the ticket changed or someone else claimed it (${e.message})`);
+    if (!w.roundClaimed) {
+      const ticket = await tracker.readItem(cfg(), w.ref);
+      const back = why => {
+        Object.assign(w, { step: null, status: 'following' });
+        touch(w);
+        return log('warn', `${w.key}: round not started, ${why}`);
+      };
+      // Read again now: a review or someone else's claim since follow() looked waits for its turn.
+      const waiting = [b().tags.done, b().tags.reviewing, b().tags.inProgress].find(t => tags().has(ticket.tags, t));
+      if (waiting) return back(`the ticket carries '${waiting}' now`);
+      try {
+        await tracker.claim(cfg(), ticket, tags().owned, b().tags.inProgress);
+      } catch (e) {
+        return back(`the ticket changed or someone else claimed it (${e.message})`);
+      }
+      if (!on()) {
+        Object.assign(w, { status: 'following', step: null });
+        return release(w, ticket);
+      }
     }
-    if (!on()) {
-      Object.assign(w, { status: 'following', step: null });
-      return release(w, ticket);
-    }
+    w.roundClaimed = false;
     Object.assign(w, { status: 'active', claimedRoundAt: Date.now() });
     if (w.rounds >= b().maxRounds) throw new NeedsYou('cap', `Feedback rounds per ticket reached (${b().maxRounds}) for ${w.key}: fix the rest yourself, or raise the cap.`, { retry: 'round' });
     if (rules.spendLevel(rules.ticketSpend(records(), w.key), b().ticketBudgetUsd) === 'over') throw new NeedsYou('cap', `Spend cap per ticket reached ($${b().ticketBudgetUsd}) for ${w.key}.`, { retry: 'round' });
@@ -727,6 +759,7 @@ export function createBuilder(app, deps) {
         if (refused) throw new NeedsYou('guard', `Prowl won't push to ${p.repo}'s ${refused}.`);
         const head = (await git(p.worktree, 'rev-parse', 'HEAD')).trim();
         try {
+          await ensureClone(cfg(), p.repo, clone); // its push URL still leads to the repo
           await push(p.worktree, p.branch); // never forced
         } catch (e) {
           await trackerOf(w).retag(cfg(), w.ref, tags().owned, '');
@@ -864,6 +897,7 @@ export function createBuilder(app, deps) {
 
   /** t in History: stops following a ticket's PRs. */
   side.stopFollowing = w => {
+    if (w.step || w._busy) return side.stop(w); // a round queued or under way: stopped like any other work
     Object.assign(w, { status: 'done', endedAt: Date.now(), note: 'you stopped following it' });
     touch(w);
     log('info', `${w.key}: no longer following its PRs`);
@@ -890,7 +924,7 @@ export function createBuilder(app, deps) {
       w.ticket = ticket;
       return adoptOrRead(w);
     }
-    if (building().filter(r => r !== w).length >= b().maxConcurrent) {
+    if (slotsUsed(w) >= b().maxConcurrent) {
       w._retryAt = Date.now() + 30_000;
       log('info', `${w.key}: waiting, ${b().maxConcurrent} already being built`, `pick:${w.key}`);
       return undefined;
@@ -924,6 +958,7 @@ export function createBuilder(app, deps) {
         continue;
       }
       if (['claim', 'turn', 'round'].includes(w.step) && (!on() || side.paused)) continue;
+      if (['turn', 'round'].includes(w.step) && app.dryRun()) continue; // saved work waits; a queued claim ends itself in dry run
       if (w.stopRequested) { step(w, async x => stopNow(x)); continue; }
       step(w, STEPS[w.step]);
     }

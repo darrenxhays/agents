@@ -94,7 +94,7 @@ const isList = v => v == null || Array.isArray(v);
 export function validateBuild(r, briefDir) {
   if (!r || typeof r !== 'object' || Array.isArray(r)) return 'it is not a JSON object';
   if (!STATUSES.includes(r.status)) return `status must be one of ${STATUSES.join(', ')}`;
-  for (const k of ['repos', 'changes', 'openQuestions', 'commits', 'prs', 'checks']) if (!isList(r[k])) return `${k} must be a list`;
+  for (const k of ['repos', 'changes', 'openQuestions', 'commits', 'prs', 'checks']) if (!isList(r[k]) || r[k]?.some(x => !x || typeof x !== 'object')) return `${k} must be a list of objects`;
   const badRepo = [...(r.repos || []), ...(r.changes || []), ...(r.commits || []), ...(r.prs || []), ...(r.checks || [])].find(x => !REPO.test(x?.repo || ''));
   if (badRepo) return `"${badRepo?.repo || ''}" isn't a repo, as owner/name`;
   if (r.status === 'needs-repos' && !r.repos?.length) return 'needs-repos lists no repos';
@@ -106,6 +106,7 @@ export function validateBuild(r, briefDir) {
     if (shape) return `an open question's ${shape}`;
   }
   if (r.status === 'question') {
+    if (!r.question || typeof r.question !== 'object') return 'a question needs an id and a question';
     if (!r.question?.id || !String(r.question?.question || '').trim()) return 'a question needs an id and a question';
     const shape = questionShape(r.question, 'default');
     if (shape) return `the question's ${shape}`;

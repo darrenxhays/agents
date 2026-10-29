@@ -134,8 +134,10 @@ const revision = async (cfg, key) => (await api(cfg, `/rest/api/3/issue/${enc(ke
 
 /** The issue now: its key, title, url, labels (as tags), rev (the changelog's length), assignee and ref. */
 export async function readItem(cfg, ref) {
+  // The revision first: a write between the two reads then shows in the labels, or comes after rev, never neither.
+  const rev = await revision(cfg, ref.key);
   const issue = await api(cfg, `/rest/api/3/issue/${enc(ref.key)}?fields=summary,labels,assignee`);
-  return { ...ticketOf(cfg, issue), rev: await revision(cfg, issue.key) };
+  return { ...ticketOf(cfg, issue), rev };
 }
 
 /**

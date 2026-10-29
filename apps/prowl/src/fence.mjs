@@ -8,7 +8,8 @@ import path from 'node:path';
 /** Each fenced session kind, and the environment variable that holds the folders it may write in. */
 export const KINDS = { work: 'PROWL_WORK_ROOTS' };
 
-const GIT = String.raw`\bgit(?:\s+(?:-[Cc]\s+\S+|--\S+))*\s+`; // git, then any global options (-C dir, -c x=y, --git-dir=x)
+// git, then any global options (-C dir, -c x=y, -P, --git-dir=x or --git-dir x)
+const GIT = String.raw`\bgit(?:\s+(?:-[Cc]\s+\S+|--(?:git-dir|work-tree|namespace|exec-path|config-env)\s+\S+|-[a-zA-Z]+|--\S+))*\s+`;
 const PUSH_CONFIG = String.raw`(?:remote\.\S+\.pushurl|url\.\S+\.(?:push)?insteadof)`;
 const DENY = [
   [new RegExp(`${GIT}push\\b`), 'pushing: Prowl pushes the work itself once it has checked it'],
@@ -78,6 +79,21 @@ export function lex(text) {
       for (i++; i < text.length && text[i] !== '"'; i++) {
         if (text[i] === '\\' && i + 1 < text.length) { word.text += text[++i]; continue; }
         if (text[i] === '$' || text[i] === '`') word.dynamic = true;
+        if (text[i] === '$' && text[i + 1] === '(') { // "$(…)" runs too
+          let depth = 0;
+          const from = i;
+          for (; i < text.length; i++) { if (text[i] === '(') depth++; else if (text[i] === ')' && --depth === 0) break; }
+          word.text += text.slice(from, i + 1);
+          subs.push(text.slice(from + 2, i));
+          continue;
+        }
+        if (text[i] === '`') { // and so does "`…`"
+          const j = text.indexOf('`', i + 1);
+          word.text += text.slice(i, j < 0 ? undefined : j + 1);
+          subs.push(text.slice(i + 1, j < 0 ? undefined : j));
+          i = j < 0 ? text.length : j;
+          continue;
+        }
         word.text += text[i];
       }
     } else if (c === '\\') {
@@ -153,7 +169,7 @@ function writeTargets(cmd) {
   else if (name === 'mv') targets.push(...operands); // a move also removes its sources
   else if (name === 'cp' && dirFlag >= 0) targets.push(args[dirFlag].text.includes('=') ? { ...args[dirFlag], text: args[dirFlag].text.split('=')[1] } : args[dirFlag + 1]);
   else if (name === 'cp' && operands.length > 1) targets.push(operands.at(-1));
-  return { name, words, targets: targets.filter(Boolean) };
+  return { name, words, args, targets: targets.filter(Boolean) };
 }
 
 /** `p` as an absolute path, or '' when it depends on something the shell expands. */
@@ -170,10 +186,11 @@ function resolvePath(word, cwd) {
 // ---- Web writes: curl, wget and PowerShell ----
 
 const URLS = /\b(?:https?:\/\/)?((?:[\w-]+\.)+[a-z]{2,})(?::\d+)?(\/[^\s'"]*)?/gi;
-const CURL_WRITE = /(?:^|\s)(?:-X\s*|--request[\s=]+)['"]?(?:POST|PUT|PATCH|DELETE)\b|(?:^|\s)(?:-d|-F|-T|--data[\w-]*|--form[\w-]*|--upload-file|--json)(?:[\s=]|$|(?<=-[dFT])\S)/i;
+// A write method, or data to send: short flags may be combined (-sd, -sXPOST), and their case matters (-D, -f and -t read).
+const CURL_WRITE = [/(?:^|\s)(?:-[a-zA-Z]*X\s*|--request[\s=]+)['"]?(?:POST|PUT|PATCH|DELETE)\b/i, /(?:^|\s)-[a-zA-Z]*[dFT]|(?:^|\s)--(?:data[\w-]*|form[\w-]*|upload-file|json)(?:[\s=]|$)/];
 const WGET_WRITE = /(?:^|\s)--(?:method[\s=]+['"]?(?:POST|PUT|PATCH|DELETE)\b|post-data|post-file|body-data|body-file)/i;
 // Options a config file adds, which can make any call a write: curl's -K, and wget's --config, or a -e that sets them.
-const UNREAD_CONFIG = { curl: /(?:^|\s)(?:-K|--config\b)/, wget: /(?:^|\s)--config\b|(?:^|\s)(?:-e|--execute)[\s=]*['"]?(?:method|post|body|header|input|config)/i };
+const UNREAD_CONFIG = { curl: /(?:^|\s)(?:-[a-zA-Z]*K|--config\b)/, wget: /(?:^|\s)--config\b|(?:^|\s)(?:-e|--execute)[\s=]*['"]?(?:method|post|body|header|input|config)/i };
 const CONFIG_ENV = /\b(?:CURL_HOME|XDG_CONFIG_HOME|WGETRC)\b/; // where curl and wget look for their config files
 const PS_WRITE = /-Method\s+['"]?(?:Post|Put|Patch|Delete)\b|-Body\b|-InFile\b/i;
 
@@ -194,7 +211,7 @@ function webWrite(cmd, trackerHosts, text) {
   const tool = /(?:^|[\s/])(curl|wget)(?:\.exe)?\s/i.exec(` ${raw} `)?.[1]?.toLowerCase() || (/\b(?:Invoke-RestMethod|Invoke-WebRequest|irm|iwr)\b/i.test(raw) ? 'ps' : '');
   if (!tool) return '';
   if (tool !== 'ps' && (UNREAD_CONFIG[tool].test(raw) || CONFIG_ENV.test(text))) return `${tool} options from a config file the fence can't read`;
-  const writes = tool === 'curl' ? CURL_WRITE.test(raw) : tool === 'wget' ? WGET_WRITE.test(raw) : PS_WRITE.test(raw);
+  const writes = tool === 'curl' ? CURL_WRITE.some(re => re.test(raw)) : tool === 'wget' ? WGET_WRITE.test(raw) : PS_WRITE.test(raw);
   if (!writes) return '';
   const urls = cmd.filter(t => !t.op && !t.text.startsWith('-'));
   for (const u of urls) {
@@ -230,20 +247,20 @@ export function deniedCommand(command, ctx = {}) {
   for (const cmd of cmds) {
     const web = webWrite(cmd, ctx.trackerHosts || [], text);
     if (web) return web;
-    const { name, words, targets } = writeTargets(cmd);
-    const dashC = ['sh', 'bash', 'zsh', 'dash', 'ksh'].includes(name) ? words.findIndex(x => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(x.text)) : -1; // -c, -lc, -ec
-    if (dashC > 0 && words[dashC + 1]) {
-      const why = deniedCommand(words[dashC + 1].text, { ...ctx, cwd });
+    const { name, words, args, targets } = writeTargets(cmd);
+    const dashC = ['sh', 'bash', 'zsh', 'dash', 'ksh'].includes(name) ? args.findIndex(x => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(x.text)) : -1; // -c, -lc, -ec
+    if (dashC >= 0 && args[dashC + 1]) {
+      const why = deniedCommand(args[dashC + 1].text, { ...ctx, cwd });
       if (why) return why;
     }
     if (name === 'git' && ctx.alias) {
-      let i = 1;
+      let i = 0; // in git's own words, after env, command and the like
       let dir = cwd; // the alias is looked up where git runs: -C moves it
-      while (words[i] && /^-/.test(words[i].text)) {
-        if (words[i].text === '-C' && words[i + 1]) dir = resolvePath(words[i + 1], dir) || dir;
-        i += /^-[Cc]$/.test(words[i].text) ? 2 : 1;
+      while (args[i] && /^-/.test(args[i].text)) {
+        if (args[i].text === '-C' && args[i + 1]) dir = resolvePath(args[i + 1], dir) || dir;
+        i += /^(?:-[Cc]|--(?:git-dir|work-tree|namespace|exec-path|config-env))$/.test(args[i].text) ? 2 : 1;
       }
-      const sub = words[i]?.text;
+      const sub = args[i]?.text;
       if (sub && !GIT_BUILTINS.has(sub) && /\b(?:push|send-pack)\b/.test(ctx.alias(sub, dir) || '')) return `the git alias '${sub}', which pushes`;
     }
     if (!roots.length) continue;

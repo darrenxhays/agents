@@ -309,17 +309,19 @@ assert.equal(bash('git st'), 'allow', "an alias that doesn't push");
 const other = path.join(fenceHome, 'other-repo');
 const aliasIn = (name, dir) => (name === 'ship' && dir === other ? 'push --force' : '');
 const inDir = command => fenceDecision({ cwd: wt, tool_name: 'Bash', tool_input: { command } }, workEnv, aliasIn)?.hookSpecificOutput.permissionDecision || 'allow';
-assert.deepEqual([inDir(`git -C ${other} ship`), inDir('git ship')], ['deny', 'allow'], "a pushing alias in -C's repo");
+assert.deepEqual([inDir(`git -C ${other} ship`), inDir('git ship'), inDir(`env git -C ${other} ship`)], ['deny', 'allow', 'deny'], "a pushing alias in -C's repo");
+assert.equal(bash(`git -C ${wt} -P push --force origin HEAD:main`), 'deny', 'a push after a short global option');
 // curl and wget writes to GitHub's API, and GraphQL the fence can't read; reads are allowed.
 for (const c of ['curl -X POST https://api.github.com/repos/o/r/issues -d @body.json', 'curl -sS -XPATCH https://api.github.com/repos/o/r/pulls/1 --data "{}"',
   'curl -H "Authorization: bearer x" https://api.github.com/graphql -d \'{"query":"query{viewer{login}}"}\'', 'wget --method=DELETE https://api.github.com/repos/o/r/git/refs/heads/b',
   'wget --post-file=q.json https://api.github.com/graphql', 'gh api graphql -f query=@mutation.graphql', 'gh api graphql --input q.json',
   'gh api graphql -f query="$(cat q.graphql)"', 'Q=$(cat m); gh api graphql -f query="$Q"', 'curl --config request.conf https://api.github.com/graphql',
-  'curl -K req.conf', 'export CURL_HOME=.; curl https://api.github.com/graphql', 'wget -e post_data=x https://api.github.com/graphql']) {
+  'curl -K req.conf', 'export CURL_HOME=.; curl https://api.github.com/graphql', 'wget -e post_data=x https://api.github.com/graphql',
+  'curl -sK request.conf https://api.github.com/graphql', 'curl -sd @q.json https://api.github.com/graphql', 'curl -sXPOST https://api.github.com/repos/o/r/issues']) {
   assert.equal(bash(c), 'deny', `denies a GitHub write: ${c}`);
 }
 for (const c of ['curl https://api.github.com/repos/o/r/pulls/1', 'curl -s -X GET https://api.github.com/repos/o/r', 'wget -qO- https://api.github.com/repos/o/r',
-  'wget -e robots=off -qO- https://api.github.com/repos/o/r',
+  'wget -e robots=off -qO- https://api.github.com/repos/o/r', 'curl -fsSL https://api.github.com/repos/o/r', 'curl -D - -k https://api.github.com/repos/o/r',
   "gh api graphql -F owner=o -f query='query($owner:String!){repositoryOwner(login:$owner){id}}'"]) {
   assert.equal(bash(c), 'allow', `allows a GitHub read: ${c}`);
 }
@@ -336,7 +338,7 @@ for (const c of ['curl https://dev.azure.com/o/Shop/_apis/wit/workitems/1', 'cur
 // (The test's own folders are in the temp folder, which sessions may write in, so "outside" is the home folder or /etc here.)
 for (const c of ['echo x > /etc/x', 'echo x >> ~/outside.txt', 'ls | tee /etc/listing', `cp a ${path.join(os.homedir(), 'b')}`, 'mv notes.md ~/notes.md', 'rm -rf ~',
   'rm -rf /', 'echo $(echo x > /etc/y)', 'sh -c "echo > /etc/z"', 'echo x > $SOMEWHERE/out', 'cd / && rm -rf other', 'echo x > "$HOME/.bashrc"',
-  "bash -lc 'rm -f /etc/notes.txt'", 'zsh -ec "echo > /etc/z"']) {
+  "bash -lc 'rm -f /etc/notes.txt'", 'zsh -ec "echo > /etc/z"', `printf '%s' "$(rm -f /etc/notes.txt)"`, 'echo "`rm -f /etc/notes.txt`"']) {
   assert.equal(bash(c), 'deny', `denies a write outside: ${c}`);
 }
 for (const c of ['echo x > notes.md', `echo x > ${path.join(briefDir, 'result.json')}`, 'cp a b', 'rm -rf build', 'mv a.js b.js', 'npm test 2>&1 | tee test.log',
@@ -468,6 +470,7 @@ assert.equal(toPost[0].marker, '<!-- prowl-fix AB#42 r2 PRRT_owl1 fixed -->');
 assert.deepEqual(repliesToPost({ ticket: 'AB#42', round: 2, items: fixedResult.items, threads: roundThreads, pushed: 'x' }, [`Fixed in 3f2a1c9\n${toPost[0].marker}`, `x\n${toPost[2].marker}`]).map(r => r.thread), ['PRRT_bot1'], 'a restart posts nothing twice');
 assert.deepEqual(repliesToPost({ ticket: 'AB#42', round: 2, items: fixedResult.items, threads: roundThreads, pushed: null }, []).map(r => r.what), ['disputed'], "nothing pushed: no 'fixed' replies");
 assert.equal(repliesToPost({ ticket: 'AB#42', round: 2, items: [fixedResult.items[0], { ...fixedResult.items[0], finding: 'F-02' }], threads: roundThreads, pushed: 'x' }, []).length, 1, 'two items on one thread: one reply');
+assert.match(validateFeedback({ status: 'fixed', items: [], questions: [null] }), /questions must be a list of objects/, 'a null question: unusable, not a crash');
 const outputMd = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'skills', 'prowl-review', 'config', 'output.md'), 'utf8');
 assert.equal(fill(template(outputMd, 'Fix reply'), { 'comment prefix': template(outputMd, 'Comment prefix'), sha: '3f2a1c9', note: 'save() awaits.' }), '🦉 **PR-Owl Review** · Fixed in 3f2a1c9: save() awaits.');
 const started = fill(template(outputMd, 'Review started'), { ticket: 'AB#42', 'ticket link': 'https://dev.azure.com/o/p/_workitems/edit/42' });
@@ -529,7 +532,7 @@ const { createReviewer } = await import('./reviewer/reviewer.mjs');
 const rvTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'prowl-test-'));
 const prOf = (n, extra = {}) => ({ url: `https://github.com/octo-org/r${n}/pull/${n}`, title: `PR ${n}`, number: n, repo: `octo-org/r${n}`, author: 'teammate', draft: false, ...extra });
 /** A Reviewer with fake GitHub and board: `open` are the ticket's open PRs; resolves with what it claimed, started and logged. */
-async function reviewOnce(open, { runs = [], cfgOver = {}, me = 'octocat', switchOffAt = '' } = {}) {
+async function reviewOnce(open, { runs = [], cfgOver = {}, me = 'octocat', switchOffAt = '', retagFails = 0 } = {}) {
   const cfg = { ...loadConfig(), githubOwner: 'octo-org', workDir: rvTmp, ...cfgOver };
   const seen = { claims: [], retags: [], started: [], logs: [] };
   const ticket = { key: 'AB#42', title: 'Thing', url: 'https://dev.azure.com/o/Shop/_workitems/edit/42', tags: ['Ready for Review'], rev: 3, ref: { org: 'https://dev.azure.com/o', project: 'Shop', id: 42 } };
@@ -538,7 +541,7 @@ async function reviewOnce(open, { runs = [], cfgOver = {}, me = 'octocat', switc
     name: 'Azure DevOps', boardLabel: b => `${b.project} / ${b.team}`,
     findTickets: async () => ({ tickets: [ticket], variants: ['Ready for Review'] }),
     claim: async (c, t, drop, add) => { seen.claims.push(add); if (switchOffAt === 'claim') app.on = false; },
-    retag: async (c, ref, drop, add) => { seen.retags.push(add); },
+    retag: async (c, ref, drop, add) => { if (retagFails-- > 0) throw new Error('503 Service Unavailable'); seen.retags.push(add); },
     ticketText: async () => '',
   };
   const gh = { me: async () => me, openPrs: async () => open, headSha: async pr => `sha${pr.number}`, cloneMissing: async () => [], postComment: async () => '', humanApproved: async () => false };
@@ -551,6 +554,7 @@ async function reviewOnce(open, { runs = [], cfgOver = {}, me = 'octocat', switc
     return run;
   };
   await side.poll();
+  seen.side = side;
   return seen;
 }
 const doneRun = (prs, extra = {}) => ({ ticket: 'AB#42', status: 'done', reviewNo: 1, endedAt: 1, prs, contextPrs: [], approved: {}, reviewedHeads: Object.fromEntries(prs.map(p => [p.url, `old${p.number}`])), reportPath: '/nowhere.md', ...extra });
@@ -577,6 +581,13 @@ seen = await reviewOnce([prOf(1), prOf(2)], { runs: [doneRun([prOf(1)], { leftOu
 assert.deepEqual(seen.started[0].prs.map(p => p.number), [1, 2], 'marked ready again: a re-tag reviews it');
 seen = await reviewOnce([prOf(1)], { switchOffAt: 'claim' });
 assert.deepEqual([seen.claims, seen.retags, seen.started], [['In Review'], ['Ready for Review'], []], 'switched off as it claimed: the trigger tag is put back');
+seen = await reviewOnce([prOf(1)], { switchOffAt: 'claim', retagFails: 1 });
+assert.deepEqual([seen.retags, seen.side.state.releases.length], [[], 1], "a release the tracker refused is kept");
+seen.side.state.releases[0]._tagRetryAt = 0;
+seen.side.tick();
+await new Promise(r => setTimeout(r, 0));
+seen.side.tick();
+assert.deepEqual([seen.retags, seen.side.state.releases.length], [['Ready for Review'], 0], 'and retried until the trigger tag is back'); 
 {
   // Settled at launch (or by --once) before any poll has read your GitHub login: the posted review is still found.
   const report = path.join(rvTmp, 'report.md');

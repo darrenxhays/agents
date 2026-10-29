@@ -121,7 +121,12 @@ export function createReviewer(app, { log, forget, hoot, appDir, trackers, githu
     } catch (e) {
       return log('warn', `${ticket.key}: not claimed (changed or claimed by someone else): ${e.message}`, key);
     }
-    const release = () => applyTag({ tracker: c.taskBoard, ticket: ticket.key, ref: ticket.ref, id: `claim-${ticket.key}`, pendingTag: c.tags.trigger });
+    // Puts the trigger tag back. One the tracker refuses is kept in state.releases, which tick() retries each minute.
+    const release = async () => {
+      const r = { tracker: c.taskBoard, ticket: ticket.key, ref: ticket.ref, id: `claim-${ticket.key}`, pendingTag: c.tags.trigger };
+      await applyTag(r);
+      if (r.pendingTag != null) { (state.releases ??= []).push(r); save(); }
+    };
     if (!toReview.length) {
       hoot(`Every PR for ${ticket.title} is already approved, marking as '${c.tags.done}'`, 'cheer');
       return log('ok', `${ticket.key}: every PR is already approved and unchanged since; nothing to re-review`);
@@ -308,9 +313,13 @@ export function createReviewer(app, { log, forget, hoot, appDir, trackers, githu
         checkPosted(run).finally(() => { run._checking = false; });
       }
     }
-    for (const run of side.state.runs) {
+    for (const run of [...side.state.runs, ...(side.state.releases || [])]) {
       const ended = run.status !== 'running' && run.status !== 'stopping';
       if (ended && run.pendingTag != null && !run._tagging && Date.now() >= (run._tagRetryAt || 0)) applyTag(run);
+    }
+    if (side.state.releases?.some(r => r.pendingTag == null)) {
+      side.state.releases = side.state.releases.filter(r => r.pendingTag != null);
+      save();
     }
   };
 
