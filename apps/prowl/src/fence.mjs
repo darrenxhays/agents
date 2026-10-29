@@ -183,9 +183,11 @@ function writeTargets(cmd) {
     const wrapper = words[at++].text;
     if (!Object.hasOwn(wrappers, wrapper)) continue;
     while (at < words.length && /^-/.test(words[at].text)) { // command -- rm, env -i rm, env -u NAME rm
-      if (/^(?:-S|--split-string)$/.test(words[at].text)) split = words[at + 1];
-      if (wrapper === 'env' && /^(?:-C|--chdir)$/.test(words[at].text)) chdir = words[at + 1];
-      if (wrapper === 'env' && words[at].text.startsWith('--chdir=')) chdir = { ...words[at], text: words[at].text.slice(8) };
+      const [opt, attached] = /^(-[CS]|--chdir=|--split-string=)(.+)$/.exec(words[at].text)?.slice(1) || [words[at].text, null]; // -C/dir, -S'rm -rf'
+      const value = attached != null ? { ...words[at], text: attached } : words[at + 1];
+      if (wrapper === 'env' && /^(?:-S|--split-string=?)$/.test(opt)) split = value;
+      if (wrapper === 'env' && /^(?:-C|--chdir=?)$/.test(opt)) chdir = value;
+      if (attached != null) { at++; continue; }
       at += wrappers[wrapper]?.test(words[at].text) ? 2 : 1;
     }
   }
@@ -308,7 +310,8 @@ export function deniedCommand(command, ctx = {}) {
       let i = 0; // in git's own words, after env, command and the like
       let dir = here; // the alias is looked up where git runs: -C moves it
       while (args[i] && /^-/.test(args[i].text)) {
-        if (args[i].text === '-C' && args[i + 1]) dir = resolvePath(args[i + 1], dir) || dir;
+        if (args[i].text === '-C' && args[i + 1]) dir = dir == null ? null : resolvePath(args[i + 1], dir) || null; // unreadable: unknown
+        if (/^--git-dir\b/.test(args[i].text)) dir = null; // another repository's config: not looked up
         if (args[i].text === '-c' && args[i + 1]) { // -c 'alias.x=push …', -c remote.origin.pushurl=…
           const why = pushConfig(args[i + 1].text.split('=')[0], args[i + 1].text.split('=').slice(1).join('='));
           if (why) return why;

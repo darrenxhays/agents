@@ -55,6 +55,8 @@ export function validateFeedback(r) {
   if (!['fixed', 'partial', 'blocked'].includes(r.status)) return 'status must be fixed, partial or blocked';
   if (r.summary != null && typeof r.summary !== 'string') return 'summary must be text';
   for (const k of ['items', 'commits', 'questions']) if ((k === 'items' || r[k] != null) && (!Array.isArray(r[k]) || r[k].some(x => !x || typeof x !== 'object'))) return `${k} must be a list of objects`;
+  const notText = r.items.find(it => ['thread', 'finding', 'pr', 'note'].some(k => it[k] != null && typeof it[k] !== 'string'));
+  if (notText) return `item ${typeof notText.thread === 'string' ? notText.thread : '?'}: thread, finding, pr and note must be text`;
   const bad = r.items.find(it => !ACTIONS.includes(it?.action));
   if (bad) return `item ${bad?.thread || bad?.finding || '?'} has no action (fix, dispute, ask or park)`;
   const c = (r.commits || []).find(x => !/^[0-9a-f]{7,40}$/i.test(x?.sha || ''));
