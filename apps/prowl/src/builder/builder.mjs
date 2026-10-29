@@ -201,11 +201,15 @@ export function createBuilder(app, deps) {
     try {
       await tracker.claim(cfg(), ticket, owned, b().tags.inProgress);
     } catch (e) {
-      if (!(await landed(tracker, ticket, e))) {
+      if (e.lost) {
         log('warn', `${ticket.key}: not claimed (changed or claimed by someone else): ${e.message}`, `pick:${ticket.key}`);
         if (w) Object.assign(w, { status: 'ended', step: null, note: `not claimed: ${e.message}` });
         return null;
       }
+      w ||= newRecord(ticket, source);
+      Object.assign(w, { claimedAt: Date.now(), ticket });
+      unsure(w, ticket, e, 'adopt');
+      return null;
     } finally {
       claiming--;
     }
@@ -224,16 +228,12 @@ export function createBuilder(app, deps) {
   }
 
   /**
-   * After a claim failed with `e`: true when it reached the tracker anyway (the check after the write failed, say), as
-   * the ticket now carries In Development where it didn't. A claim someone else won (`e.lost`) never counts.
+   * A claim that failed with `e`, but not because someone else won (`e.lost`): its write may have reached the tracker
+   * (the check after it failed, say), so the ticket may be ours, or a rival's. A person judges it in Needs you, so it
+   * is neither stranded In Development nor built twice; enter goes on with `retry`.
    */
-  async function landed(tracker, ticket, e) {
-    if (e.lost) return false;
-    const has = t => tags().has(t, b().tags.inProgress);
-    const now = await tracker.readItem(cfg(), ticket.ref || ticket).catch(() => null);
-    const ours = Boolean(now && has(now.tags) && !has(ticket.tags || []));
-    if (ours) log('warn', `${ticket.key}: couldn't confirm the claim (${e.message}), but it is '${b().tags.inProgress}' now: going on with it`);
-    return ours;
+  function unsure(w, ticket, e, retry) {
+    raise(w, 'conflict', `Prowl couldn't confirm its claim on ${ticket.key} (${e.message}). If no one else is working on it, enter goes on; s ends it and takes '${b().tags.inProgress}' off.`, { retry });
   }
 
   /** Switched off as it claimed `ticket`: puts back what the claim took off. */
@@ -681,7 +681,9 @@ export function createBuilder(app, deps) {
       try {
         await tracker.claim(cfg(), ticket, tags().owned, b().tags.inProgress);
       } catch (e) {
-        if (!(await landed(tracker, ticket, e))) return back(`the ticket changed or someone else claimed it (${e.message})`);
+        if (e.lost) return back(`the ticket changed or someone else claimed it (${e.message})`);
+        w.roundClaimed = true; // enter goes on with the round, without claiming again
+        return unsure(w, ticket, e, 'round');
       }
       if (!on()) {
         Object.assign(w, { status: 'following', step: null });
@@ -697,7 +699,9 @@ export function createBuilder(app, deps) {
     const prs = [];
     const answersText = [];
     const collectedAt = Date.now(); // feedback after this is the next round's
-    for (const pr of w.roundPrs || []) {
+    // Which PRs are due, read again now (a retry can come minutes after follow() looked): the round ends with every PR's feedback collected.
+    w.roundPrs = await dueFeedback(w);
+    for (const pr of w.roundPrs) {
       const facts = await gh.prFacts(pr);
       if (facts.state !== 'OPEN' || prRefusal(facts, pr, app.me, b().protectedBranches)) continue;
       const dir = await ensureClone(cfg(), pr.repo, clone);
@@ -799,8 +803,8 @@ export function createBuilder(app, deps) {
     const tpl = heading => outputTemplate(appDir, heading);
     for (const p of w.round.prs) {
       const items = (w.result.items || []).filter(it => forPr(it, p) || (w.round.prs.length === 1 && !it.pr));
-      // The round in each marker: n.round from a ticket's second record on, so following it again never matches an old reply.
-      const round = w.n > 1 ? `${w.n}.${w.rounds}` : w.rounds;
+      // The round in each marker is record.round, so following a ticket again never matches an old reply, nor one of Fix my PRs (r1).
+      const round = `${w.n}.${w.rounds}`;
       const todo = items.length ? repliesToPost({ ticket: w.key, round, items, threads: p.threads, pushed: p.pushedSha }, await gh.prCommentBodies(p)) : [];
       for (const r of todo) {
         checkStop(w);

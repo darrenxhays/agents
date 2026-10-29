@@ -71,7 +71,8 @@ export function guardFailures({ base, head, ancestor, onBranch = true, remote, e
   if (lines > maxChangedLines) out.push({ kind: 'guard', text: `it changes ${lines} lines, over Max lines changed (${maxChangedLines})` });
   const hit = files.filter(f => protectedPaths.some(g => globRe(g).test(f)));
   if (hit.length) out.push({ kind: 'guard', text: `it changes ${hit.slice(0, 3).join(', ')}, which match Paths that need a person` });
-  const added = String(diff).split('\n').filter(l => l.startsWith('+') && !l.startsWith('+++')).map(l => l.slice(1));
+  // Added lines: "+…", or in a merge's combined diff (--cc) "++…" or " +…", without the markers. "+++ b/file" is a header.
+  const added = String(diff).split('\n').filter(l => /^[+ ]?\+/.test(l) && !/^\+\+\+ (?:[ab]\/|\/dev\/null)/.test(l)).map(l => l.replace(/^(?:\+\+|[ +]\+|\+)/, ''));
   const secrets = [...new Set(added.flatMap(l => SECRET_PATTERNS.filter(([re]) => re.test(l)).map(([, what]) => what)))];
   if (secrets.length) out.push({ kind: 'guard', text: `its added lines look like they hold ${secrets.join(' and ')}` });
   return out;

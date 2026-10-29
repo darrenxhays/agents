@@ -175,7 +175,11 @@ function writeTargets(cmd) {
   }
   let at = 0;
   const lead = ['sudo', 'env', 'command', 'builtin', 'exec', 'nohup', 'time', 'if', 'then', 'else', 'elif', 'while', 'until', 'do', '!', '{'];
-  while (at < words.length && (/^\w+=/.test(words[at].text) || lead.includes(words[at].text))) at++;
+  const wrappers = ['sudo', 'env', 'command', 'builtin', 'exec', 'nohup', 'time'];
+  while (at < words.length && (/^\w+=/.test(words[at].text) || lead.includes(words[at].text))) {
+    at++;
+    if (wrappers.includes(words[at - 1].text)) while (at < words.length && /^-/.test(words[at].text)) at++; // command -- rm, env -i rm
+  }
   const name = path.basename(words[at]?.text || '');
   const args = words.slice(at + 1);
   const operands = args.filter(a => a.dynamic || !a.text.startsWith('-') || a.text === '-');
@@ -229,7 +233,7 @@ function webWrite(cmd, trackerHosts, text) {
   const writes = tool === 'curl' ? CURL_WRITE.some(re => re.test(raw)) : tool === 'wget' ? WGET_WRITE.test(raw) : PS_WRITE.test(raw);
   if (!writes) return '';
   const urls = cmd.filter(t => !t.op && !t.text.startsWith('-'));
-  for (const u of urls) {
+  for (const u of cmd.filter(t => !t.op)) { // options too: --url=https://…
     for (const [, host, route] of u.text.matchAll(URLS)) {
       if (isGitHub(host, route)) return 'a write to the GitHub API: Prowl posts on GitHub itself';
       if (hostIn(host, trackerHosts)) return 'a write to the tracker: Prowl tags the ticket itself';
@@ -296,9 +300,10 @@ export function deniedCommand(command, ctx = {}) {
       // The same as DENY, for options the regexes can't step over (a quoted -C "My App", say).
       if (sub === 'push' || sub === 'send-pack' || (['subtree', 'lfs'].includes(sub) && then === 'push')) return 'pushing: Prowl pushes the work itself once it has checked it';
       if (sub === 'remote' && /^(?:add|remove|rm|rename|set-url|set-head|set-branches|prune|update)$/.test(then || '')) return 'changing git remotes';
-      if (sub === 'config') { // git config [options] key [value]
-        const rest = args.slice(i + 1).filter(a => !a.text.startsWith('-'));
-        const why = rest[0] && pushConfig(rest[0].text, rest.slice(1).map(a => a.text).join(' '));
+      if (sub === 'config') { // git config [set|add …] [options] key [value]
+        const rest = args.slice(i + 1).filter(a => !a.text.startsWith('-')).map(a => a.text);
+        const k = rest.findIndex(t => /^(?:alias|remote|url)\./i.test(t));
+        const why = k >= 0 && pushConfig(rest[k], rest.slice(k + 1).join(' '));
         if (why) return why;
       }
       if (sub && ctx.alias && !GIT_BUILTINS.has(sub) && /\b(?:push|send-pack)\b/.test(ctx.alias(sub, dir) || '')) return `the git alias '${sub}', which pushes`;
@@ -310,7 +315,7 @@ export function deniedCommand(command, ctx = {}) {
       if (!file) return `writing to ${t.text}, a path the fence can't resolve`;
       if (!insideRoots(file, writable)) return `writing outside the session's folders (${file})`;
     }
-    if (name === 'cd' && words[1] && !words[1].dynamic) cwd = resolvePath(words[1], cwd) || cwd;
+    if (name === 'cd' && args[0] && !args[0].dynamic) cwd = resolvePath(args[0], cwd) || cwd; // after if, then and the like too
   }
   return '';
 }

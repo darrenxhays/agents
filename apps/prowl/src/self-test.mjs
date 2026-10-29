@@ -312,7 +312,8 @@ const inDir = command => fenceDecision({ cwd: wt, tool_name: 'Bash', tool_input:
 assert.deepEqual([inDir(`git -C ${other} ship`), inDir('git ship'), inDir(`env git -C ${other} ship`)], ['deny', 'allow', 'deny'], "a pushing alias in -C's repo");
 assert.equal(bash(`git -C ${wt} -P push --force origin HEAD:main`), 'deny', 'a push after a short global option');
 assert.deepEqual([bash(`git -C "${wt}/My App" push --force origin HEAD:main`), bash(`git -C "${wt}/My App" remote set-url origin x`)], ['deny', 'deny'], 'after a quoted path with a space');
-for (const c of ["git -c 'alias.ship=push --force' ship origin HEAD:main", "git config 'alias.ship' 'push --force'", 'git -c "remote.origin.pushurl=https://example.invalid/r.git" fetch']) {
+for (const c of ["git -c 'alias.ship=push --force' ship origin HEAD:main", "git config 'alias.ship' 'push --force'", 'git -c "remote.origin.pushurl=https://example.invalid/r.git" fetch',
+  "git config set 'alias.ship' 'push --force'; git ship origin HEAD:main", "git config --global --add 'alias.ship' '!git push'"]) {
   assert.equal(bash(c), 'deny', `denies quoted push config: ${c}`);
 }
 // A shell reading a heredoc runs it; a subshell's cd ends with it.
@@ -325,7 +326,8 @@ for (const c of ['curl -X POST https://api.github.com/repos/o/r/issues -d @body.
   'wget --post-file=q.json https://api.github.com/graphql', 'gh api graphql -f query=@mutation.graphql', 'gh api graphql --input q.json',
   'gh api graphql -f query="$(cat q.graphql)"', 'Q=$(cat m); gh api graphql -f query="$Q"', 'curl --config request.conf https://api.github.com/graphql',
   'curl -K req.conf', 'export CURL_HOME=.; curl https://api.github.com/graphql', 'wget -e post_data=x https://api.github.com/graphql',
-  'curl -sK request.conf https://api.github.com/graphql', 'curl -sd @q.json https://api.github.com/graphql', 'curl -sXPOST https://api.github.com/repos/o/r/issues']) {
+  'curl -sK request.conf https://api.github.com/graphql', 'curl -sd @q.json https://api.github.com/graphql', 'curl -sXPOST https://api.github.com/repos/o/r/issues',
+  'curl -X POST --url=https://api.github.com/repos/o/r/issues/1/comments -d \'{"body":"done"}\'']) {
   assert.equal(bash(c), 'deny', `denies a GitHub write: ${c}`);
 }
 for (const c of ['curl https://api.github.com/repos/o/r/pulls/1', 'curl -s -X GET https://api.github.com/repos/o/r', 'wget -qO- https://api.github.com/repos/o/r',
@@ -347,7 +349,8 @@ for (const c of ['curl https://dev.azure.com/o/Shop/_apis/wit/workitems/1', 'cur
 for (const c of ['echo x > /etc/x', 'echo x >> ~/outside.txt', 'ls | tee /etc/listing', `cp a ${path.join(os.homedir(), 'b')}`, 'mv notes.md ~/notes.md', 'rm -rf ~',
   'rm -rf /', 'echo $(echo x > /etc/y)', 'sh -c "echo > /etc/z"', 'echo x > $SOMEWHERE/out', 'cd / && rm -rf other', 'echo x > "$HOME/.bashrc"',
   "bash -lc 'rm -f /etc/notes.txt'", 'zsh -ec "echo > /etc/z"', `printf '%s' "$(rm -f /etc/notes.txt)"`, 'echo "`rm -f /etc/notes.txt`"', '(rm -rf /etc/other)', 'true && (cd / && rm -rf other)',
-  'if rm -rf /etc/other; then echo cleaned; fi', 'while true; do rm -f /etc/x; done', '{ rm -rf /etc/other; }']) {
+  'if rm -rf /etc/other; then echo cleaned; fi', 'while true; do rm -f /etc/x; done', '{ rm -rf /etc/other; }', 'if cd /etc; then rm -rf build; fi',
+  'command -- rm -rf /etc/other', 'env -i rm -f /etc/x']) {
   assert.equal(bash(c), 'deny', `denies a write outside: ${c}`);
 }
 for (const c of ['echo x > notes.md', `echo x > ${path.join(briefDir, 'result.json')}`, 'cp a b', 'rm -rf build', 'mv a.js b.js', 'npm test 2>&1 | tee test.log',
@@ -527,6 +530,7 @@ assert.match(guardFailures({ ...okGuard, numstat: '1\t0\t.github/workflows/deplo
 assert.match(guardFailures({ ...okGuard, numstat: '0\t0\t\0ci.yml\0.github/workflows/ci.yml\0' }, limits)[0]?.text || '', /Paths that need a person/, 'numstat -z: a rename');
 assert.deepEqual(guardFailures({ ...okGuard, numstat: '3\t1\tsrc/a.js\0' }, limits), [], 'numstat -z: a plain change');
 assert.match(guardFailures({ ...okGuard, diff: `++const t = 'ghp_${'a'.repeat(36)}';\n` }, limits)[0]?.text || '', /a GitHub token/, "a merge's own line (--cc)");
+assert.match(guardFailures({ ...okGuard, diff: '++DB_PASSWORD=s3cretvalue\n' }, limits)[0]?.text || '', /password or secret/, 'without its two markers, for anchored patterns');
 const { hostOf } = await import('./git.mjs');
 assert.deepEqual(['https://github.com/o/r.git', 'git@github.com:o/r.git', 'ssh://git@example.invalid/o/r.git', '/srv/o/r.git'].map(hostOf), ['github.com', 'github.com', 'example.invalid', '']);
 for (const [line, what] of [['-----BEGIN RSA PRIVATE KEY-----', 'a private key'], ['key = "AKIAABCDEFGHIJKLMNOP"', 'an AWS access key'],

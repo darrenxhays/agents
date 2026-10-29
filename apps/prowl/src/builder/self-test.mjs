@@ -598,11 +598,37 @@ async function builds(assert) {
   assert.match(rules.validateBuild({ status: 'needs-approval', plan: {}, openQuestions: [] }, '/'), /plan must be text/);
   assert.match(rules.validateBuild({ status: 'needs-repos', repos: [{ repo: ['octo-org/api'] }] }, '/'), /isn't a repo/);
 
-  // A claim whose check failed after its write reached the tracker is still ours.
+  // A claim that failed, but not to someone else (its check failed after the write, say), waits in Needs you.
   h = harness('ado', twoRepoBuild(), { trackerWrap: t => ({ ...t, claim: async (...a) => { await t.claim(...a); throw new Error('ADO GET /x: 502 Bad Gateway'); } }) });
   await h.poll();
-  assert.equal(h.b.history()[0]?.status, 'following', 'built anyway');
-  assert.ok(h.logs.some(l => /couldn't confirm the claim/.test(l)));
+  assert.deepEqual([h.b.needs()[0]?.kind, h.session.turns.length], ['conflict', 0], "an unconfirmed claim: you judge it");
+  assert.match(h.b.needs()[0].question, /couldn't confirm its claim on AB#123/);
+  assert.equal(h.b.history().length, 1, 'kept in a record, holding its slot');
+  h.b.answer(h.b.needs()[0], '');
+  await h.b.drain();
+  assert.equal(h.b.history()[0].status, 'following', 'enter: built');
+  h.done();
+
+  // A merge whose conflict resolution adds a secret: the merge's own lines are scanned too.
+  h = harness('ado', (w, prompt) => {
+    if (!prompt.startsWith('approve')) return twoRepoBuild()(w, prompt);
+    const rec = w.repos.find(r => r.repo === 'octo-org/web');
+    const start = git(rec.worktree, 'rev-parse', 'HEAD');
+    commit(rec.worktree, { 'src/a.js': 'one\n' }, 'one');
+    git(rec.worktree, 'checkout', '-q', '--detach', start);
+    const other = commit(rec.worktree, { 'src/a.js': 'two\n' }, 'two');
+    git(rec.worktree, 'checkout', '-q', rec.branch);
+    try { git(rec.worktree, 'merge', '-q', other); } catch { /* the conflict */ }
+    fs.writeFileSync(path.join(rec.worktree, 'src/a.js'), 'DB_PASSWORD=s3cretvalue\n');
+    git(rec.worktree, 'add', '-A');
+    git(rec.worktree, 'commit', '-q', '-m', 'Merge');
+    const commits = [{ repo: 'octo-org/web', sha: git(rec.worktree, 'rev-parse', 'HEAD') },
+      { repo: 'octo-org/api', sha: commit(worktreeOf(w, 'octo-org/api'), { 'src/carts.js': 'x\n' }, 'api') }];
+    return { result: { status: 'done', commits, prs: commits.map(c => ({ repo: c.repo, title: `${w.key}: Merge` })), checks: [] } };
+  });
+  await h.poll();
+  assert.match(h.b.needs()[0]?.question || '', /password or secret/, "a secret only in a merge's resolution");
+  assert.ok(!remoteHas(h.bares['octo-org/web'], branch), 'nothing pushed');
   h.done();
 
   // A secret in any commit pushed stops the push, even when a later commit takes it out again.
@@ -776,7 +802,7 @@ async function feedback(assert) {
   assert.ok(roundTurn.prompt.startsWith('/prowl:prowl-work feedback ') && !roundTurn.resumed, 'a fresh session');
   assert.ok(read(w.round ? w.round.feedbackPath : path.join(w.briefDir, 'feedback-1.md')).includes('Handle empty carts, please.'), 'briefed with the reviews requesting changes');
   assert.equal(remoteFile(h.bares['octo-org/web'], web.head, 'src/cart.js'), 'export const save = cart => (cart.length ? cart : null);\n', "pushed to the PR's branch");
-  assert.deepEqual(web.replies.map(r => [r.commentId, /prowl-fix AB#123 r1 PRRT_\d (fixed|disputed)/.exec(r.body)?.[1]]), [[11, 'fixed'], [12, 'disputed']], 'one reply per thread fixed or disputed');
+  assert.deepEqual(web.replies.map(r => [r.commentId, /prowl-fix AB#123 r1\.1 PRRT_\d (fixed|disputed)/.exec(r.body)?.[1]]), [[11, 'fixed'], [12, 'disputed']], 'one reply per thread fixed or disputed');
   assert.ok(web.replies[0].body.includes('save() skips an empty cart now.') && web.threads.every(t => !t.resolved), 'never resolved');
   assert.deepEqual(h.server.tags(123), ['Web', 'Reviewed', 'Ready for Review'], 'back to the done tag');
   await h.poll();
@@ -938,9 +964,21 @@ async function feedback(assert) {
   h.gh.prFacts = async pr => { const x = h.b.history()[0]; if (x.step === 'round' && x.roundClaimed && !failed) { failed = true; throw new Error('502 Bad Gateway'); } return facts(pr); };
   await h.poll();
   assert.deepEqual([failed, h.b.history()[0].rounds], [true, 0]);
+  addFeedback(h, h.gh.prs.find(p => p.repo === 'octo-org/api').url); // while the retry waits
   h.b.history()[0]._retryAt = 0;
   await h.b.drain();
   assert.equal(h.b.history()[0].rounds, 1, 'the retry starts the round');
+  assert.ok(read(path.join(h.b.history()[0].briefDir, 'feedback-1.md')).includes('## octo-org/api#2'), 'with the feedback that came in meanwhile');
+  h.done();
+
+  // A reply Fix my PRs posted (2.11.3's marker, r1) doesn't stand in for the Builder's.
+  h = harness('ado', roundScript());
+  await h.poll();
+  const legacy = addFeedback(h, h.gh.prs[0].url);
+  legacy.replies.push({ commentId: 11, body: 'Fixed in abc1234\n<!-- prowl-fix AB#123 r1 PRRT_1 fixed -->' });
+  h.server.setTags(123, ['Web', 'Reviewed']);
+  await h.poll();
+  assert.equal(legacy.replies.length, 3, 'both replies posted');
   h.done();
 
   // Feedback posted while a round runs is the next round's, not lost when the round ends.
