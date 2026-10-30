@@ -329,6 +329,10 @@ assert.deepEqual([fromHome(`cd ${wt}; rm -rf web`), fromHome(`sh -c 'cd ${wt}; r
   ['deny', 'deny', 'allow', 'allow'], 'after a cd that may have failed');
 assert.deepEqual([fromHome(`cd ${wt}; out=$(rm -rf web 2>&1)`), fromHome(`cd ${wt}; sh -c 'rm -rf web'`), fromHome(`cd ${wt} &&\nprintf 'ok' > notes.txt`)],
   ['deny', 'deny', 'allow'], "nested checks too; a line break after && keeps the join");
+// Brace expansion: each word it makes is a target. An alias is looked up wherever a failed cd may have left the shell.
+assert.deepEqual([bash('rm -rf {dist,../../../etc/dist}'), bash('rm -rf {dist,build}'), bash('rm -rf x{1..3}'), bash("rm -rf '{dist,/etc/x}'")], ['deny', 'allow', 'deny', 'allow'], 'brace expansion');
+const shipHere = (name, dir) => (name === 'ship' && dir === wt ? 'push --force' : '');
+assert.equal(fenceDecision({ cwd: wt, tool_name: 'Bash', tool_input: { command: `cd ${other}; git ship origin HEAD:main` } }, workEnv, shipHere)?.hookSpecificOutput.permissionDecision, 'deny', 'an alias where a failed cd left the shell');
 // curl and wget writes to GitHub's API, and GraphQL the fence can't read; reads are allowed.
 for (const c of ['curl -X POST https://api.github.com/repos/o/r/issues -d @body.json', 'curl -sS -XPATCH https://api.github.com/repos/o/r/pulls/1 --data "{}"',
   'curl -H "Authorization: bearer x" https://api.github.com/graphql -d \'{"query":"query{viewer{login}}"}\'', 'wget --method=DELETE https://api.github.com/repos/o/r/git/refs/heads/b',

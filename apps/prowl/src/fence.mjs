@@ -160,11 +160,30 @@ export function lex(text) {
     } else if (/\s/.test(c)) {
       end();
     } else {
+      if (c === '{') w().braces = true; // unquoted: the shell may expand {a,b}
       w().text += c;
     }
   }
   end();
   return Object.assign(cmds.filter(cmd => cmd.length), { subs });
+}
+
+/** The words a brace expansion makes of `text` ({a,b} → a, b; nested too), or null for one the fence can't follow ({1..3}). */
+function braceExpand(text) {
+  const m = /\{([^{}]*)\}/.exec(text);
+  if (!m) return [text];
+  if (m[1].includes('..')) return null;
+  if (!m[1].includes(',')) { // not an expansion: keep it, and expand what comes after it
+    const rest = braceExpand(text.slice(m.index + m[0].length));
+    return rest && rest.map(r => text.slice(0, m.index + m[0].length) + r);
+  }
+  const out = [];
+  for (const part of m[1].split(',')) {
+    const more = braceExpand(text.slice(0, m.index) + part + text.slice(m.index + m[0].length));
+    if (!more) return null;
+    out.push(...more);
+  }
+  return out;
 }
 
 /** The commands inside $(…) and `…` in `text` (a heredoc body, where quotes don't count). */
@@ -362,10 +381,11 @@ export function deniedCommand(command, ctx = {}) {
     }
     if (name === 'git') {
       let i = 0; // in git's own words, after env, command and the like
-      let dir = here; // the alias is looked up where git runs: -C moves it
+      const moves = []; // git -C dirs, in order: the alias is looked up where git runs
+      let otherRepo = false; // --git-dir: another repository's config, not looked up
       while (args[i] && /^-/.test(args[i].text)) {
-        if (args[i].text === '-C' && args[i + 1]) dir = dir == null ? null : resolvePath(args[i + 1], dir, envSet) || null; // unreadable: unknown
-        if (/^--git-dir\b/.test(args[i].text)) dir = null; // another repository's config: not looked up
+        if (args[i].text === '-C' && args[i + 1]) moves.push(args[i + 1]);
+        if (/^--git-dir\b/.test(args[i].text)) otherRepo = true;
         if (args[i].text === '-c' && args[i + 1]) { // -c 'alias.x=push …', -c remote.origin.pushurl=…
           const why = pushConfig(args[i + 1].text.split('=')[0], args[i + 1].text.split('=').slice(1).join('='));
           if (why) return why;
@@ -385,18 +405,25 @@ export function deniedCommand(command, ctx = {}) {
         if (why) return why;
       }
       if (sub && ctx.alias && !GIT_BUILTINS.has(sub)) {
-        if (dir == null) return `the git command '${sub}', which may be an alias, in a folder the fence can't read`;
-        if (/\b(?:push|send-pack)\b/.test(ctx.alias(sub, dir) || '')) return `the git alias '${sub}', which pushes`;
+        // From each folder the shell may be in (a failed cd leaves it where it was); an unreadable one is unknown (null).
+        for (const base of [cwd, ...others]) {
+          const dir = otherRepo ? null : moves.reduce((d, m) => (d == null ? null : resolvePath(m, d, envSet) || null), runsIn(base));
+          if (dir == null) return `the git command '${sub}', which may be an alias, in a folder the fence can't read`;
+          if (/\b(?:push|send-pack)\b/.test(ctx.alias(sub, dir) || '')) return `the git alias '${sub}', which pushes`;
+        }
       }
     }
     if (!roots.length) continue;
-    for (const t of targets) {
-      if (/^\/dev\/(?:null|stdout|stderr|tty|fd\/\d+)$/.test(t.text)) continue;
-      for (const base of [cwd, ...others]) {
-        const at = t.redirect ? base : runsIn(base);
-        const file = resolvePath(t, at, envSet);
-        if (!file) return `writing to ${t.text}, a path the fence can't resolve`;
-        if (!insideRoots(file, writable)) return `writing outside the session's folders (${file})`;
+    for (const target of targets) {
+      const expanded = target.braces ? braceExpand(target.text) : [target.text];
+      if (!expanded) return `writing to ${target.text}, a path the fence can't resolve`;
+      for (const t of expanded.map(text => ({ ...target, text }))) {
+        if (/^\/dev\/(?:null|stdout|stderr|tty|fd\/\d+)$/.test(t.text)) continue;
+        for (const base of [cwd, ...others]) {
+          const file = resolvePath(t, t.redirect ? base : runsIn(base), envSet);
+          if (!file) return `writing to ${t.text}, a path the fence can't resolve`;
+          if (!insideRoots(file, writable)) return `writing outside the session's folders (${file})`;
+        }
       }
     }
     if (name === 'cd') { // after if, then and the like too; cd -- dir, cd -P dir; a dir it can't read leaves the cwd unknown
