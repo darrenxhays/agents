@@ -27,6 +27,12 @@ export function createReviewer(app, { log, forget, hoot, appDir, trackers, githu
   let starting = 0;
   let lastQuick = 0;
   const busy = () => side.running().length + starting;
+  /** Holds a slot; the function it returns frees it, once, when the run is recorded or its start is given up. */
+  const hold = () => {
+    starting++;
+    let held = true;
+    return () => { if (held) { held = false; starting--; } };
+  };
 
   // Tags this side sets itself are matched exactly; only the trigger tag is matched loosely.
   const ours = t => [cfg().tags.inProgress, cfg().tags.done].some(x => norm(x) === norm(t));
@@ -82,15 +88,15 @@ export function createReviewer(app, { log, forget, hoot, appDir, trackers, githu
       log('info', `${ticket.key}: waiting, ${c.maxConcurrentReviews} reviews already running`, key);
       return;
     }
-    starting++;
+    const free = hold();
     try {
-      await prepareTicket(tracker, ticket, key);
+      await prepareTicket(tracker, ticket, key, free);
     } finally {
-      starting--;
+      free();
     }
   }
 
-  async function prepareTicket(tracker, ticket, key) {
+  async function prepareTicket(tracker, ticket, key, free) {
     const { state } = side;
     const c = cfg();
     // Drafts are treated as if they weren't there: a draft often waits on the ticket's other PRs.
@@ -178,6 +184,7 @@ export function createReviewer(app, { log, forget, hoot, appDir, trackers, githu
       return release();
     }
     state.runs.push(run);
+    free(); // the run counts itself from here
     if (state.capped) delete state.capped[ticket.key]; // the cap was raised or turned off, or a new PR came in
     save();
     forget(key);
@@ -198,15 +205,15 @@ export function createReviewer(app, { log, forget, hoot, appDir, trackers, githu
     // Azure DevOps one (AB#1), so a quick review is never taken for a ticket's earlier review.
     lastQuick = Math.max(lastQuick, ...side.state.runs.filter(r => r.quick).map(r => Number(r.ticket.split('#').pop()) || 0)) + 1;
     const ticket = { key: `QUICK#${lastQuick}`, url: '', ref: null };
-    starting++;
+    const free = hold();
     try {
-      return await prepare(c, ticket, refs);
+      return await prepare(c, ticket, refs, free);
     } finally {
-      starting--;
+      free();
     }
   };
 
-  async function prepare(c, ticket, refs) {
+  async function prepare(c, ticket, refs, free) {
     app.me ||= await gh.me();
     const prs = [];
     for (const ref of refs) {
@@ -228,6 +235,7 @@ export function createReviewer(app, { log, forget, hoot, appDir, trackers, githu
     if (!on()) throw new Error('the Reviewer was switched off before the review started');
     const run = (side.startReview || rv.startReview)(c, appDir, { tracker: null, ticket, prs, me: app.me, heads, quick: true });
     side.state.runs.push(run);
+    free(); // the run counts itself from here
     save();
     hoot(prs.length > 1 ? `Starting a quick review of ${prs.length} PRs` : `Starting a quick review of ${prs[0].title}`);
     log('ok', `${ticket.key}: quick review started on ${names}`);

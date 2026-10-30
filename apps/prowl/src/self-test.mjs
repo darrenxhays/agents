@@ -718,6 +718,20 @@ assert.deepEqual([seen.retags, seen.side.state.releases.length], [['Ready for Re
     await assert.rejects(side.reviewPrs([{ repo: 'octo-org/r1', number: 1 }]), /Max parallel reviews/, "a ticket's review being prepared holds its slot");
     release([]);
     await polling;
+    // Once started, a review holds one slot, not two, while its Review started comments are posted.
+    app.cfg.maxConcurrentReviews = 2;
+    let posting = true;
+    gh.postComment = () => (posting ? new Promise(() => {}) : Promise.resolve()); // the first review's comment hangs
+    const announcing = side.reviewPrs([{ repo: 'octo-org/r1', number: 1 }]);
+    await new Promise(r => setTimeout(r, 10));
+    posting = false;
+    const second = await side.reviewPrs([{ repo: 'octo-org/r2', number: 2 }]).catch(e => e);
+    assert.ok(!(second instanceof Error), `a started review counts once (${second.message || ''})`);
+    const started = side.state.runs.find(r => r.prs?.[0]?.number === 1 && r.quick && r !== run);
+    announcing.catch(() => {}); // left hanging on purpose
+    side.state.runs = side.state.runs.filter(r => r !== started && r !== second);
+    gh.postComment = async () => {};
+    app.cfg.maxConcurrentReviews = 1;
     side.state.runs.push(run);
     // History's approval flag clears with no boards or GitHub org set up: a quick review needs neither.
     const url = prOf(1).url;
