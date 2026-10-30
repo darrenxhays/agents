@@ -59,7 +59,7 @@ function apiWrite(cmd) {
 /**
  * Splits a shell command line into commands (at ; & && || | and line breaks outside quotes). Each command is a list
  * of words ({ text, dynamic }: dynamic when it holds a $ or ` the shell expands) and redirections ({ op }). Heredoc
- * bodies are skipped. `subs` holds the commands inside $(…) and `…`, which run too.
+ * bodies are skipped. `subs` holds the commands inside $(…) and `…`, which run too; each command's own are on its `subs`.
  */
 export function lex(text) {
   const cmds = [[]];
@@ -68,6 +68,8 @@ export function lex(text) {
   let wantDelim = false;
   let word = null;
   const w = () => (word ??= { text: '', dynamic: false });
+  // A substitution runs where its command does (after any cd before it): kept on the command, and in `subs`.
+  const sub = (x, cmd = cmds.at(-1)) => { subs.push(x); (cmd.subs ??= []).push(x); };
   const end = () => {
     if (!word) return;
     cmds.at(-1).push(word);
@@ -92,13 +94,13 @@ export function lex(text) {
           const from = i;
           for (; i < text.length; i++) { if (text[i] === '(') depth++; else if (text[i] === ')' && --depth === 0) break; }
           word.text += text.slice(from, i + 1);
-          subs.push(text.slice(from + 2, i));
+          sub(text.slice(from + 2, i));
           continue;
         }
         if (text[i] === '`') { // and so does "`…`"
           const j = text.indexOf('`', i + 1);
           word.text += text.slice(i, j < 0 ? undefined : j + 1);
-          subs.push(text.slice(i + 1, j < 0 ? undefined : j));
+          sub(text.slice(i + 1, j < 0 ? undefined : j));
           i = j < 0 ? text.length : j;
           continue;
         }
@@ -113,11 +115,11 @@ export function lex(text) {
       const from = i;
       for (; i < text.length; i++) { if (text[i] === '(') depth++; else if (text[i] === ')' && --depth === 0) break; }
       Object.assign(w(), { dynamic: true }).text += text.slice(from, i + 1);
-      subs.push(text.slice(from + 2, i));
+      sub(text.slice(from + 2, i));
     } else if (c === '`') {
       const j = text.indexOf('`', i + 1);
       Object.assign(w(), { dynamic: true }).text += text.slice(i, j < 0 ? undefined : j + 1);
-      subs.push(text.slice(i + 1, j < 0 ? undefined : j));
+      sub(text.slice(i + 1, j < 0 ? undefined : j));
       i = j < 0 ? text.length : j;
     } else if (c === '$') {
       Object.assign(w(), { dynamic: true }).text += c;
@@ -136,7 +138,7 @@ export function lex(text) {
         let eol = text.indexOf('\n', i + 1);
         while (eol >= 0 && text.slice(i + 1, eol).replace(/^\t+/, '') !== delim) { i = eol; eol = text.indexOf('\n', i + 1); }
         (cmd.bodies ??= []).push(text.slice(from, i + 1)); // kept: a shell reading it runs it
-        if (expands) subs.push(...substitutions(text.slice(from, i + 1))); // an unquoted delimiter: its $(…) and `…` run
+        if (expands) for (const x of substitutions(text.slice(from, i + 1))) sub(x, cmd); // an unquoted delimiter: its $(…) and `…` run
         i = eol < 0 ? text.length : eol;
       }
     } else if (c === '>' || (c === '&' && text[i + 1] === '>')) {
@@ -312,16 +314,16 @@ export function deniedCommand(command, ctx = {}) {
   const envSet = ctx.envSet || /\b(?:TMPDIR|TMP|TEMP|HOME)=/.test(text); // then $TMPDIR and $HOME aren't what the fence knows
   ctx = { ...ctx, envSet };
   const cmds = lex(text);
-  for (const sub of cmds.subs) {
-    const why = deniedCommand(sub, { ...ctx, cwd });
-    if (why) return why;
-  }
   const outer = []; // the cwd outside each ( … ) we're in
   for (const cmd of cmds) {
     if (cmd[0]?.group) {
       if (cmd[0].group === '(') outer.push(cwd);
       else if (outer.length) cwd = outer.pop();
       continue;
+    }
+    for (const sub of cmd.subs || []) {
+      const why = deniedCommand(sub, { ...ctx, cwd });
+      if (why) return why;
     }
     const web = webWrite(cmd, ctx.trackerHosts || [], text);
     if (web) return web;

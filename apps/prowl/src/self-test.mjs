@@ -15,7 +15,7 @@ import { processStart } from './proc.mjs';
 import { createMascot, wrap } from './mascot.mjs';
 import { changelog, newer, syncConfigFiles } from './update.mjs';
 import { DISALLOWED, fenceArgs, fenceDecision, fenceEnv, fenceSettings, lex, trackerHosts } from './fence.mjs';
-import { checksState, detailsFromBodies, reviewedIn, threadsFrom } from './github.mjs';
+import { checksState, detailsFromBodies, prThreads, reviewedIn, threadsFrom } from './github.mjs';
 import { globRe, matchChecks, runChecks, runCommand } from './checks.mjs';
 import { guardFailures, prRefusal, SECRET_PATTERNS } from './guards.mjs';
 import { actionable, parkedUrls, pastAnswers, repliesToPost, stripParked, validateFeedback } from './feedback.mjs';
@@ -322,7 +322,8 @@ for (const c of ["git -c 'alias.ship=push --force' ship origin HEAD:main", "git 
 // A shell reading a heredoc runs it; a subshell's cd ends with it.
 assert.deepEqual([bash("bash <<'SH'\nrm -rf /etc/other\nSH"), bash("cat <<'SH'\nrm -rf /etc/other\nSH")], ['deny', 'allow'], 'a heredoc script');
 const fromHome = command => fenceDecision({ cwd: os.homedir(), tool_name: 'Bash', tool_input: { command } }, workEnv, () => '')?.hookSpecificOutput.permissionDecision || 'allow';
-assert.deepEqual([fromHome(`(cd ${wt} && npm test); rm -rf build`), fromHome(`cd ${wt} && rm -rf build`)], ['deny', 'allow'], "a subshell's cd doesn't move the shell"); 
+assert.deepEqual([fromHome(`(cd ${wt} && npm test); rm -rf build`), fromHome(`cd ${wt} && rm -rf build`)], ['deny', 'allow'], "a subshell's cd doesn't move the shell");
+assert.deepEqual([bash('cd /etc && out=$(rm -rf dist 2>&1)'), fromHome(`cd ${wt} && out=$(rm -rf dist)`)], ['deny', 'allow'], 'a $(…) runs where its command does');
 // curl and wget writes to GitHub's API, and GraphQL the fence can't read; reads are allowed.
 for (const c of ['curl -X POST https://api.github.com/repos/o/r/issues -d @body.json', 'curl -sS -XPATCH https://api.github.com/repos/o/r/pulls/1 --data "{}"',
   'curl -H "Authorization: bearer x" https://api.github.com/graphql -d \'{"query":"query{viewer{login}}"}\'', 'wget --method=DELETE https://api.github.com/repos/o/r/git/refs/heads/b',
@@ -628,6 +629,22 @@ assert.deepEqual([seen.retags, seen.side.state.releases.length], [['Ready for Re
   assert.deepEqual([run.status, app.me], ['done', 'octocat'], 'a settle before the first poll reads your login first');
 }
 fs.rmSync(rvTmp, { recursive: true });
+
+// prThreads reads every page of a PR's review threads (READY TO MERGE needs them all), through a fake gh on PATH.
+if (process.platform !== 'win32') {
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'prowl-gh-'));
+  const page = (id, next) => JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: Boolean(next), endCursor: next },
+    nodes: [{ id, isResolved: false, path: 'a.js', line: 1, first: { nodes: [{ databaseId: 1, author: { login: 'lead' }, body: 'x', url: 'u' }] }, last: { nodes: [] } }] } } } } });
+  fs.writeFileSync(path.join(bin, 'gh'), `#!/bin/sh\ncase "$*" in *after=c1*) echo '${page('T2', null)}';; *) echo '${page('T1', 'c1')}';; esac\n`, { mode: 0o755 });
+  const before = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${before}`;
+  try {
+    assert.deepEqual((await prThreads({ repo: 'octo-org/web', number: 1 })).map(t => t.id), ['T1', 'T2'], 'every page of review threads');
+  } finally {
+    process.env.PATH = before;
+    fs.rmSync(bin, { recursive: true, force: true });
+  }
+}
 
 // ---- The two sides: neither imports the other; the shell keeps one's errors from the other ----
 const srcDir = path.dirname(fileURLToPath(import.meta.url));

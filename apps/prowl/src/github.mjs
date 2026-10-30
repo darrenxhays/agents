@@ -76,7 +76,7 @@ export async function cloneMissing(prs, dir) {
 // What the Builder reads from a PR, and what it writes (a PR, a reply on a thread). postComment is the Reviewer's
 // Review started comment.
 
-const THREADS = 'query($owner:String!,$repo:String!,$n:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$n){reviewThreads(first:100){nodes{'
+const THREADS = 'query($owner:String!,$repo:String!,$n:Int!,$after:String){repository(owner:$owner,name:$repo){pullRequest(number:$n){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{'
   + 'id isResolved path line first:comments(first:1){nodes{databaseId author{login __typename} body url}} last:comments(last:1){nodes{author{login} body createdAt}}}}}}}';
 
 /** A PR's review threads from the GraphQL payload: the first comment (replies go to it) and the last (who spoke last). */
@@ -89,10 +89,18 @@ export const threadsFrom = payload => (payload?.data?.repository?.pullRequest?.r
   };
 });
 
-/** The PR's review threads, resolved or not (the first 100). */
+/** The PR's review threads, resolved or not: every page of them, as READY TO MERGE needs all. */
 export async function prThreads(pr) {
   const [owner, repo] = pr.repo.split('/');
-  return threadsFrom(JSON.parse(await run('gh', ['api', 'graphql', '-F', `owner=${owner}`, '-F', `repo=${repo}`, '-F', `n=${pr.number}`, '-f', `query=${THREADS}`])));
+  const threads = [];
+  let after = null;
+  do {
+    const page = JSON.parse(await run('gh', ['api', 'graphql', '-F', `owner=${owner}`, '-F', `repo=${repo}`, '-F', `n=${pr.number}`, ...(after ? ['-f', `after=${after}`] : []), '-f', `query=${THREADS}`]));
+    threads.push(...threadsFrom(page));
+    const info = page?.data?.repository?.pullRequest?.reviewThreads?.pageInfo;
+    after = info?.hasNextPage ? info.endCursor : null;
+  } while (after);
+  return threads;
 }
 
 /** What the Builder needs to know about a PR before it touches it. */
