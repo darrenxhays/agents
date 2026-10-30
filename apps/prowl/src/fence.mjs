@@ -199,10 +199,13 @@ function writeTargets(cmd) {
   const name = path.basename(words[at]?.text || '');
   const args = words.slice(at + 1);
   const operands = args.filter(a => a.dynamic || !a.text.startsWith('-') || a.text === '-');
-  const dirFlag = args.findIndex(a => a.text === '-t' || a.text.startsWith('--target-directory'));
+  // cp and mv's destination folder: -t dir, -tdir, --target-directory dir or --target-directory=dir.
+  const dirFlag = args.findIndex(a => /^(?:-t|--target-directory)(?:=|$)|^-t./.test(a.text));
+  const intoDir = dirFlag < 0 ? null : /^(?:-t|--target-directory)$/.test(args[dirFlag].text) ? args[dirFlag + 1]
+    : { ...args[dirFlag], text: args[dirFlag].text.replace(/^(?:--target-directory=|-t=?)/, '') };
   if (name === 'tee' || name === 'rm' || name === 'rmdir' || name === 'unlink') targets.push(...operands);
-  else if (name === 'mv') targets.push(...operands); // a move also removes its sources
-  else if (name === 'cp' && dirFlag >= 0) targets.push(args[dirFlag].text.includes('=') ? { ...args[dirFlag], text: args[dirFlag].text.split('=')[1] } : args[dirFlag + 1]);
+  else if (name === 'mv') targets.push(...operands, ...(intoDir ? [intoDir] : [])); // a move also removes its sources
+  else if (name === 'cp' && intoDir) targets.push(intoDir);
   else if (name === 'cp' && operands.length > 1) targets.push(operands.at(-1));
   return { name, words, args, chdir, split: '', targets: targets.filter(Boolean) };
 }
@@ -256,7 +259,9 @@ function webWrite(cmd, trackerHosts, text) {
       if (hostIn(host, trackerHosts)) return 'a write to the tracker: Prowl tags the ticket itself';
     }
   }
-  if (urls.some(u => u.dynamic && /^\$|^https?:\/\/\$/.test(u.text)) || cmd.some(t => t.dynamic && /^--url=(?:https?:\/\/)?\$/.test(t.text))) return "a web write to an address the fence can't read";
+  // An address whose host the shell fills in ("$API", "https://api.${DOMAIN}/…", --url="$URL").
+  const unreadHost = t => t.dynamic && /^(?:--url=)?(?:[a-z]+:\/\/)?[^/\s]*[$`]/i.test(t.text);
+  if (urls.some(unreadHost) || cmd.some(t => !t.op && /^--url=/.test(t.text) && unreadHost(t))) return "a web write to an address the fence can't read";
   return '';
 }
 

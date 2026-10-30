@@ -263,6 +263,24 @@ export function createBuilder(app, deps) {
     if (await retagSoon(w, hadStart ? b().tags.start : '')) log('info', `${w.key}: the Builder was switched off as it claimed this ticket; its tags are back as they were`);
   }
 
+  /**
+   * In Development → the done tag (Ready for Review), the Reviewer's trigger. A retry after a try that may have landed
+   * (its answer lost) leaves a ticket without In Development as it is: a review may have claimed it since. It never
+   * takes the reviewing tag off.
+   */
+  async function handOff(w) {
+    if (w.handingOff && !tags().has((await trackerOf(w).readItem(cfg(), w.ref)).tags, b().tags.inProgress)) {
+      log('info', `${w.key}: its handoff to review already went through`);
+    } else {
+      w.handingOff = true;
+      touch(w);
+      const { isStart, has } = tags();
+      await trackerOf(w).retag(cfg(), w.ref, t => isStart(t) || has([t], b().tags.inProgress) || has([t], b().tags.done), b().tags.done);
+    }
+    w.handingOff = false;
+    touch(w);
+  }
+
   /** Sets the tags Prowl owns on `w`'s ticket to `add` ('' for none); while the tracker fails, again each minute. Resolves true once done. */
   async function retagSoon(w, add) {
     const newer = current(w.key);
@@ -582,7 +600,7 @@ export function createBuilder(app, deps) {
       touch(w);
     }
     checkStop(w);
-    await trackerOf(w).retag(cfg(), w.ref, tags().owned, b().tags.done);
+    await handOff(w);
     Object.assign(w, {
       prs: recs.map(r => ({ repo: r.repo, number: r.pr.number, url: r.pr.url, title: r.pr.title })), prsOpenedAt: Date.now(), lastActivityAt: Date.now(), lastPushAt: Date.now(),
       status: b().followUp ? 'following' : 'done', step: null, checkFails: 0, ...(!b().followUp && { endedAt: Date.now(), note: 'PRs opened' }),
@@ -868,7 +886,7 @@ export function createBuilder(app, deps) {
   /** Ends a round (or an adoption): back to the done tag, and the round's worktrees go. */
   async function endRound(w) {
     checkStop(w);
-    await trackerOf(w).retag(cfg(), w.ref, tags().owned, b().tags.done);
+    await handOff(w);
     if (w.round) await tidy(w, [], w.round.prs);
     // Feedback since the round collected its own (posted during its session or CI wait, say) is still due.
     Object.assign(w, { status: 'following', step: null, lastActivityAt: w.round?.collectedAt || Date.now(), round: null, roundPrs: [] });

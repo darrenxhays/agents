@@ -623,6 +623,20 @@ async function builds(assert) {
   assert.deepEqual([h.b.history()[0].status, h.server.tags(123)], ['stopped', ['Web', 'In Development']], "s: the In Development, maybe someone else's, stays");
   h.done();
 
+  // A handoff that landed but whose answer was lost: its retry leaves a review that claimed the ticket since alone.
+  let lose = true;
+  h = harness('ado', twoRepoBuild(), { trackerWrap: t => ({ ...t, retag: async (cfg, ref, drop, add) => {
+    const rev = await t.retag(cfg, ref, drop, add);
+    if (add === 'Ready for Review' && lose) { lose = false; throw new Error('ADO GET /x: 502 Bad Gateway'); }
+    return rev;
+  } }) });
+  await h.poll();
+  h.server.setTags(123, ['Web', 'In Review']); // a teammate's Reviewer claims it
+  h.b.history()[0]._retryAt = 0;
+  await h.b.drain();
+  assert.deepEqual([h.b.history()[0].status, h.server.tags(123)], ['following', ['Web', 'In Review']], 'the review keeps its claim');
+  h.done();
+
   // A merge whose conflict resolution adds a secret: the merge's own lines are scanned too.
   h = harness('ado', (w, prompt) => {
     if (!prompt.startsWith('approve')) return twoRepoBuild()(w, prompt);
