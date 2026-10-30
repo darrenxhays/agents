@@ -400,7 +400,7 @@ export function deniedCommand(command, ctx = {}) {
       let i = 0; // in git's own words, after env, command and the like
       const moves = []; // git -C dirs, in order: the alias is looked up where git runs
       let otherRepo = false; // --git-dir: another repository's config, not looked up
-      const inline = {}; // aliases this call sets itself: git -c 'alias.x=…' x
+      const inline = { ...ctx.inline }; // aliases this call (or the one whose alias this is) sets itself: git -c 'alias.x=…' x
       while (args[i] && /^-/.test(args[i].text)) {
         if (args[i].text === '-C' && args[i + 1]) moves.push(args[i + 1]);
         if (/^--git-dir\b/.test(args[i].text)) otherRepo = true;
@@ -436,7 +436,7 @@ export function deniedCommand(command, ctx = {}) {
           if (value && (ctx.depth || 0) >= 10) return `the git alias '${sub}', which calls aliases too deep for the fence`;
           const shell = value.startsWith('!');
           const line = `${shell ? value.slice(1) : `git ${value}`} ${unparse(args.slice(i + 1))}`;
-          const why = value && deniedCommand(line, { ...ctx, cwd: shell ? ctx.alias.root?.(dir) || null : dir, depth: (ctx.depth || 0) + 1 });
+          const why = value && deniedCommand(line, { ...ctx, cwd: shell ? ctx.alias.root?.(dir) || null : dir, depth: (ctx.depth || 0) + 1, inline }); // git passes -c on to a shell alias's git too (GIT_CONFIG_PARAMETERS)
           if (why) return `the git alias '${sub}': ${why}`;
         }
       }

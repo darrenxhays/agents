@@ -343,6 +343,8 @@ const viaRepo = (command, root) => fenceDecision({ cwd: path.join(wt, 'src'), to
 assert.deepEqual([viaRepo('git deploy push origin gh-pages', wt), viaRepo('git deploy split', wt), viaRepo('git cleanup', wt), viaRepo('git cleanup', '')],
   ['deny', 'allow', 'allow', 'deny'], "an alias's arguments; a shell alias runs from the repository's top folder (unknown: denied)");
 assert.equal(bash("git -c 'alias.deploy=subtree --prefix=dist' deploy push origin gh-pages"), 'deny', 'an alias the call sets itself with -c');
+assert.equal(bash("git -c 'alias.release=deploy' -c 'alias.deploy=subtree --prefix=dist' release push origin gh-pages"), 'deny', 'and one that calls another it sets');
+assert.equal(bash("git -c 'alias.go=!git deploy push origin x' -c 'alias.deploy=subtree --prefix=dist' go"), 'deny', "even through a shell alias's git");
 assert.deepEqual([bash('cp --target-directory=/etc "$TMPDIR/generated.json"'), bash('cp -t/etc "$TMPDIR/x"')], ['deny', 'deny'], "cp's -t folder beside a variable source");
 const shipHere = (name, dir) => (name === 'ship' && dir === wt ? 'push --force' : '');
 assert.equal(fenceDecision({ cwd: wt, tool_name: 'Bash', tool_input: { command: `cd ${other}; git ship origin HEAD:main` } }, workEnv, shipHere)?.hookSpecificOutput.permissionDecision, 'deny', 'an alias where a failed cd left the shell');
