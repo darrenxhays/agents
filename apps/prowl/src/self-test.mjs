@@ -335,7 +335,13 @@ assert.deepEqual([bash('rm -rf {dist,../../../etc/dist}'), bash('rm -rf {dist,bu
 const chain = { pf: 'p --force', p: 'push', sh2: '!git pf origin', sh3: '!git -C web pf origin HEAD:main', ok: 'st', st: 'status', loop: 'loop' };
 const viaChain = command => fenceDecision({ cwd: wt, tool_name: 'Bash', tool_input: { command } }, workEnv, n => chain[n] || '')?.hookSpecificOutput.permissionDecision || 'allow';
 assert.deepEqual(['git pf origin HEAD:main', 'git sh2', 'git sh3', 'git ok', 'git loop'].map(viaChain), ['deny', 'deny', 'deny', 'allow', 'deny'], 'an alias that calls a pushing alias');
-assert.deepEqual([bash('cp /etc/config{1..2}.json'), bash('env -S cp /etc/hosts{,.bak}')], ['deny', 'deny'], "brace operands cp's destination may come from");
+assert.deepEqual([bash('cp /etc/config{1..2}.json'), bash('env -S cp /etc/hosts{,.bak}'), bash('env -S cp /etc/config{1..2}.json')], ['deny', 'deny', 'deny'], "brace operands cp's destination may come from");
+// An alias gets the call's arguments; a shell alias runs from the repository's top folder.
+const deploy = { deploy: 'subtree --prefix=dist', cleanup: '!rm -rf dist' };
+const viaRepo = (command, root) => fenceDecision({ cwd: path.join(wt, 'src'), tool_name: 'Bash', tool_input: { command } }, workEnv,
+  Object.assign(n => deploy[n] || '', { root: () => root }))?.hookSpecificOutput.permissionDecision || 'allow';
+assert.deepEqual([viaRepo('git deploy push origin gh-pages', wt), viaRepo('git deploy split', wt), viaRepo('git cleanup', wt), viaRepo('git cleanup', '')],
+  ['deny', 'allow', 'allow', 'deny'], "an alias's arguments; a shell alias runs from the repository's top folder (unknown: denied)");
 const shipHere = (name, dir) => (name === 'ship' && dir === wt ? 'push --force' : '');
 assert.equal(fenceDecision({ cwd: wt, tool_name: 'Bash', tool_input: { command: `cd ${other}; git ship origin HEAD:main` } }, workEnv, shipHere)?.hookSpecificOutput.permissionDecision, 'deny', 'an alias where a failed cd left the shell');
 // curl and wget writes to GitHub's API, and GraphQL the fence can't read; reads are allowed.

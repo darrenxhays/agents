@@ -205,6 +205,13 @@ function substitutions(text) {
   return out;
 }
 
+/**
+ * Words back as shell text, for a command line made of them (env -S, a git alias and its arguments): quoted as
+ * they were read, braces expanded first as the shell does; one the fence can't expand stays unreadable.
+ */
+const unparse = words => expand(words).map(x => (x.unreadable ? '"${unreadable}"'
+  : x.dynamic ? `"${x.text.replace(/["\\]/g, '\\$&')}"` : `'${x.text.replace(/'/g, "'\\''")}'`)).join(' ');
+
 /** `words` after brace expansion: one word each for what {a,b} makes; one the fence can't follow is marked unreadable. */
 const expand = words => words.flatMap(x => {
   if (!x.braces) return [x];
@@ -245,9 +252,7 @@ function writeTargets(cmd) {
   }
   if (split) {
     // env -S 'rm -rf' x: the split string and the words after it make one command line.
-    const quote = x => (x.dynamic ? `"${x.text.replace(/["\\]/g, '\\$&')}"` : `'${x.text.replace(/'/g, "'\\''")}'`);
-    const after = expand(words.slice(at)).map(x => (x.unreadable ? '"${unreadable}"' : quote(x))); // the shell expands braces before env sees them
-    return { name: '', words, args: [], chdir, split: [split.text, ...after].join(' '), targets: targets.filter(Boolean) };
+    return { name: '', words, args: [], chdir, split: [split.text, unparse(words.slice(at))].join(' '), targets: targets.filter(Boolean) };
   }
   const name = path.basename(words[at]?.text || '');
   const args = expand(words.slice(at + 1)); // cp a{,.bak} is two operands
@@ -260,6 +265,7 @@ function writeTargets(cmd) {
   if (name === 'tee' || name === 'rm' || name === 'rmdir' || name === 'unlink') targets.push(...operands);
   else if (name === 'mv') targets.push(...operands, ...(intoDir ? [intoDir] : [])); // a move also removes its sources
   else if (name === 'cp' && operands.some(a => a.unreadable)) targets.push(...operands.filter(a => a.unreadable)); // which is the destination is unknown
+  else if (name === 'cp' && operands.length === 1 && operands[0].dynamic) targets.push(operands[0]); // "$@"-like: it may be several, the last the destination
   else if (name === 'cp' && intoDir) targets.push(intoDir);
   else if (name === 'cp' && operands.length > 1) targets.push(operands.at(-1));
   return { name, words, args, chdir, split: '', targets: targets.filter(Boolean) };
@@ -420,9 +426,12 @@ export function deniedCommand(command, ctx = {}) {
           if (dir == null) return `the git command '${sub}', which may be an alias, in a folder the fence can't read`;
           // What the alias expands to is checked like any command: git <value>, or a shell alias's command line, so
           // aliases calling aliases (pf = p --force, p = push) and their own options (-C) are followed too.
-          const value = ctx.alias(sub, dir) || '';
+          // Git appends the call's own arguments (git deploy push …), and runs a shell alias from the repository's top folder.
+          const value = (ctx.alias(sub, dir) || '').trim();
           if (value && (ctx.depth || 0) >= 10) return `the git alias '${sub}', which calls aliases too deep for the fence`;
-          const why = value && deniedCommand(value.startsWith('!') ? value.slice(1) : `git ${value}`, { ...ctx, cwd: dir, depth: (ctx.depth || 0) + 1 });
+          const shell = value.startsWith('!');
+          const line = `${shell ? value.slice(1) : `git ${value}`} ${unparse(args.slice(i + 1))}`;
+          const why = value && deniedCommand(line, { ...ctx, cwd: shell ? ctx.alias.root?.(dir) || null : dir, depth: (ctx.depth || 0) + 1 });
           if (why) return `the git alias '${sub}': ${why}`;
         }
       }

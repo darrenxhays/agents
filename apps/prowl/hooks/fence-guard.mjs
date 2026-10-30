@@ -14,6 +14,15 @@ const alias = (name, cwd) => {
   }
 };
 
+/** The top folder of the repository `cwd` is in, where git runs a shell alias (!…), or ''. */
+alias.root = cwd => {
+  try {
+    return execFileSync('git', ['-C', cwd || '.', 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim();
+  } catch {
+    return '';
+  }
+};
+
 let input = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', d => (input += d));
