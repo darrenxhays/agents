@@ -600,6 +600,7 @@ export function createBuilder(app, deps) {
     }
     if (recs.length > 1 && !w.linked) {
       for (const rec of recs) {
+        checkStop(w); // before each PR write
         const others = recs.filter(r => r !== rec).map(r => `- ${r.pr.url}`);
         const file = path.join(w.briefDir, `pr-${rec.repo.split('/')[1]}.json`);
         writeJson(file, { body: `${rec.prBody}\n\n---\n\nThe other PRs for ${w.key}:\n\n${others.join('\n')}`.trimStart() });

@@ -324,6 +324,9 @@ assert.deepEqual([bash("bash <<'SH'\nrm -rf /etc/other\nSH"), bash("cat <<'SH'\n
 const fromHome = command => fenceDecision({ cwd: os.homedir(), tool_name: 'Bash', tool_input: { command } }, workEnv, () => '')?.hookSpecificOutput.permissionDecision || 'allow';
 assert.deepEqual([fromHome(`(cd ${wt} && npm test); rm -rf build`), fromHome(`cd ${wt} && rm -rf build`)], ['deny', 'allow'], "a subshell's cd doesn't move the shell");
 assert.deepEqual([bash('cd /etc && out=$(rm -rf dist 2>&1)'), fromHome(`cd ${wt} && out=$(rm -rf dist)`)], ['deny', 'allow'], 'a $(…) runs where its command does');
+// A cd can fail: then the shell is where it was, for any command not joined to the cd by &&.
+assert.deepEqual([fromHome(`cd ${wt}; rm -rf web`), fromHome(`sh -c 'cd ${wt}; rm -rf web'`), fromHome(`cd ${wt} && rm -rf web`), bash('cd sub; rm -rf build')],
+  ['deny', 'deny', 'allow', 'allow'], 'after a cd that may have failed');
 // curl and wget writes to GitHub's API, and GraphQL the fence can't read; reads are allowed.
 for (const c of ['curl -X POST https://api.github.com/repos/o/r/issues -d @body.json', 'curl -sS -XPATCH https://api.github.com/repos/o/r/pulls/1 --data "{}"',
   'curl -H "Authorization: bearer x" https://api.github.com/graphql -d \'{"query":"query{viewer{login}}"}\'', 'wget --method=DELETE https://api.github.com/repos/o/r/git/refs/heads/b',

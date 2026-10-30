@@ -580,6 +580,15 @@ async function builds(assert) {
   assert.deepEqual([h.gh.prs.length, h.b.history()[0].status], [0, 'stopped'], 'stopped before the PR');
   h.done();
 
+  // s while the first PR's body is linked: the second isn't written.
+  h = harness('ado', twoRepoBuild());
+  const edit = h.gh.editPr;
+  let edits = 0;
+  h.gh.editPr = async (...a) => { edits++; await edit(...a); h.b.stop(h.b.history()[0]); };
+  await h.poll();
+  assert.deepEqual([edits, h.b.history()[0].status], [1, 'stopped'], 'stopped before the next PR write');
+  h.done();
+
   // Turns still running hold back what they may spend from the day's cap.
   h = harness('ado', twoRepoBuild(), { cfgOver: { dailyBudgetUsd: 10 } });
   const other = { uid: 'other', key: 'AB#999', status: 'active', step: 'session', turnBudgetUsd: 9, turns: [], _busy: true };

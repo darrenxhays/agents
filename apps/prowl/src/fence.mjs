@@ -132,6 +132,7 @@ export function lex(text) {
       cmds.push([]);
     } else if (c === '\n' || c === ';' || c === '|' || (c === '&' && text[i + 1] !== '>')) {
       next();
+      cmds.at(-1).after = c === '&' && text[i + 1] === '&' ? '&&' : c; // how the next command is joined to this one
       if ((c === '&' || c === '|') && text[i + 1] === c) i++;
       for (const { delim, cmd, expands } of c === '\n' ? heredocs.splice(0) : []) { // skip the body, up to the line holding only its delimiter
         const from = i + 1;
@@ -315,7 +316,11 @@ export function deniedCommand(command, ctx = {}) {
   ctx = { ...ctx, envSet };
   const cmds = lex(text);
   const outer = []; // the cwd outside each ( … ) we're in
+  // Folders the shell may still be in, as a cd before can fail: each applies once a command no longer runs only
+  // after that cd succeeded (joined to it by anything but &&).
+  const failed = [];
   for (const cmd of cmds) {
+    if (cmd.after && cmd.after !== '&&') for (const f of failed) f.applies = true;
     if (cmd[0]?.group) {
       if (cmd[0].group === '(') outer.push(cwd);
       else if (outer.length) cwd = outer.pop();
@@ -374,14 +379,19 @@ export function deniedCommand(command, ctx = {}) {
       }
     }
     if (!roots.length) continue;
+    const others = failed.filter(f => f.applies).map(f => f.dir);
     for (const t of targets) {
       if (/^\/dev\/(?:null|stdout|stderr|tty|fd\/\d+)$/.test(t.text)) continue;
-      const file = resolvePath(t, t.redirect ? cwd : here, envSet);
-      if (!file) return `writing to ${t.text}, a path the fence can't resolve`;
-      if (!insideRoots(file, writable)) return `writing outside the session's folders (${file})`;
+      for (const base of [cwd, ...others]) {
+        const at = t.redirect || !chdir ? base : resolvePath(chdir, base, envSet) || null;
+        const file = resolvePath(t, at, envSet);
+        if (!file) return `writing to ${t.text}, a path the fence can't resolve`;
+        if (!insideRoots(file, writable)) return `writing outside the session's folders (${file})`;
+      }
     }
     if (name === 'cd') { // after if, then and the like too; cd -- dir, cd -P dir; a dir it can't read leaves the cwd unknown
       const dir = args.find(a => a.dynamic || !/^-/.test(a.text));
+      failed.push({ dir: cwd, applies: false }); // where the shell stays if this cd fails
       cwd = dir ? resolvePath(dir, cwd, envSet) || null : os.homedir();
     }
   }
