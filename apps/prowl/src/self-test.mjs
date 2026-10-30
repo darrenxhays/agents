@@ -706,6 +706,29 @@ assert.deepEqual([seen.retags, seen.side.state.releases.length], [['Ready for Re
     side.state.runs.push(run);
     app.cfg.maxConcurrentReviews = 1;
   }
+  {
+    // A ticket's review being prepared holds its slot too, so a quick review can't start in the meantime.
+    side.state.runs = side.state.runs.filter(r => r !== run);
+    let release;
+    gh.openPrs = () => new Promise(r => { release = r; });
+    app.boards = () => [{ project: 'Shop', team: 'Web' }];
+    app.tracker = () => ({ name: 'Azure DevOps', boardLabel: () => 'Shop / Web', findTickets: async () => ({ tickets: [{ key: 'AB#9', title: 't' }], variants: ['Ready for Review'] }) });
+    const polling = side.poll();
+    await new Promise(r => setTimeout(r, 0));
+    await assert.rejects(side.reviewPrs([{ repo: 'octo-org/r1', number: 1 }]), /Max parallel reviews/, "a ticket's review being prepared holds its slot");
+    release([]);
+    await polling;
+    side.state.runs.push(run);
+    // History's approval flag clears with no boards or GitHub org set up: a quick review needs neither.
+    const url = prOf(1).url;
+    const flagged = { id: 'q9', ticket: 'QUICK#9', quick: true, status: 'done', endedAt: Date.now(), prs: [prOf(1)], approved: { [url]: 'sha1' }, awaitingHuman: [url] };
+    side.state.runs.push(flagged);
+    gh.humanApproved = async () => true;
+    app.boards = () => [];
+    await side.poll();
+    assert.deepEqual(flagged.awaitingHuman, [], 'cleared without boards');
+    side.state.runs = side.state.runs.filter(r => r !== flagged);
+  }
   app.on = false;
   await assert.rejects(side.reviewPrs([{ repo: 'octo-org/r1', number: 1 }]), /Reviewer is off/);
   run._result = { subtype: 'error_during_execution', is_error: true, result: 'boom' };

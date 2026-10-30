@@ -22,7 +22,8 @@ export function createReviewer(app, { log, forget, hoot, appDir, trackers, githu
   side.finished = () => side.state.runs.filter(r => r.status !== 'running' && r.status !== 'stopping').sort((a, b) => b.endedAt - a.endedAt);
   side.needs = () => []; // nothing waits on you: a review either runs, or leaves its ticket tagged for a person
   side.alive = () => side.running().some(rv.alive);
-  // Quick reviews still being prepared hold a slot, and their number, from the moment they're asked for.
+  // Reviews still being prepared (a ticket's, or a quick review) hold a slot from the moment they're admitted; a quick
+  // review its number too.
   let starting = 0;
   let lastQuick = 0;
   const busy = () => side.running().length + starting;
@@ -36,6 +37,7 @@ export function createReviewer(app, { log, forget, hoot, appDir, trackers, githu
     const pruned = rv.tidyLogs(cfg().logRetentionDays, side.running()); // on launch, then once per poll
     if (pruned) log('info', `Deleted ${pruned} review log file${pruned > 1 ? 's' : ''} older than ${cfg().logRetentionDays} days`);
     app.me ||= await gh.me();
+    await checkHumanApprovals(); // before the board checks: a quick review needs neither boards nor an org
     const tracker = app.tracker();
     const boards = app.boards();
     if (!boards.length) {
@@ -47,7 +49,6 @@ export function createReviewer(app, { log, forget, hoot, appDir, trackers, githu
       return;
     }
     hoot(`Checking ${boards.length > 1 ? 'the boards' : 'the board'} for new review tasks...`);
-    await checkHumanApprovals();
     const seen = new Set();
     let allRead = true;
     for (const board of boards) {
@@ -74,7 +75,6 @@ export function createReviewer(app, { log, forget, hoot, appDir, trackers, githu
   };
 
   async function consider(tracker, ticket) {
-    const { state } = side;
     const c = cfg();
     const key = `ticket:${ticket.key}`;
     if (side.running().some(r => r.ticket === ticket.key)) return; // re-tagged mid-review: re-reviewed once this one ends
@@ -82,6 +82,17 @@ export function createReviewer(app, { log, forget, hoot, appDir, trackers, githu
       log('info', `${ticket.key}: waiting, ${c.maxConcurrentReviews} reviews already running`, key);
       return;
     }
+    starting++;
+    try {
+      await prepareTicket(tracker, ticket, key);
+    } finally {
+      starting--;
+    }
+  }
+
+  async function prepareTicket(tracker, ticket, key) {
+    const { state } = side;
+    const c = cfg();
     // Drafts are treated as if they weren't there: a draft often waits on the ticket's other PRs.
     const open = await gh.openPrs(c.githubOwner, ticket.key);
     const prs = open.filter(p => !p.draft);
