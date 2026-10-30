@@ -46,7 +46,9 @@ const DEFAULTS = {
   // The Builder: builds tickets tagged Ready to Start and opens their PRs, then follows the PRs through review.
   builder: {
     enabled: false, // the switch; the Builder claims and starts nothing while it is off
-    tags: { start: 'Ready to Start', inProgress: 'In Development', done: 'Ready for Review', reviewing: 'In Review' }, // done is the Reviewer's trigger
+    // Once its PRs are open it sets the Reviewer's trigger tag (tags.trigger), and leaves a ticket carrying the
+    // Reviewer's in-progress tag (tags.inProgress) until its review is done.
+    tags: { start: 'Ready to Start', inProgress: 'In Development' },
     assignedToMe: true, // only tickets assigned to you
     maxConcurrent: 1, // tickets built at once, counted from the claim until their PRs open (Needs you included)
     approvePlans: 'auto', // 'auto': Prowl approves a plan with no open questions; 'ask': every plan waits for you
@@ -96,8 +98,14 @@ export function loadConfig() {
     delete saved.org;
     delete saved.boards;
   }
+  // Before 2.13.0 the Builder had its own done and reviewing tags; it now uses the Reviewer's trigger and in-progress tags.
+  const ownTags = saved.builder?.tags && ('done' in saved.builder.tags || 'reviewing' in saved.builder.tags);
+  if (ownTags) {
+    delete saved.builder.tags.done;
+    delete saved.builder.tags.reviewing;
+  }
   const cfg = merge(structuredClone(DEFAULTS), saved);
-  if (old || !fs.existsSync(CONFIG_PATH)) saveConfig(cfg);
+  if (old || ownTags || !fs.existsSync(CONFIG_PATH)) saveConfig(cfg);
   return cfg;
 }
 

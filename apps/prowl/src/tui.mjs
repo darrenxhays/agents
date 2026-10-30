@@ -1,8 +1,7 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { CHECKS_PATH, CONFIG_DIR, CONFIG_PATH } from './config.mjs';
-import { BUILDER_FIELDS } from './builder/fields.mjs';
+import { CONFIG_PATH } from './config.mjs';
+import { CONFIG_FIELDS, JIRA } from './fields.mjs';
+import { parsePrRefs } from './github.mjs';
 import { createMascot, wrap } from './mascot.mjs';
 import { openExternal } from './proc.mjs';
 import { awaitingHuman, isOwn } from './reviewer/reviews.mjs';
@@ -19,68 +18,7 @@ const NAMES = { reviewer: 'Reviewer', builder: 'Builder' };
 const TABS = ['Running', 'History', 'Needs you', 'Config', 'Log'];
 const [RUNNING, HISTORY, NEEDS, CONFIG] = [0, 1, 2, 3];
 
-const isDir = p => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
-const https = v => /^https:\/\/\S+$/.test(v) || 'must be an https:// URL';
-const ADO = c => c.taskBoard === 'ado';
-const JIRA = c => c.taskBoard === 'jira';
-const opens = 'enter opens it. Updates never overwrite your edits.';
-const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
-// { heading } starts a section of the Config view: drawn above the rows that follow it, never selected.
-// { file } rows open one of the user's config files in its default app. Jira calls tags labels: `jira` replaces the
-// label and help shown when it is the task board.
-const SHARED_FIELDS = [
-  { heading: 'Shared' },
-  { file: CONFIG_PATH, label: 'Settings file', help: `Every setting on this page, both sides, as JSON. ${opens}` },
-  { key: 'taskBoard', label: 'Task board', type: 'enum', values: ['ado', 'jira'], names: { ado: 'Azure DevOps', jira: 'Jira' }, help: 'Where tickets are watched, for both sides: Azure DevOps or Jira Cloud. enter switches. Each keeps its own boards.' },
-  { key: 'ado.org', label: 'Azure DevOps org', type: 'text', when: ADO, help: 'Organization URL, e.g. https://dev.azure.com/your-org. Signed in with az login.', valid: https },
-  { key: 'jira.site', label: 'Jira site', type: 'text', when: JIRA, help: 'Your Jira Cloud URL, e.g. https://yourcompany.atlassian.net.', valid: v => https(v) === true ? true : 'must be an https:// URL, e.g. https://yourcompany.atlassian.net' },
-  { key: 'jira.email', label: 'Jira email', type: 'text', when: JIRA, help: 'The email you sign in to Atlassian with.', valid: v => /^[^\s@"\\]+@[^\s@"\\]+$/.test(v) || 'must be an email address' },
-  { key: 'jira.token', label: 'Jira API token', type: 'secret', when: JIRA, help: 'Create one at id.atlassian.com > Security > API tokens. Kept in your OS credential store, never in the config file.' },
-  'boards',
-  { key: 'githubOwner', label: 'GitHub org', type: 'text', help: 'Open PRs whose title or description mentions the ticket (AB#123 or PROJ-123) are searched for here, and the Builder works in its repos.' },
-  { key: 'workDir', label: 'Projects Directory', type: 'text', help: 'Sessions run here and load its CLAUDE.md, e.g. your projects root. Repos not cloned here are cloned before use; worktrees go in its .prowl-worktrees folder.', valid: v => isDir(v) || 'folder not found' },
-  { key: 'pollSeconds', label: 'Poll every (seconds)', type: 'int', min: 30, max: 86400, help: 'How often the boards are checked, and config.json re-read. r polls the side in view now.' },
-  { key: 'tagMatchMaxTypos', label: 'Tag typo tolerance', type: 'int', min: 0, max: 3, help: "Typos (wrong, missing, extra or swapped letters) still treated as the Reviewer's trigger tag or the Builder's start tag. Case, spaces and punctuation are always ignored. 0 = exact.",
-    jira: { label: 'Label typo tolerance', help: "Typos (wrong, missing, extra or swapped letters) still treated as the trigger or start label. Case, spaces and punctuation are always ignored. 0 = exact." } },
-  { key: 'claude.permissionMode', label: 'Permission mode', type: 'enum', values: ['auto', 'bypassPermissions'], help: 'For both sides\' sessions. auto lets a safety classifier block risky actions. bypassPermissions lets sessions run anything: not recommended, they read text written by other people.' },
-  { key: 'allowMemoryWrites', label: 'Sessions use memory', type: 'bool', help: "on: sessions use Claude Code's auto-memory like any session, and can add what they did to your memory files. off: they run with auto-memory off, so they neither read nor write it." },
-  { key: 'caffeinate', label: 'Keep Mac awake', type: 'bool', when: () => process.platform === 'darwin', help: "on: the Mac doesn't idle-sleep while a session runs (caffeinate), since sleep stalls it and stretches it out. Closing the lid still sleeps it." },
-  { key: 'logRetentionDays', label: 'Keep logs (days)', type: 'int', min: 0, max: 3650, help: 'Session logs older than this are deleted, and poller.log rolls over to poller.log.1 past 5 MB. Reports are always kept. 0 = keep everything.' },
-  { key: 'dryRun', label: 'Dry run', type: 'bool', help: 'Log what would be reviewed or built, without changing tags or starting sessions.' },
-  { key: 'autoUpdate', label: 'Auto-update', type: 'bool', help: 'Install a newer Prowl release before launching. It waits while sessions from an earlier launch are still running.' },
-  { file: CHECKS_PATH, label: 'Checks before push', help: 'Commands the Builder runs in a worktree before it pushes, per repo, e.g. { "my-org/*": { "run": ["npm test"] } }. Nothing matches: no checks. Never overwritten. enter opens it.' },
-];
-const REVIEWER_FIELDS = [
-  { heading: 'Config files' },
-  { file: path.join(CONFIG_DIR, 'review.md'), label: 'Review rules', help: `Reviewer stance, severity definitions, and the verdict each severity gives. Applies from the next review. ${opens}` },
-  { file: path.join(CONFIG_DIR, 'review-axis-catalog.md'), label: 'Review checklists', help: `What reviewers check: the review axes and their checklists. Applies from the next review. ${opens}` },
-  { file: path.join(CONFIG_DIR, 'output.md'), label: 'Output templates', help: `How everything posted on GitHub looks: review-started comment, banner, review body, details file, comments, replies (the Builder's too), approvals-off comment. ${opens}` },
-  { heading: 'Tags', jira: { heading: 'Labels' } },
-  { key: 'tags.trigger', label: 'Trigger tag', type: 'text', help: 'Tickets carrying this tag, or a near-miss spelling of it, get reviewed.',
-    jira: { label: 'Trigger label', help: 'Issues carrying this label, or a near-miss spelling of it, get reviewed.' } },
-  { key: 'tags.inProgress', label: 'In-progress tag', type: 'text', help: 'Set when a review starts. Colour it yellow in board settings > Cards > Tag colors.',
-    jira: { label: 'In-progress label', help: 'Set when a review starts. Spaces become dashes (In-Review).' } },
-  { key: 'tags.done', label: 'Done tag', type: 'text', help: 'Set when a review finishes. Re-add the trigger tag to ask for a re-review.',
-    jira: { label: 'Done label', help: 'Set when a review finishes. Spaces become dashes. Re-add the trigger label to ask for a re-review.' } },
-  { heading: 'Review sessions' },
-  { key: 'maxConcurrentReviews', label: 'Max parallel reviews', type: 'int', min: 1, max: 10, help: "Extra tickets stay tagged until a slot frees, so a teammate's poller can take them." },
-  { key: 'claude.model', label: 'Model', type: 'text', help: 'Model for review sessions, and for Builder sessions unless Build model is set.' },
-  { key: 'claude.effort', label: 'Effort', type: 'enum', values: EFFORTS, help: 'Reasoning effort for review sessions. enter cycles.' },
-  { key: 'claude.maxBudgetUsd', label: 'Spend cap per review ($)', type: 'int', min: 0, max: 100000, help: "Stops a review once it has spent this much. It fails with the cap named and isn't retried, so a runaway review isn't paid for twice. 0 = no cap." },
-  { key: 'claude.maxTurns', label: 'Turn cap per review', type: 'int', min: 0, max: 100000, help: "Stops a review after this many turns. It fails with the cap named and isn't retried. 0 = no cap." },
-  { key: 'reviewTimeoutMinutes', label: 'Review time limit (min)', type: 'int', min: 0, max: 10080, help: "Stops a review that runs longer than this, counted from its start. It fails with the cap named and isn't retried. 0 = no limit." },
-  { key: 'ticketContext', label: 'Ticket text in reviews', type: 'bool', help: "on: the ticket's description (and, on Azure DevOps, its acceptance criteria) is added to the review's brief, so reviewers know the goal without signing in to the tracker. Up to about 6 KB." },
-  { heading: 'Verdicts and rounds' },
-  { key: 'reviewOwnPrs', label: 'Review my own PRs', type: 'bool', help: "off: a ticket with any PR you authored is left for a teammate. on: it is reviewed like any other; GitHub won't let you approve or request changes on your own PR, so those get a comment review with the verdict." },
-  { key: 'approvals', label: 'Approve PRs', type: 'bool', help: 'on: a PR with no blocking findings gets a GitHub approval. off: Prowl comments that it found no blocking issues, and a human approves (text in Output templates); History flags those PRs with ⚑ until someone approves them.' },
-  { key: 'maxReviewRounds', label: 'Max review rounds', type: 'int', min: 0, max: 100, help: 'Reviews per ticket. Once a ticket has had this many, Prowl leaves it tagged and unclaimed for a person, and History flags it with ⚑ round cap reached. A PR no review has covered yet is still reviewed. 0 = no cap.' },
-  { key: 'reReviewScope', label: 'Re-review scope', type: 'enum', values: ['full', 'delta'], help: "full: a re-review reads each PR whole, with the whole last report. delta: only the commits since the last review, plus its still-open findings; the rest of the PR is context. enter switches." },
-  { key: 'parkHumanOnly', label: 'Park human-only findings', type: 'bool', help: "on: a re-review parks an earlier finding that only a person can fix outside the code (a CI pipeline, tracker or permissions config, a product decision). It isn't re-posted, is listed under Parked in the details file, and doesn't hold up the verdict." },
-];
-const SIDE_FIELDS = { reviewer: REVIEWER_FIELDS, builder: BUILDER_FIELDS };
-const ALL_FIELDS = [...SHARED_FIELDS, ...REVIEWER_FIELDS, ...BUILDER_FIELDS];
-
-const LABEL_W = Math.max(...ALL_FIELDS.map(f => f.label?.length || 0)) + 2; // the Config view's label column
+const LABEL_W = Math.max(...CONFIG_FIELDS.map(f => f.label?.length || 0)) + 2; // the Config view's label column
 
 // Control characters (ESC included) are stripped from everything shown: titles, PR text and agent output
 // come from other people, and raw escape sequences would let them drive this terminal. Wide characters
@@ -146,7 +84,7 @@ function* keys(data) {
  * Full-screen terminal UI: a tab for each side (Reviewer and Builder), each with Running, History, Needs you, Config
  * and Log. `app` is read every frame. `actions` = { sides: { reviewer, builder }, pollNow(side), togglePause(side),
  * toggleSide(side), stop(side, item), answer(item, text), skip(item), handBack(item), follow(record), stopFollowing(record),
- * saveConfig, saveToken, quit }. `io` = { out, stdin, headless } (headless: no raw mode or timers, for the self-test).
+ * reviewPrs(refs) (a quick review), saveConfig, saveToken, quit }. `io` = { out, stdin, headless } (headless: no raw mode or timers, for the self-test).
  * Returns { restore, key(k), frame() }.
  */
 export function startTui(app, actions, io = {}) {
@@ -164,6 +102,8 @@ export function startTui(app, actions, io = {}) {
   const sel = () => ui.sel[ui.side];
   const clampSel = (tab, n) => (sel()[tab] = Math.max(0, Math.min(sel()[tab], n - 1)));
   const isOn = name => app.sideOn(name);
+  // The Builder's tab shows once it is on, and while it still has sessions running or items waiting on you.
+  const visible = name => name === 'reviewer' || isOn(name) || live(name).length > 0 || needs(name).length > 0;
   const reviewer = sides.reviewer;
   const builder = sides.builder;
 
@@ -209,9 +149,10 @@ export function startTui(app, actions, io = {}) {
   }
 
   function sideBar(W) {
-    const room = Math.floor((W - 2) / 2);
+    const shown = SIDES.filter(visible);
+    const room = Math.floor((W - 2) / shown.length);
     const segs = [['', ' ']];
-    for (const name of SIDES) segs.push([name === ui.side ? ST.tabOn : ST.tabOff, ` ${sideLabel(name, room)} `], ['', ' ']);
+    for (const name of shown) segs.push([name === ui.side ? ST.tabOn : ST.tabOff, ` ${sideLabel(name, room)} `], ['', ' ']);
     return segs;
   }
 
@@ -234,6 +175,7 @@ export function startTui(app, actions, io = {}) {
   }
 
   function runningView(W, H) {
+    if (ui.edit?.prs) return prsInput(W);
     if (ui.side === 'builder') return builderRunning(W, H);
     const runs = live('reviewer');
     if (!runs.length) {
@@ -265,6 +207,15 @@ export function startTui(app, actions, io = {}) {
     if (w.status === 'stopped') return [ST.grey, 'STOPPED'];
     if (w.status === 'done') return [ST.green, w.prs?.length ? 'DONE' : 'ENDED'];
     return [ST.grey, 'ENDED'];
+  }
+
+  /** The quick review's input: PRs to review together, without a ticket. */
+  function prsInput(W) {
+    const about = "Paste PR links (https://github.com/owner/repo/pull/12) or owner/repo#12, separated by spaces or commas. Prowl reviews them together as one set, the way it reviews a ticket's PRs, and posts a review on each. No ticket or tag is involved.";
+    return [[], [[ST.bold, '  Quick review: PRs reviewed together, without a ticket']], [],
+      [[ST.grey, '  PRs  '], ...editSegs(W - 8)], [],
+      ...wrap(about, W - 4, 4).map(l => [[ST.grey, `  ${l}`]]),
+      ...(ui.edit.error ? [[], [[ST.red, `  ${ui.edit.error}`]]] : [])];
   }
 
   function builderRunning(W, H) {
@@ -324,7 +275,7 @@ export function startTui(app, actions, io = {}) {
     rows.push(r.status === 'done'
       ? [label('Report'), [ST.link, r.reportPath, pathToFileURL(r.reportPath).href]]
       : [label('Report'), [ST.grey, '(none)']]);
-    rows.push([label('Ticket'), [ST.link, r.ticketUrl, r.ticketUrl]]);
+    rows.push(r.quick ? [label('Ticket'), [ST.grey, '(none: a quick review)']] : [label('Ticket'), [ST.link, r.ticketUrl, r.ticketUrl]]);
     prs.slice(0, 4).forEach((p, i) => rows.push([label(i ? '' : 'PRs'), [ST.link, p.url, p.url],
       ...(flagged.includes(p.url) ? [[ST.yellow, isOwn(p, app.me) ? "  ⚑ needs a teammate's approval" : '  ⚑ needs your approval']] : []), [ST.grey, `  ${p.title}`]]));
     if (prs.length > 4) rows.push([label(''), [ST.grey, `+${prs.length - 4} more (o opens all)`]]);
@@ -386,21 +337,18 @@ export function startTui(app, actions, io = {}) {
     jira: ['A Jira board, by name or id: its open issues are polled.', 'Add a Jira board by its name (e.g. My Team board) or its id (the number in its URL).'],
   };
 
-  /** The Config view's selectable rows for the side in view, each with the `section` heading it sits under. */
+  /** The Config view's selectable rows, the same on both sides, each with the `section` heading it sits under. */
   function configRows() {
     const [one, add] = BOARD_HELP[app.cfg.taskBoard];
-    const name = ui.side;
-    const own = name === 'builder' && !isOn('builder') ? [] : SIDE_FIELDS[name]; // the Builder's rows are hidden while it is off
-    let section = NAMES[name];
-    const head = [{ switch: name, label: NAMES[name], section, help: `${name === 'reviewer' ? 'Reviews the PRs of tickets tagged for review.' : 'Builds tickets tagged to start, opens their PRs and follows them through review.'} enter or e turns it on or off; it applies at once. Off: nothing new is claimed or started, and running sessions finish.` }];
-    return [...head, ...[...SHARED_FIELDS, ...own].filter(f => !f.when || f.when(app.cfg)).flatMap(f => {
+    let section = '';
+    return CONFIG_FIELDS.filter(f => !f.when || f.when(app.cfg)).flatMap(f => {
       f = JIRA(app.cfg) && f.jira ? { ...f, ...f.jira } : f;
       if (f.heading) { section = f.heading; return []; }
       return (f !== 'boards' ? [f] : [
         ...app.boards().map((b, i) => ({ board: i, label: `Board ${i + 1}`, help: `${one} enter edits · d deletes.` })),
         { addBoard: true, label: '+ Add board', help: add },
       ]).map(r => ({ ...r, section }));
-    })];
+    });
   }
 
   function shown(f) {
@@ -444,11 +392,13 @@ export function startTui(app, actions, io = {}) {
     return [...rows, rule(W), ...detail];
   }
 
-  /** The text being typed, with its cursor. */
-  function editSegs() {
+  /** The text being typed, with its cursor, scrolled to keep the cursor within `room` columns. */
+  function editSegs(room = Infinity) {
     const e = ui.edit;
-    const v = e.secret ? '•'.repeat(e.value.length) : e.value;
-    return [[ST.yellow, v.slice(0, e.cursor)], [ST.cursor, v[e.cursor] || ' '], [ST.yellow, v.slice(e.cursor + 1)]];
+    const from = Math.max(0, e.cursor - room + 1);
+    const v = (e.secret ? '•'.repeat(e.value.length) : e.value).slice(from);
+    const at = e.cursor - from;
+    return [[ST.yellow, v.slice(0, at)], [ST.cursor, v[at] || ' '], [ST.yellow, v.slice(at + 1)]];
   }
 
   function configView(W, H) {
@@ -463,10 +413,9 @@ export function startTui(app, actions, io = {}) {
         : f.file ? [[ST.link, f.file, pathToFileURL(f.file).href]] : [[f.switch ? (isOn(f.switch) ? ST.green : ST.grey) : '', shown(f)]];
       rows.push([cursor(i === at), [f.addBoard ? ST.green : ST.grey, f.label.padEnd(LABEL_W)], ...value]);
     }
-    if (ui.side === 'builder' && !isOn('builder')) rows.push([], [[ST.grey, "  The Builder's own settings show here once it is on."]]);
     rows.push([], ui.edit?.error ? [[ST.red, `  ${ui.edit.error}`]] : [[ST.grey, `  ${fields[at].help}`]]);
     const variants = Object.entries(reviewer.tagVariants || {}).map(([p, v]) => `${p}: ${v.join(', ') || 'none yet'}`).join('  ·  ');
-    if (variants && ui.side === 'reviewer') rows.push([[ST.grey, `  ${JIRA(app.cfg) ? 'Labels' : 'Tags'} treated as the trigger: `], ['', variants]]);
+    if (variants) rows.push([[ST.grey, `  ${JIRA(app.cfg) ? 'Labels' : 'Tags'} treated as the trigger: `], ['', variants]]);
     return rows;
   }
 
@@ -488,19 +437,21 @@ export function startTui(app, actions, io = {}) {
     .map(l => [[ST.grey, `${time(l.t)} `], [LEVEL[l.level], `${l.level.padEnd(5)} `], ['', l.msg]]);
 
   const HINTS = {
-    reviewer: [' ↑↓ select · s stop · o open all PRs · a open ticket', ' ↑↓ select · enter open report · o open all PRs · a open ticket', '', ' ↑↓ select · enter edit · a add board · d delete board', ''],
+    reviewer: [' ↑↓ select · n quick review · s stop · o open all PRs · a open ticket', ' ↑↓ select · n quick review · enter open report · o open all PRs · a open ticket', '', ' ↑↓ select · enter edit · a add board · d delete board', ''],
     builder: [' ↑↓ select · enter open brief · s stop · o open PRs · a open ticket', ' ↑↓ select · enter open brief · o open PRs · a open ticket · w follow PRs · t stop following',
       ' ↑↓ select · enter answer · s skip · t hand back · o open', ' ↑↓ select · enter edit · a add board · d delete board', ''],
   };
   function footer(W) {
     if (ui.notes) return [[ST.grey, ' ↑↓ scroll · any other key closes the Update Notes']];
     if (ui.confirm) return [[ST.title, ` ${ui.confirm.text} `], [ST.grey, ui.confirm.key ? ' n stay' : ' y yes · n no']];
-    if (ui.edit) return [[ST.grey, ' enter save · esc cancel · ←→ move']];
+    if (ui.edit) return [[ST.grey, ` enter ${ui.edit.prs ? 'review' : 'save'} · esc cancel · ←→ move`]];
     if (Date.now() < ui.flashUntil) return [[ST.green, ` ${ui.flash}`]];
-    return spread([[ST.grey, HINTS[ui.side][view()]]], [[ST.grey, 'tab side · ←→ views · e on/off · r poll · p pause · q quit ']], W);
+    const tab = SIDES.filter(visible).length > 1 ? 'tab side · ' : '';
+    return spread([[ST.grey, HINTS[ui.side][view()]]], [[ST.grey, `${tab}←→ views · e on/off · r poll · p pause · q quit `]], W);
   }
 
   function rows(advance, W, H) {
+    if (!visible(ui.side)) ui.side = 'reviewer'; // the Builder was switched off with nothing left to show
     const out = [titleBar(W)];
     if (H >= 27) {
       const said = app.speech();
@@ -545,16 +496,33 @@ export function startTui(app, actions, io = {}) {
     });
   }
 
-  function toggleSide() {
-    const now = actions.toggleSide(ui.side);
-    flash(now ? `${NAMES[ui.side]} on: it picks up work from the next poll.` : `${NAMES[ui.side]} off: nothing new is claimed or started; running sessions finish.`);
+  function toggleSide(name = ui.side) {
+    const now = actions.toggleSide(name);
+    flash(now ? `${NAMES[name]} on: it picks up work from the next poll.${name === 'builder' ? ' Its tab is up top (tab or B).' : ''}`
+      : `${NAMES[name]} off: nothing new is claimed or started; running sessions finish.`);
+  }
+
+  /** n: a quick review of the PRs typed in, reviewed together without a ticket. */
+  function newReview() {
+    if (!isOn('reviewer')) return flash('The Reviewer is off: e turns it on.');
+    ui.view.reviewer = RUNNING;
+    startEdit('', v => {
+      const refs = parsePrRefs(v);
+      if (typeof refs === 'string') return refs;
+      actions.reviewPrs(refs).then(
+        run => flash(run ? `Reviewing ${plural(run.prs.length, 'PR')} together as ${run.ticket}.` : 'Dry run: the Log says what would be reviewed.'),
+        e => flash(`Couldn't start the review: ${e.message}`));
+      return '';
+    });
+    ui.edit.prs = true;
+    return undefined;
   }
 
   function configKey(k) {
     const f = configRows()[sel()[CONFIG]];
     const c = app.cfg;
     if (k === 'a') return editBoard(null);
-    if (f.switch) return k === 'enter' ? toggleSide() : undefined;
+    if (f.switch) return k === 'enter' ? toggleSide(f.switch) : undefined;
     if (f.file) return k === 'enter' ? openExternal(f.file) : undefined;
     if (k === 'd' && f.board != null) {
       const boards = app.boards();
@@ -636,7 +604,7 @@ export function startTui(app, actions, io = {}) {
     else if (k === 'enter' && view() === HISTORY && r.pr) openExternal(r.briefDir || r.pr.url);
     else if (k === 'enter' && view() === HISTORY && r.status === 'done') openExternal(r.reportPath);
     else if (k === 's' && view() === RUNNING && r.status === 'running') {
-      ui.confirm = { text: `Stop the review of ${r.ticket}? Its '${app.cfg.tags.inProgress}' tag is removed; re-tag to run it again.`, yes: () => actions.stop('reviewer', r) };
+      ui.confirm = { text: r.quick ? `Stop the quick review ${r.ticket}?` : `Stop the review of ${r.ticket}? Its '${app.cfg.tags.inProgress}' tag is removed; re-tag to run it again.`, yes: () => actions.stop('reviewer', r) };
     }
   }
 
@@ -671,8 +639,12 @@ export function startTui(app, actions, io = {}) {
       return undefined;
     }
     if (ui.edit) return editKey(k);
-    if (k === 'tab') { ui.side = ui.side === 'reviewer' ? 'builder' : 'reviewer'; return undefined; }
-    if (k === 'R' || k === 'B') { ui.side = k === 'R' ? 'reviewer' : 'builder'; return undefined; }
+    if (k === 'tab' || k === 'R' || k === 'B') {
+      const to = k === 'R' ? 'reviewer' : k === 'B' || ui.side === 'reviewer' ? 'builder' : 'reviewer';
+      if (visible(to)) ui.side = to;
+      else if (k === 'B') flash('The Builder is off: turn it on in Config (4).');
+      return undefined;
+    }
     if (k.length === 1 && k >= '1' && k <= String(TABS.length)) { ui.view[ui.side] = Number(k) - 1; return undefined; }
     if (k === 'right') { ui.view[ui.side] = (view() + 1) % TABS.length; return undefined; }
     if (k === 'left') { ui.view[ui.side] = (view() + TABS.length - 1) % TABS.length; return undefined; }
@@ -685,6 +657,7 @@ export function startTui(app, actions, io = {}) {
       return undefined;
     }
     if (k === 'e') return toggleSide();
+    if (k === 'n' && ui.side === 'reviewer') return newReview();
     if (k === 'r') { actions.pollNow(ui.side); flash(isOn(ui.side) ? `Polling the ${NAMES[ui.side]} now.` : `The ${NAMES[ui.side]} is off: e turns it on.`); return undefined; }
     if (k === 'p') { actions.togglePause(ui.side); flash(side().paused ? `${NAMES[ui.side]} paused: running sessions carry on, nothing new starts.` : 'Resumed.'); return undefined; }
     if (view() === CONFIG) return configKey(k);

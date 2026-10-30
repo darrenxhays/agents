@@ -23,6 +23,29 @@ export async function prsMentioning(owner, key, state = '') {
     .map(p => ({ url: p.url, title: p.title, number: p.number, repo: p.repository.nameWithOwner, author: p.author?.login || '', draft: Boolean(p.isDraft), state: p.state || '' }));
 }
 
+/**
+ * The PRs in typed text: PR links (https://github.com/owner/repo/pull/12) or owner/repo#12, separated by spaces or
+ * commas, each once, as [{ repo, number }]. A message naming what's wrong when there are none, or one isn't a PR.
+ */
+export function parsePrRefs(text) {
+  const words = String(text).split(/[\s,]+/).filter(Boolean);
+  if (!words.length) return 'Enter at least one PR';
+  const refs = [];
+  for (const w of words) {
+    const m = /^(?:https?:\/\/github\.com\/)?([\w.-]+\/[\w.-]+?)(?:\/pull\/|#)(\d+)(?:[/?#].*)?$/i.exec(w);
+    if (!m) return `${w} isn't a PR: use a PR link or owner/repo#12`;
+    if (!refs.some(r => r.repo.toLowerCase() === m[1].toLowerCase() && r.number === Number(m[2]))) refs.push({ repo: m[1], number: Number(m[2]) });
+  }
+  return refs;
+}
+
+/** A PR by repo and number, in openPrs()'s shape, with its state: 'open', 'closed' or 'merged'. */
+export async function prByRef({ repo, number }) {
+  const p = JSON.parse(await run('gh', ['api', `repos/${repo}/pulls/${number}`, '--jq',
+    '{url: .html_url, title, number, repo: .base.repo.full_name, author: .user.login, draft, state, merged: (.merged_at != null)}']));
+  return { url: p.url, title: p.title, number: p.number, repo: p.repo, author: p.author || '', draft: Boolean(p.draft), state: p.merged ? 'merged' : p.state };
+}
+
 /** The commit at the head of the PR now. */
 export async function headSha(pr) {
   return (await run('gh', ['api', `repos/${pr.repo}/pulls/${pr.number}`, '--jq', '.head.sha'])).trim();

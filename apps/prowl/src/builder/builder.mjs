@@ -276,13 +276,13 @@ export function createBuilder(app, deps) {
     const now = item.tags;
     // Without In Development to go by, the history says whether the done tag went on since (a review may have come and gone).
     const landed = w.handOff && (w.handOff.held ? !has(now, b().tags.inProgress)
-      : has(now, b().tags.done) || has(now, b().tags.reviewing) || (await tracker.tagAddedSince(cfg(), w.ref, w.handOff.rev, t => has([t], b().tags.done))));
+      : has(now, cfg().tags.trigger) || has(now, cfg().tags.inProgress) || (await tracker.tagAddedSince(cfg(), w.ref, w.handOff.rev, t => has([t], cfg().tags.trigger))));
     if (landed) log('info', `${w.key}: its handoff to review already went through`);
     else {
       checkStop(w); // s while the ticket was read: no handoff
       w.handOff ??= { at: Date.now(), held: has(now, b().tags.inProgress), rev: item.rev };
       touch(w);
-      await trackerOf(w).retag(cfg(), w.ref, t => isStart(t) || has([t], b().tags.inProgress) || has([t], b().tags.done), b().tags.done);
+      await trackerOf(w).retag(cfg(), w.ref, t => isStart(t) || has([t], b().tags.inProgress) || has([t], cfg().tags.trigger), cfg().tags.trigger);
     }
     const { at } = w.handOff;
     w.handOff = null;
@@ -335,7 +335,7 @@ export function createBuilder(app, deps) {
     Object.assign(w, { prs: mine.map(p => ({ repo: p.repo, number: p.number, url: p.url, title: p.title })), prsOpenedAt: Date.now(), lastActivityAt: 0, adopted: true });
     log('ok', `${w.key}: following its PRs ${mine.map(prName).join(', ')} instead of building it`);
     // Followed by hand while a review is asked for or under way: that review finishes first, as in follow().
-    const reviewing = !w.claimedAt && [b().tags.done, b().tags.reviewing].some(t => tags().has(w.ticket?.tags || [], t));
+    const reviewing = !w.claimedAt && [cfg().tags.trigger, cfg().tags.inProgress].some(t => tags().has(w.ticket?.tags || [], t));
     const due = reviewing ? [] : await dueFeedback(w);
     // Waiting for a review, its feedback so far is still to come (lastActivityAt 0). A round straight after a claim holds it already.
     Object.assign(w, { roundPrs: due, lastActivityAt: due.length || reviewing ? 0 : Date.now(), roundClaimed: due.length > 0 && Boolean(w.claimedAt), step: due.length ? 'round' : reviewing ? null : 'end-round', status: due.length || !reviewing ? 'active' : 'following' });
@@ -616,7 +616,7 @@ export function createBuilder(app, deps) {
       status: b().followUp ? 'following' : 'done', step: null, checkFails: 0, ...(!b().followUp && { endedAt: Date.now(), note: 'PRs opened' }),
     });
     touch(w);
-    log('ok', `${w.key}: ${w.prs.length} PR${w.prs.length > 1 ? 's' : ''} open, marked '${b().tags.done}'`);
+    log('ok', `${w.key}: ${w.prs.length} PR${w.prs.length > 1 ? 's' : ''} open, marked '${cfg().tags.trigger}'`);
     hoot(`Opened ${w.prs.length > 1 ? `${w.prs.length} PRs` : 'a PR'} for ${w.title}`, 'cheer');
     notifyIf(`Prowl: PRs open for ${w.key}`, w.title);
     await tidy(w, w.repos);
@@ -667,7 +667,7 @@ export function createBuilder(app, deps) {
         const item = await trackerOf(w).readItem(cfg(), w.ref);
         // A review asked for or under way finishes first, and so does work someone else claimed (In Development).
         // (Tags compare without case or punctuation, so Jira's Ready-for-Review matches.)
-        const waiting = [b().tags.done, b().tags.reviewing, b().tags.inProgress].some(t => tags().has(item.tags, t));
+        const waiting = [cfg().tags.trigger, cfg().tags.inProgress, b().tags.inProgress].some(t => tags().has(item.tags, t));
         const due = await dueFeedback(w, !waiting); // waiting, it still notices merged and closed PRs
         if (w.status !== 'following' || w.step) continue; // stopped following (t) while this looked
         if (!w.prs.length) {
@@ -724,7 +724,7 @@ export function createBuilder(app, deps) {
         return log('warn', `${w.key}: round not started, ${why}`);
       };
       // Read again now: a review or someone else's claim since follow() looked waits for its turn.
-      const waiting = [b().tags.done, b().tags.reviewing, b().tags.inProgress].find(t => tags().has(ticket.tags, t));
+      const waiting = [cfg().tags.trigger, cfg().tags.inProgress, b().tags.inProgress].find(t => tags().has(ticket.tags, t));
       if (waiting) return back(`the ticket carries '${waiting}' now`);
       try {
         await tracker.claim(cfg(), ticket, tags().owned, b().tags.inProgress);
@@ -901,7 +901,7 @@ export function createBuilder(app, deps) {
     // Feedback since the round collected its own (posted during its session or CI wait, say), or since the handoff, is still due.
     Object.assign(w, { status: 'following', step: null, lastActivityAt: w.round?.collectedAt || handedOff, round: null, roundPrs: [] });
     touch(w);
-    log('ok', `${w.key}: marked '${b().tags.done}'${w.rounds ? ` after feedback round ${w.rounds}` : ''}; following its PRs`);
+    log('ok', `${w.key}: marked '${cfg().tags.trigger}'${w.rounds ? ` after feedback round ${w.rounds}` : ''}; following its PRs`);
   }
 
   // ---- Stopping, and Needs you ----

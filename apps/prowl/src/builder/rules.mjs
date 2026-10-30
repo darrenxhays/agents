@@ -7,9 +7,13 @@ import { actionable, questionShape } from '../feedback.mjs';
 import { checksState } from '../github.mjs';
 import { norm, tagMatches } from '../match.mjs';
 
-/** The Builder's tag matchers: the start tag loosely (with the typo tolerance), the ones it sets itself exactly. */
+/**
+ * The Builder's tag matchers: the start tag loosely (with the typo tolerance), the ones it sets itself exactly. Its
+ * done tag is the Reviewer's trigger tag, and a ticket the Reviewer has claimed carries the Reviewer's in-progress tag.
+ */
 export function builderTags(cfg) {
-  const { start, inProgress, done, reviewing } = cfg.builder.tags;
+  const { start, inProgress } = cfg.builder.tags;
+  const { trigger: done, inProgress: reviewing } = cfg.tags;
   const ours = t => [inProgress, done, reviewing].some(x => norm(x) === norm(t));
   const isStart = t => !ours(t) && tagMatches(t, start, cfg.tagMatchMaxTypos);
   return { isStart, ours, owned: t => isStart(t) || ours(t), has: (tags, tag) => tags.some(t => norm(t) === norm(tag)) };

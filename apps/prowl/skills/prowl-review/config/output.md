@@ -1,6 +1,6 @@
 # PR-Owl Review — Output
 
-Templates for everything this skill posts on GitHub: the comment Prowl posts when a review starts, the review banner, the review body, the details file collapsed at its bottom, inline comments, replies on existing threads, and the comment that stands in for an approval when approvals are off. The Builder uses it too, for the replies it posts after a feedback round on its PRs, and for that round's commits. Prowl keeps your copy of this file in `~/.prowl/config/` (or `$PROWL_HOME/config/`): edit that one. Updates never overwrite a copy you've edited; Prowl's Update Notes say when this default changes.
+Templates for everything this skill posts on GitHub: the comment Prowl posts when a review starts (with or without a ticket), the review banner, the review body, the details file collapsed at its bottom, inline comments, replies on existing threads, and the comment that stands in for an approval when approvals are off. The Builder uses it too, for the replies it posts after a feedback round on its PRs, and for that round's commits. Prowl keeps your copy of this file in `~/.prowl/config/` (or `$PROWL_HOME/config/`): edit that one. Updates never overwrite a copy you've edited; Prowl's Update Notes say when this default changes.
 
 Each template is a fenced block. Words in `<angle brackets>` are filled in for each post; everything else is posted as written. The hidden `<!-- prowl-review … -->` marker is added to every post whatever these templates say, because the re-run guard depends on it.
 
@@ -33,6 +33,14 @@ Prowl posts this as a comment on each PR as soon as it starts reviewing it, so p
 
 ```markdown
 🦉 **PR-Owl** is reviewing this PR for [<ticket>](<ticket link>). Its review lands here when it's done.
+```
+
+## Quick review started
+
+The Review started comment for a quick review, which has no ticket: the PRs someone asked Prowl to review together (`n` in Prowl, or `prowl --review`). `<prs>` is the PRs under review, as links (`[repo#12](…)`), comma-separated.
+
+```markdown
+🦉 **PR-Owl** is reviewing <prs>. Its review lands on each PR when it's done.
 ```
 
 ## Review body

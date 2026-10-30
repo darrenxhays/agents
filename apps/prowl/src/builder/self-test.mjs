@@ -306,7 +306,7 @@ async function pure(assert) {
     ['octo-org/web', 'octo-org/api', 'octo-org/jobs', 'other-org/lib'], "the ticket's links and repo: lines, then the PRs' repos, each once");
   const ownCfg = { githubOwner: 'octo-org', builder: { extraOwners: ['octo-labs'] } };
   assert.ok(rules.ownerAllowed('octo-org/web', ownCfg) && rules.ownerAllowed('Octo-Labs/x', ownCfg) && !rules.ownerAllowed('other-org/lib', ownCfg));
-  const tagCfg = { tagMatchMaxTypos: 2, builder: { tags: { start: 'Ready to Start', inProgress: 'In Development', done: 'Ready for Review', reviewing: 'In Review' } } };
+  const tagCfg = { tagMatchMaxTypos: 2, tags: { trigger: 'Ready for Review', inProgress: 'In Review' }, builder: { tags: { start: 'Ready to Start', inProgress: 'In Development' } } };
   const t = rules.builderTags(tagCfg);
   assert.ok(t.isStart('ready-to-start') && t.isStart('Redy to Start') && t.isStart('Ready-to-Start') && !t.isStart('In Development'), 'the start tag, loosely');
   assert.ok(t.ours('In-Development') && !t.ours('In Developmnt'), 'its own tags, exactly');

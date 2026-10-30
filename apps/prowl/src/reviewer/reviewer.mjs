@@ -171,10 +171,53 @@ export function createReviewer(app, { log, forget, hoot, appDir, trackers, githu
     return announce(run);
   }
 
-  /** Posts the Review started comment (output.md) on each PR under review, so people can see Prowl has it. */
+  /**
+   * A quick review of `refs` ([{ repo, number }]), asked for in the TUI (n): reviewed together as one set, with no
+   * ticket and no tags. Resolves with the run, or null on a dry run; rejects when it can't start.
+   */
+  side.reviewPrs = async function reviewPrs(refs) {
+    const c = cfg();
+    if (!on()) throw new Error('the Reviewer is off');
+    if (side.running().length >= c.maxConcurrentReviews) throw new Error(`${c.maxConcurrentReviews} reviews are already running (Max parallel reviews)`);
+    app.me ||= await gh.me();
+    const prs = [];
+    for (const ref of refs) {
+      const pr = await gh.prByRef(ref).catch(e => { throw new Error(`couldn't read ${ref.repo}#${ref.number} (${e.message})`); });
+      if (pr.state !== 'open') throw new Error(`${pr.repo}#${pr.number} is ${pr.state}`);
+      prs.push(pr);
+    }
+    const names = prs.map(p => `${p.repo.split('/')[1]}#${p.number}`).join(', ');
+    // QUICK-1, -2, …: keeps each quick review its own entry in History.
+    const n = 1 + Math.max(0, ...side.state.runs.filter(r => r.quick).map(r => Number(r.ticket.split('-').pop()) || 0));
+    const ticket = { key: `QUICK-${n}`, title: `Quick review: ${names}`, url: '', ref: null };
+    if (app.dryRun()) { log('info', `${ticket.key}: would review ${prs.map(p => p.url).join(' ')}`); return null; }
+    try {
+      const cloned = await gh.cloneMissing(prs, c.workDir);
+      if (cloned.length) log('info', `${ticket.key}: cloned ${cloned.join(', ')} into ${c.workDir}`);
+    } catch (e) {
+      log('warn', `${ticket.key}: ${e.message}; reviewing from GitHub without a local clone`);
+    }
+    const heads = {};
+    for (const pr of prs) heads[pr.url] = await gh.headSha(pr).catch(() => '');
+    const run = (side.startReview || rv.startReview)(c, appDir, { tracker: null, ticket, prs, me: app.me, heads, quick: true });
+    side.state.runs.push(run);
+    save();
+    hoot(prs.length > 1 ? `Starting a quick review of ${prs.length} PRs` : `Starting a quick review of ${prs[0].title}`);
+    log('ok', `${ticket.key}: quick review started on ${names}`);
+    await announce(run);
+    return run;
+  };
+
+  /**
+   * Posts the Review started comment (output.md) on each PR under review, so people can see Prowl has it. A quick
+   * review has no ticket to link to: it posts Quick review started, which links the PRs instead.
+   */
   async function announce(run) {
+    const text = run.quick
+      ? fill(outputTemplate(appDir, 'Quick review started'), { prs: run.prs.map(p => `[${p.repo.split('/')[1]}#${p.number}](${p.url})`).join(', ') })
+      : fill(outputTemplate(appDir, 'Review started'), { ticket: run.ticket, 'ticket link': run.ticketUrl });
     // The prowl-review marker keeps prowl-review from counting it as someone else's comment.
-    const body = `${fill(outputTemplate(appDir, 'Review started'), { ticket: run.ticket, 'ticket link': run.ticketUrl })}\n<!-- prowl-review ${run.id} started -->`;
+    const body = `${text}\n<!-- prowl-review ${run.id} started -->`;
     const file = path.join(path.dirname(run.logPath), `${run.id}.started.json`);
     writeJson(file, { body });
     for (const pr of run.prs) {
@@ -245,11 +288,12 @@ export function createReviewer(app, { log, forget, hoot, appDir, trackers, githu
     return missing;
   }
 
-  /** Settles a review whose session ended, then moves the ticket's tag on. */
+  /** Settles a review whose session ended, then moves the ticket's tag on. A quick review has no ticket, nor tags. */
   async function finish(run) {
     rv.finalize(run);
     const { tags } = cfg();
-    const failures = side.state.failures;
+    const failures = run.quick ? {} : side.state.failures;
+    const again = run.quick ? 'n reviews PRs again' : `re-tag '${tags.trigger}' to try again`;
     if (run.status === 'done') {
       const unchecked = await checkPosted(run).catch(() => run.prs.map(p => p.url)); // announce any PR posted since the last check
       if (run.marker) rv.failUnposted(run, await missingReviews(run, unchecked)); // reviews started before 2.12.0 have none
@@ -259,19 +303,20 @@ export function createReviewer(app, { log, forget, hoot, appDir, trackers, githu
       run.pendingTag = tags.done;
       const s = run.summary || {};
       log('ok', `${run.ticket}: review ${run.reviewNo} finished: ${s.verdict || 'no verdict'} (C${s.critical ?? '?'} H${s.high ?? '?'} M${s.medium ?? '?'} L${s.low ?? '?'} N${s.nit ?? '?'}) · ${run.reportPath}`);
-      hoot(`Done reviewing PRs for ${run.title}, marking as '${tags.done}'`, 'cheer');
+      hoot(run.quick ? `Done with ${run.ticket}` : `Done reviewing PRs for ${run.title}, marking as '${tags.done}'`, 'cheer');
     } else if (run.status === 'failed') {
       failures[run.ticket] = (failures[run.ticket] || 0) + 1;
-      const retry = rv.retryFailed(run, failures[run.ticket]); // one automatic retry, then wait for a human to re-tag
+      const retry = !run.quick && rv.retryFailed(run, failures[run.ticket]); // one automatic retry, then wait for a human to re-tag
       run.pendingTag = retry ? tags.trigger : '';
-      const why = run.capped ? 'Not retried, as it hit a cap' : run.unposted?.length ? 'Not retried, as a retry would most likely be blocked too' : 'Not retrying again';
-      log('error', `${run.ticket}: review failed: ${run.error}. ${retry ? `Re-tagged '${tags.trigger}' to retry once.` : `${why}; re-tag '${tags.trigger}' to try again.`}`);
+      const why = run.capped ? 'Not retried, as it hit a cap' : run.unposted?.length ? 'Not retried, as a retry would most likely be blocked too' : run.quick ? 'Not retried' : 'Not retrying again';
+      log('error', `${run.ticket}: review failed: ${run.error}. ${retry ? `Re-tagged '${tags.trigger}' to retry once.` : `${why}; ${again}.`}`);
     } else {
       run.pendingTag = '';
-      log('warn', `${run.ticket}: review stopped. Re-tag '${tags.trigger}' to run it again.`);
+      log('warn', `${run.ticket}: review stopped. ${run.quick ? 'n reviews PRs again' : `Re-tag '${tags.trigger}' to run it again`}.`);
     }
+    if (run.quick) run.pendingTag = null;
     save();
-    await applyTag(run);
+    if (run.pendingTag != null) await applyTag(run);
   }
 
   /** Writes run.pendingTag to the ticket (replacing the tags this side owns); retried every minute until it lands. */

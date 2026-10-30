@@ -3,7 +3,7 @@
 // GitHub PRs of tickets tagged for review; the Builder builds tickets tagged to start and opens their PRs. See README.md.
 // Run it from your projects folder:
 //   node /path/to/prowl.mjs [--setup] [--dry-run] [--once] [--self-test] [--reviewer-only | --builder-only]
-//     [--work <ticket>] [--follow <ticket>]
+//     [--work <ticket>] [--follow <ticket>] [--review <pr> [<pr>...]]
 import fs from 'node:fs';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -49,12 +49,21 @@ const { createBuilder } = await import('./src/builder/builder.mjs');
 const { createShell } = await import('./src/shell.mjs');
 const { migrateFixes, needsMigration } = await import('./src/migrate.mjs');
 const update = await import('./src/update.mjs');
+const { parsePrRefs } = await import('./src/github.mjs');
 
 const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url)); // this folder is also the plugin with prowl-review and prowl-work
 const ONCE = args.has('--once');
 const LOCK = path.join(HOME, 'lock');
 const workKey = valueOf('--work');
 const followKey = valueOf('--follow');
+// --review takes every argument after it up to the next flag: PR links or owner/repo#12.
+const afterReview = args.has('--review') ? process.argv.slice(process.argv.indexOf('--review') + 1) : null;
+const nextFlag = afterReview?.findIndex(a => a.startsWith('--'));
+const reviewRefs = afterReview && parsePrRefs(afterReview.slice(0, nextFlag < 0 ? undefined : nextFlag).join(' '));
+if (typeof reviewRefs === 'string') {
+  console.error(`--review: ${reviewRefs}. Give one or more PRs, e.g. prowl --review https://github.com/owner/repo/pull/12 owner/repo#13`);
+  process.exit(1);
+}
 let tui = null; // set once the TUI is up; until then (and with --once) logs go to stdout
 
 const app = {
@@ -174,6 +183,18 @@ for (const [key, source] of [[workKey, 'manual'], [followKey, 'follow']]) {
   }
 }
 
+// prowl --review <pr>... starts a quick review of the PRs, together and without a ticket. It needs the Reviewer.
+if (reviewRefs) {
+  if (!app.sideOn('reviewer')) app.override.reviewer = true;
+  try {
+    const run = await reviewer.reviewPrs(reviewRefs);
+    console.log(run ? `Reviewing ${run.prs.map(p => p.url).join(' ')} together as ${run.ticket}.` : 'Dry run: logged what would be reviewed.');
+  } catch (e) {
+    console.error(`Couldn't start the quick review: ${e.message}`);
+    process.exit(1);
+  }
+}
+
 if (ONCE) {
   if (app.notes) console.log(`${update.notesText(app.notes)}\n`);
   if (app.sideOn('reviewer')) await reviewer.settle();
@@ -212,6 +233,10 @@ tui = startTui(app, {
   handBack: item => builder.handBack(item).catch(e => log('builder', 'error', `${item.ticket}: couldn't hand it back (${e.message})`)),
   follow: w => builder.enqueue(w.key, 'follow'),
   stopFollowing: w => builder.stopFollowing(w),
+  reviewPrs: refs => reviewer.reviewPrs(refs).catch(e => {
+    log('reviewer', 'error', `Couldn't start the quick review: ${e.message}`);
+    throw e;
+  }),
   saveConfig: () => {
     saveConfig(app.cfg);
     if (!fs.existsSync(CHECKS_PATH)) writeJson(CHECKS_PATH, {}); // the Checks before push file to fill in, never overwritten

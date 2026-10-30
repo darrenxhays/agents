@@ -52,12 +52,12 @@ On Windows, use Windows Terminal. Sessions run in the **Projects Directory** fro
 
 ## The two sides
 
-Prowl has two sides, each with its own tab: the **Reviewer** and the **Builder**.
+Prowl has two sides, each with its own tab: the **Reviewer** and the **Builder**. The Builder's tab shows once it is on (and, after you turn it off, while it still has sessions running or items in Needs you).
 
-- **Switches.** `reviewer.enabled` (on by default) and `builder.enabled` (off by default) are the first row of each side's Config, and `e` turns the side in view on or off. A change applies at once, without a restart. **Off** means nothing new is claimed or started; sessions already running finish and are recorded. A side checks its switch again just before it claims a ticket and again before it starts a session, and a claim it made just before the switch went off is released by putting the tag back.
+- **Switches.** `reviewer.enabled` (on by default) and `builder.enabled` (off by default) are at the top of Config (`4`), where `enter` turns one on or off, and `e` turns the side in view on or off. A change applies at once, without a restart. **Off** means nothing new is claimed or started; sessions already running finish and are recorded. A side checks its switch again just before it claims a ticket and again before it starts a session, and a claim it made just before the switch went off is released by putting the tag back.
 - **Both off**, Prowl stays idle and says so. It still re-reads `config.json` every poll interval, so a switch you turn on in the file is picked up.
 - **For one launch**, `--reviewer-only` or `--builder-only` overrides the switches. `--once` polls each side that's on.
-- **The board is the only handoff.** The sides never read each other's state. By default the Builder's done tag (**Ready for Review**) is the Reviewer's trigger tag, so a ticket the Builder finishes is picked up by your team's Reviewer, and the Builder waits while the Reviewer has it (**Ready for Review** or **In Review**) before it works on the feedback.
+- **The board is the only handoff.** The sides never read each other's state. Once its PRs are open, the Builder sets the Reviewer's trigger tag (`tags.trigger`, **Ready for Review**), so a ticket the Builder finishes is picked up by your team's Reviewer, and the Builder waits while the Reviewer has it (the trigger tag, or the Reviewer's in-progress tag `tags.inProgress`, **In Review**) before it works on the feedback.
 - **Logs.** Each side has its own Log view, and each line of `poller.log` names its side: `[reviewer]`, `[builder]`, or `[prowl]` for both.
 
 ## The Reviewer
@@ -73,6 +73,8 @@ Prowl has two sides, each with its own tab: the **Reviewer** and the **Builder**
 **Re-review**: add the trigger tag again. The next review gets the previous report as its brief. It re-checks every earlier finding (fixed, still open or no longer applicable), replies on the old comment threads instead of re-posting, and its report lists what was fixed. PRs the last review approved (with `approvals` off, the ones it found nothing blocking on) are left out if they have no new commits since. They are still read as context for the other PRs, but nothing is posted on them. If every PR is approved and unchanged, the ticket goes straight to **Reviewed**.
 
 **Failures**, including a session that ends without writing its report, are retried once automatically (the trigger tag is put back), except a review stopped by a spend, turn or time cap, so a runaway review isn't paid for twice. A review that ends without posting its review also fails. Each review the session posts ends with a hidden marker line Prowl gives it; once the session ends, every PR still open must have a review from you carrying that marker. GitHub also files each reply on a thread as an empty review, so replies alone don't count, and a review whose own post was blocked (by an auto-mode permission check, say) no longer passes as done. That failure names the PRs and the session log, and isn't retried automatically, since a retry would most likely be blocked again. A PR merged or closed mid-review, or one Prowl couldn't look up, doesn't count as missing, and a review without the marker still counts, with a warning in the Log. After a second failure Prowl waits for someone to re-tag. **Stopping** a review removes **In Review**; re-tag the ticket to run it again.
+
+**Quick reviews**: `n` on the Reviewer's tab, or `prowl --review <pr> [<pr>...]` from the command line, asks for PRs to review without a ticket: PR links (`https://github.com/owner/repo/pull/12`) or `owner/repo#12`, separated by spaces or commas. It's a full review, the same as a ticket's: the PRs are reviewed together as one set, with the same settings, and History lists the review as `QUICK-1`, `QUICK-2`, …. Only open PRs are taken, and the review counts toward `maxConcurrentReviews`. No tag is read or written, and a failed quick review isn't retried: press `n` again. Instead of the *Review started* comment, which links to the ticket, each PR gets the *Quick review started* comment from `output.md`, which links the PRs reviewed together.
 
 **Hoot** sleeps until there's news. He wakes up to say when he's checking the boards, when he picks up a ticket and starts its reviews, when each PR's review is posted, when a ticket is done, and when something goes wrong (with what went wrong).
 
@@ -116,15 +118,15 @@ After `done`, Prowl's own code does the rest:
 1. **Checks, per repo**: your `checks.json`, then the guards: the new commits sit on Prowl's branch and on its base, at most `builder.maxChangedLines` (3000) lines change, no `builder.protectedPaths` (`.github/workflows/**`) are touched, nothing looks like a secret, and the remote branch doesn't exist yet or hasn't moved. A failing check gets one more session turn with its output, and a second failure goes to Needs you. Nothing is pushed until every repo passes.
 2. **Push** each branch: never forced, and never to `builder.protectedBranches` (`main`, `master`, `release/*`) or a repo's default branch. Branch names come from `builder.branchTemplate`, `prowl/{id}-{slug}` (`{id}` is `123` for `AB#123`, and `PROJ-123` as it is); a rebuild uses `-2`, `-3`, … rather than touch an earlier branch.
 3. **Open one PR per repo**, ready for review (`builder.draftPrs` opens drafts, which the Reviewer then leaves alone), with the ticket key in the title and the session's body. With several PRs, each body links the others.
-4. **Retag**: In Development is swapped for `builder.tags.done` (**Ready for Review**). **Prowl never changes a ticket's state or workflow status**, on Azure DevOps or Jira.
+4. **Retag**: In Development is swapped for the Reviewer's trigger tag, `tags.trigger` (**Ready for Review**). **Prowl never changes a ticket's state or workflow status**, on Azure DevOps or Jira.
 5. **Afterwards**: History shows the PRs, the cost and the plan, and `builder.notify` sends a desktop notification. The worktrees and Prowl's local branches are removed; the brief folder is kept. A branch whose commits were never pushed is kept in your clone, and the Log names it.
 
 ### Following the PRs through review
 
 With `builder.followUp` on (the default):
 
-- **When a round starts**: a PR has feedback newer than the Builder's last push or round, and the ticket carries neither the done tag nor `builder.tags.reviewing` (**In Review**), so a review asked for or under way finishes first. Nor In Development: work someone else claimed finishes first too. Feedback is a review requesting changes, or an unresolved thread from whoever `builder.fixFrom` covers: `prowl` (threads carrying Prowl's marker), `prowl+bots`, or `everyone` (the default). Drafts, PRs that aren't yours and PRs from forks get no round.
-- **A round**: Prowl claims the ticket again (In Development, with the claim check), checks out a worktree per PR at its head, and briefs a fresh fenced session with each PR's latest PR-Owl details file (read from GitHub, with Parked findings left out), the unresolved threads, the reviews requesting changes and your past answers. The skill sorts each item into fix, dispute, ask or park, fixes with tests, and commits once per PR. Prowl runs the checks and guards (the new commit must sit on the PR's head, and if the branch moved since the round started, the round is dropped with nothing pushed), pushes, never forced, and posts one reply per thread fixed or disputed, from the *Fix reply* and *Dispute reply* templates in `output.md`. **It never resolves a thread.** It then waits up to `builder.waitForChecksMinutes` (30) for the required checks (a failing check gets one more turn with the failed job's log) and swaps back to the done tag.
+- **When a round starts**: a PR has feedback newer than the Builder's last push or round, and the ticket carries neither the Reviewer's trigger tag nor its in-progress tag, `tags.inProgress` (**In Review**), so a review asked for or under way finishes first. Nor In Development: work someone else claimed finishes first too. Feedback is a review requesting changes, or an unresolved thread from whoever `builder.fixFrom` covers: `prowl` (threads carrying Prowl's marker), `prowl+bots`, or `everyone` (the default). Drafts, PRs that aren't yours and PRs from forks get no round.
+- **A round**: Prowl claims the ticket again (In Development, with the claim check), checks out a worktree per PR at its head, and briefs a fresh fenced session with each PR's latest PR-Owl details file (read from GitHub, with Parked findings left out), the unresolved threads, the reviews requesting changes and your past answers. The skill sorts each item into fix, dispute, ask or park, fixes with tests, and commits once per PR. Prowl runs the checks and guards (the new commit must sit on the PR's head, and if the branch moved since the round started, the round is dropped with nothing pushed), pushes, never forced, and posts one reply per thread fixed or disputed, from the *Fix reply* and *Dispute reply* templates in `output.md`. **It never resolves a thread.** It then waits up to `builder.waitForChecksMinutes` (30) for the required checks (a failing check gets one more turn with the failed job's log) and swaps back to the Reviewer's trigger tag.
 - **Ready to merge**: History flags a ticket **READY TO MERGE** (with a notification) once every PR's latest review approves it, no thread is open and the required checks are green. No required checks within 10 minutes of a push counts as CI not started yet; after that, as a repo that requires none. Merging stays with you.
 - **Stops**: `builder.maxRounds` (3), `builder.ticketBudgetUsd`, a guard stopping a push, or checks failing twice send the ticket to Needs you, keeping In Development. A merged or closed PR stops being followed, and `t` on a ticket in the Builder's History stops following it.
 
@@ -166,12 +168,13 @@ On Azure DevOps a ticket's key is `AB#123` (for `--work` and `--follow`, `123` w
 
 | Key | Action |
 |---|---|
-| `tab`, `R` / `B` | Switch between the Reviewer and the Builder |
+| `tab`, `R` / `B` | Switch between the Reviewer and the Builder (once the Builder is on) |
 | `←` `→`, `1`–`5` | Running · History · Needs you · Config · Log, within the side in view |
 | `↑` `↓` | Select |
 | `e` | Turn the side in view on or off |
+| `n` | Review PRs together without a ticket: a quick review (Reviewer) |
 | `s` | Stop the selected review or build (Running) · skip the selected item, or end its work (Needs you) |
-| `enter` | Open the report (Reviewer History) or the brief folder (Builder) · answer, approve or retry (Needs you) · edit a setting or open a config file (Config) |
+| `enter` | Open the report (Reviewer History) or the brief folder (Builder) · answer, approve or retry (Needs you) · edit a setting, open a config file or flip a side's switch (Config) |
 | `w` | Follow the selected ticket's PRs (Builder History) |
 | `t` | Stop following the selected ticket (Builder History) · hand the ticket back with its start tag (Needs you) |
 | `o` / `a` | Open the PRs / the ticket in the browser |
@@ -184,7 +187,7 @@ Each tab's label shows its switch, the sessions running (`▶`) and the items in
 
 ## Config
 
-Settings live in `~/.prowl/config.json`. Each side's Config view (`4`) edits the same file: the side's switch first, then a **Shared** section, then the side's own settings (the Builder's are hidden while it's off). Every setting keeps its key in `config.json`, and changes apply from the next poll.
+Settings live in `~/.prowl/config.json`. Config (`4`) is the same on both tabs and holds every setting of the app, in sections: **Prowl** (the settings file, both switches, polling, dry run, updates, logs), **Boards and repos**, **Tags** (in the order a ticket meets them: build start, build in-progress, review trigger, review in-progress, review done), **All sessions**, then the Reviewer's (**Files**, **Sessions**, **Verdicts and rounds**) and the Builder's (**Files**, **Sessions**, **Repos and branches**, **Follow-up**). The Builder's settings show while it's off, so you can set it up before you turn it on. Every setting keeps its key in `config.json`, and changes apply from the next poll.
 
 ### Shared
 
@@ -196,11 +199,11 @@ Settings live in `~/.prowl/config.json`. Each side's Config view (`4`) edits the
 | `jira.site` / `jira.email` | | `https://yourcompany.atlassian.net` and your Atlassian email |
 | `jira.boards` | `[]` | `[{ "board": "My Team board" }]`: a board name or id |
 | `githubOwner` | | GitHub org searched for PRs, whose repos the Builder works in (asked by `prowl --setup`) |
-| `workDir` | your projects folder | **Projects Directory**: where sessions run; its `CLAUDE.md` is loaded, repos not cloned there are cloned first, and worktrees go in its `.prowl-worktrees` |
+| `workDir` | your projects folder | **Projects directory**: where sessions run; its `CLAUDE.md` is loaded, repos not cloned there are cloned first, and worktrees go in its `.prowl-worktrees` |
 | `pollSeconds` | `300` | Poll interval, and how often `config.json` is re-read |
 | `tagMatchMaxTypos` | `2` | Typos still treated as the trigger or start tag (`0` = exact; short tags get less slack) |
 | `claude.permissionMode` | `auto` | For both sides' sessions. Avoid `bypassPermissions`: sessions read text written by other people |
-| `allowMemoryWrites` | `true` | **Sessions use memory**. Off: sessions run with Claude Code's auto-memory off (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`), so they don't add their outcome to the memory index that loads into your later sessions. They don't read your memory either |
+| `allowMemoryWrites` | `true` | **Use memory**. Off: sessions run with Claude Code's auto-memory off (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`), so they don't add their outcome to the memory index that loads into your later sessions. They don't read your memory either |
 | `caffeinate` | `false` | **Keep Mac awake** (macOS only): while a session runs, `caffeinate -i` keeps the Mac from idle-sleeping, which stalls it. Closing the lid still sleeps the Mac |
 | `logRetentionDays` | `0` | **Keep logs (days)**: on launch and each poll, review logs in `logs/` older than this are deleted (never a running review's), and `poller.log` past 5 MB is renamed `poller.log.1`, replacing the older one. Reports are always kept. `0` = keep everything |
 | `dryRun` | `false` | Log what would be reviewed or built, without touching tags or starting sessions |
@@ -211,11 +214,11 @@ Settings live in `~/.prowl/config.json`. Each side's Config view (`4`) edits the
 | Key | Default | Meaning |
 |---|---|---|
 | `reviewer.enabled` | `true` | The Reviewer's switch |
-| `tags.trigger` / `inProgress` / `done` | `Ready for Review` / `In Review` / `Reviewed` | Tags (Jira labels) the Reviewer reads and sets |
+| `tags.trigger` / `inProgress` / `done` | `Ready for Review` / `In Review` / `Reviewed` | Tags (Jira labels) the Reviewer reads and sets. The Builder sets the trigger tag once its PRs are open |
 | `maxConcurrentReviews` | `2` | Extra tickets stay tagged until a slot frees, so a teammate can take them |
 | `claude.model` / `effort` | `claude-opus-5-5` / `xhigh` | Review sessions (and the Builder's model unless `builder.model` is set) |
 | `claude.maxBudgetUsd` / `maxTurns` | `0` / `0` | **Spend cap** (USD) and **turn cap** per review, passed to Claude Code as `--max-budget-usd` and `--max-turns`. `0` = no cap |
-| `reviewTimeoutMinutes` | `0` | **Review time limit**: stops a review running longer than this, counted from its start. `0` = no limit. A review stopped by any cap fails with the cap named (e.g. "stopped: spend cap $50") and isn't retried automatically |
+| `reviewTimeoutMinutes` | `0` | **Time cap per review**: stops a review running longer than this, counted from its start. `0` = no limit. A review stopped by any cap fails with the cap named (e.g. "stopped: spend cap $50") and isn't retried automatically |
 | `ticketContext` | `false` | **Ticket text in reviews**: adds the ticket's description to the review's brief (on Azure DevOps, its acceptance criteria too), trimmed to about 6 KB, so reviewers know the goal without signing in to the tracker. It is read with Prowl's own sign-in, only for a ticket about to be reviewed; if that fails, the review runs without it |
 | `reviewOwnPrs` | `false` | **Review my own PRs** (see the Reviewer, step 4) |
 | `approvals` | `true` | Approve PRs with no blocking findings. Off: comment that nothing is blocking (the *No blocking issues* template in `output.md`) and leave approving to a human. Blocking findings still request changes |
@@ -228,7 +231,7 @@ Settings live in `~/.prowl/config.json`. Each side's Config view (`4`) edits the
 | Key | Default | Meaning |
 |---|---|---|
 | `builder.enabled` | `false` | The Builder's switch |
-| `builder.tags.start` / `inProgress` / `done` / `reviewing` | `Ready to Start` / `In Development` / `Ready for Review` / `In Review` | The tags (Jira labels) the Builder reads and sets. `done` is the Reviewer's trigger and `reviewing` its in-progress tag, by default |
+| `builder.tags.start` / `inProgress` | `Ready to Start` / `In Development` | The tags (Jira labels) the Builder reads and sets. Once its PRs are open it sets the Reviewer's trigger tag, `tags.trigger`, and it starts no feedback round while a ticket carries that or the Reviewer's `tags.inProgress` |
 | `builder.assignedToMe` | `true` | Only tickets assigned to you |
 | `builder.maxConcurrent` | `1` | Tickets built at once, from the claim until their PRs open, Needs you included |
 | `builder.approvePlans` | `auto` | `auto`: a plan with no open questions is approved by Prowl. `ask`: every plan waits for you |
@@ -278,7 +281,7 @@ How each PR is reviewed and built, and what Prowl posts, are set by these files.
 |---|---|
 | `review.md` | The reviewer's stance, the severity definitions, and the verdict rules (highest severity → verdict → APPROVE / REQUEST_CHANGES / COMMENT) |
 | `review-axis-catalog.md` | What reviewers check: the review axes and their checklists. An axis marked ALWAYS INCLUDED is in every PR's review |
-| `output.md` | Templates for everything posted on GitHub: the *Review started* comment posted when a review starts, the review banner, comment prefix, the short review body, the details file collapsed at its bottom (the full write-up of every finding, for a coding agent to fix from), inline comments, replies on existing threads, and the *No blocking issues* comment used when `approvals` is off. The Builder uses its *Fix reply*, *Dispute reply* and *Fix commit message* for its feedback rounds |
+| `output.md` | Templates for everything posted on GitHub: the *Review started* comment posted when a review starts (and *Quick review started*, for a quick review), the review banner, comment prefix, the short review body, the details file collapsed at its bottom (the full write-up of every finding, for a coding agent to fix from), inline comments, replies on existing threads, and the *No blocking issues* comment used when `approvals` is off. The Builder uses its *Fix reply*, *Dispute reply* and *Fix commit message* for its feedback rounds |
 | `work.md` | The Builder's rules: how a session investigates, plans and builds, which questions it asks you, and how it sorts review feedback (fix, dispute, ask, park). The `CLAUDE.md` files in your Projects Directory and each repo win over it |
 
 Edit your copy. Changes apply from the next session. The defaults ship in [`skills/prowl-review/config/`](skills/prowl-review/config/) and [`skills/prowl-work/config/`](skills/prowl-work/config/), and on each launch Prowl compares them with your copies:
@@ -295,7 +298,7 @@ Keep the five severity names (Critical, High, Medium, Low, Nit): reports count t
 
 ## Flags and files
 
-- `--setup`: sign in and pick boards. `--dry-run`: dry run for this launch only. `--once`: a single poll of each side that's on, without the UI (sessions it starts keep running in the background). `--reviewer-only` / `--builder-only`: run one side this launch. `--work <key>` / `--follow <key>`: build a ticket, or follow its PRs, with the Builder. `--self-test`: checks the logic that decides which tickets and PRs get touched, in a throwaway `PROWL_HOME`, and prints how many checks passed.
+- `--setup`: sign in and pick boards. `--dry-run`: dry run for this launch only. `--once`: a single poll of each side that's on, without the UI (sessions it starts keep running in the background). `--reviewer-only` / `--builder-only`: run one side this launch. `--work <key>` / `--follow <key>`: build a ticket, or follow its PRs, with the Builder. `--review <pr> [<pr>...]`: start a [quick review](#the-reviewer) of the PRs (links or `owner/repo#12`; quote `#` if your shell treats it specially), turning the Reviewer on for that launch if it's off, then carry on as usual (with `--once`, exit after one poll). `--self-test`: checks the logic that decides which tickets and PRs get touched, in a throwaway `PROWL_HOME`, and prints how many checks passed.
 - Everything lives in `~/.prowl/` (override with `PROWL_HOME`): `config.json`, `state.json` (the Reviewer's history; `capped` maps each ticket at the round cap, still tagged for review, to the reviews it has had, e.g. `"capped": { "AB#123": 3 }`), `work.json` (the Builder's tickets, its Needs-you items and the tickets handed back), `work/` (a brief folder per ticket: `ticket.md`, `investigation.md`, `plan.md`, `result.json`, each round's `feedback-<n>.md`; and `answers.jsonl`, your answers, one JSON object per line), `config/` (your review and build config, and `checks.json`), `seen.json` (the last version launched, for the Update Notes), `reports/`, `logs/` (each session's prompt and log) and `poller.log`. In the Projects Directory, the Builder's worktrees go in `.prowl-worktrees/`.
 - Only one instance runs per user.
 - `skills/prowl-review` is Prowl's batch review skill, and `skills/prowl-work` its build skill. Only Prowl uses them: each session loads them with `--plugin-dir` as `/prowl:prowl-review` and `/prowl:prowl-work`. They aren't in the plugin marketplace and are never added to your own Claude Code skills.

@@ -526,6 +526,7 @@ const started = fill(template(outputMd, 'Review started'), { ticket: 'AB#42', 't
 assert.equal(started, "🦉 **PR-Owl** is reviewing this PR for [AB#42](https://dev.azure.com/o/p/_workitems/edit/42). Its review lands here when it's done.", 'Review started');
 const appDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 assert.ok(outputTemplate(appDir, 'Review started'), "the user's template, or the default's when their output.md predates it");
+assert.equal(fill(template(outputMd, 'Quick review started'), { prs: '[api#5](u5), [web#7](u7)' }), "🦉 **PR-Owl** is reviewing [api#5](u5), [web#7](u7). Its review lands on each PR when it's done.", 'Quick review started');
 assert.equal(outputTemplate(appDir, 'No such section'), '');
 assert.equal(template('# x\n\n## Fix reply\n\nno fence\n\n## Next\n```\nnot this\n```\n', 'Fix reply'), null, 'a section without a template');
 assert.equal(template('', 'Fix reply'), null);
@@ -653,6 +654,47 @@ assert.deepEqual([seen.retags, seen.side.state.releases.length], [['Ready for Re
   await side.finish(run);
   assert.deepEqual([run.status, app.me], ['done', 'octocat'], 'a settle before the first poll reads your login first');
 }
+{
+  // A quick review (n): the PRs typed in, reviewed together with no ticket, and no tag ever written.
+  const { parsePrRefs } = await import('./github.mjs');
+  assert.deepEqual(parsePrRefs(' https://github.com/octo-org/api/pull/5/files, octo-org/web#7\nOcto-Org/API#5 '),
+    [{ repo: 'octo-org/api', number: 5 }, { repo: 'octo-org/web', number: 7 }], 'links and owner/repo#n, by spaces, commas or lines, each once');
+  assert.match(parsePrRefs(''), /at least one PR/);
+  assert.match(parsePrRefs('octo-org/api#5 #7'), /#7 isn't a PR/);
+  assert.match(parsePrRefs('https://github.com/octo-org/api/issues/5'), /isn't a PR/);
+  const states = { 1: 'open', 2: 'open', 3: 'merged' };
+  const logs = [];
+  const retags = [];
+  const app = { cfg: { ...loadConfig(), githubOwner: 'octo-org', workDir: rvTmp }, me: '', on: true, sideOn() { return this.on; }, tracker: () => ({}), boards: () => [], dryRun: () => false };
+  const gh = { me: async () => 'octocat', prByRef: async ({ number }) => prOf(number, { state: states[number] }), headSha: async pr => `sha${pr.number}`, cloneMissing: async () => [],
+    reviewedSince: async () => true, isOpen: async () => true, postComment: async (pr, file) => comments.push([pr.number, JSON.parse(fs.readFileSync(file, 'utf8')).body]) };
+  const comments = [];
+  const side = createReviewer(app, { log: (level, msg) => { logs.push(msg); return true; }, forget() {}, hoot() {}, appDir, trackers: { ado: { retag: async (...a) => retags.push(a) } }, github: gh });
+  side.state = { runs: [{ ticket: 'QUICK-4', quick: true, status: 'done', endedAt: 1, prs: [] }], failures: {} };
+  let opts;
+  side.startReview = (c, dir, o) => {
+    opts = o;
+    return { id: 'QUICK5-r1', tracker: null, ticket: o.ticket.key, title: o.ticket.title, prs: o.prs, reviewNo: 1, status: 'running', quick: o.quick, startedAt: Date.now(), marker: postMarker('QUICK5-r1'),
+      reportPath: path.join(rvTmp, 'quick.md'), logPath: path.join(rvTmp, 'quick.ndjson') };
+  };
+  const run = await side.reviewPrs([{ repo: 'octo-org/r1', number: 1 }, { repo: 'octo-org/r2', number: 2 }]);
+  assert.deepEqual([run.ticket, opts.prs.map(p => p.number), opts.quick, opts.heads[prOf(2).url]], ['QUICK-5', [1, 2], true, 'sha2'], 'both PRs, as one set, numbered after the last quick review');
+  assert.equal(opts.ticket.title, 'Quick review: r1#1, r2#2');
+  const links = `[r1#1](${prOf(1).url}), [r2#2](${prOf(2).url})`;
+  assert.deepEqual(comments.map(([n, body]) => [n, body.includes(`is reviewing ${links}.`), body.endsWith('<!-- prowl-review QUICK5-r1 started -->')]), [[1, true, true], [2, true, true]],
+    'Quick review started on each PR, linking the PRs reviewed together');
+  await assert.rejects(side.reviewPrs([{ repo: 'octo-org/r3', number: 3 }]), /r3#3 is merged/, 'only open PRs');
+  app.cfg.maxConcurrentReviews = 1;
+  await assert.rejects(side.reviewPrs([{ repo: 'octo-org/r1', number: 1 }]), /Max parallel reviews/, 'it waits for a free slot like any review');
+  app.on = false;
+  await assert.rejects(side.reviewPrs([{ repo: 'octo-org/r1', number: 1 }]), /Reviewer is off/);
+  run._result = { subtype: 'error_during_execution', is_error: true, result: 'boom' };
+  await side.finish(run);
+  assert.deepEqual([run.status, run.pendingTag, retags, side.state.failures], ['failed', null, [], {}], 'a failed quick review: no tag written, no retry');
+  assert.match(logs.at(-1), /Not retried; n reviews PRs again/);
+  const prompt = buildPrompt({ ...run, contextPrs: [], leftOut: [] });
+  assert.ok(prompt.includes('No ticket: this is a quick review') && !prompt.includes('- Ticket:'), 'the brief says there is no ticket');
+}
 fs.rmSync(rvTmp, { recursive: true });
 
 // prThreads reads every page of a PR's review threads (READY TO MERGE needs them all), through a fake gh on PATH.
@@ -710,6 +752,15 @@ await new Promise(r => setTimeout(r, 0));
 assert.deepEqual([r2.polls, b2.polls], [0, 1], 'the file is re-read with both sides off, and the Builder comes on');
 saveConfig({ ...loadConfig(), reviewer: { enabled: true }, builder: { ...loadConfig().builder, enabled: false } });
 
+{
+  // Before 2.13.0 the Builder had its own done and reviewing tags: they're dropped, for the Reviewer's trigger and in-progress tags.
+  const file = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+  file.builder.tags = { ...file.builder.tags, done: 'Ready for QA', reviewing: 'In QA' };
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(file));
+  assert.deepEqual(Object.keys(loadConfig().builder.tags), ['start', 'inProgress']);
+  assert.ok(!('done' in JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')).builder.tags), 'and the file is rewritten without them');
+}
+
 // ---- The TUI: two tabs at 80 columns, and each switch from the keyboard ----
 const { startTui } = await import('./tui.mjs');
 const tuiApp = {
@@ -721,17 +772,20 @@ const tuiSides = {
   reviewer: mkSide({ state: { runs: [], fixes: [{ id: 'f1', kind: 'Fix my PRs', ticket: 'PROJ-123', tracker: 'jira', ref: { site: 'https://example.atlassian.net', key: 'PROJ-123' }, title: 'Old fix', pr: prOf(5), round: 1, status: 'stopped', note: 'Fix my PRs was removed', endedAt: 5, replies: [] }] }, finished: () => [], tagVariants: {} }),
   builder: mkSide({
     history: () => [{ uid: 'u1', key: 'AB#123', title: 'Add saving to the shop', status: 'following', prs: [prOf(6), prOf(7)], costUsd: 4.2, updatedAt: 9, briefDir: '/b', url: 'https://dev.azure.com/o/Shop/_workitems/edit/123', ready: true }],
-    needs: () => [{ id: 'n1', ticket: 'AB#124', kind: 'question', question: 'Keep the old cart format?', context: [], options: ['Yes', 'No'], recommended: 'Yes', createdAt: 9 }],
+    needs: () => builderNeeds,
   }),
 };
+let builderNeeds = [{ id: 'n1', ticket: 'AB#124', kind: 'question', question: 'Keep the old cart format?', context: [], options: ['Yes', 'No'], recommended: 'Yes', createdAt: 9 }];
 const toggled = [];
+const asked = [];
 const tui = startTui(tuiApp, {
   sides: tuiSides, pollNow() {}, togglePause() {}, saveConfig() {}, saveToken: () => '', quit() {},
+  reviewPrs: async refs => { asked.push(refs); return { ticket: 'QUICK-1', prs: refs }; },
   toggleSide: n => { const now = !tuiApp.sideOn(n); tuiApp.cfg[n].enabled = now; delete tuiApp.override[n]; toggled.push([n, now]); return now; },
 }, { headless: true });
 const fits = (frame, what) => { for (const l of frame) assert.ok(l.length <= 80, `${what}: ${JSON.stringify(l)} is ${l.length} columns`); return frame.join('\n'); };
 let frame = fits(tui.frame(80, 30), 'Reviewer');
-assert.ok(/Reviewer · on/.test(frame) && /Builder · off/.test(frame), 'both tabs, each with its switch');
+assert.ok(/Reviewer · on/.test(frame) && /Builder · off/.test(frame), 'an off Builder with something waiting on you keeps its tab');
 tui.key('2');
 frame = fits(tui.frame(80, 30), 'Reviewer History');
 assert.ok(frame.includes('FIX MY PRS') && frame.includes('PROJ-123'), "past fixes stay readable in the Reviewer's History");
@@ -742,20 +796,55 @@ frame = fits(tui.frame(80, 30), 'Builder');
 assert.ok(frame.includes('READY TO MERGE') && frame.includes('AB#123'), "the Builder's History");
 assert.ok(/Builder · off · ⚑ 1/.test(frame), 'the Needs-you count on its tab');
 tui.key('4');
-frame = fits(tui.frame(80, 30), 'Builder Config, off');
-assert.ok(!frame.includes('Max parallel builds') && frame.includes('own settings show here once it is on'), "the Builder's rows are hidden while it's off");
+const builderConfig = fits(tui.frame(80, 200), 'Config from the Builder');
+const order = ['PROWL', 'BOARDS AND REPOS', 'TAGS', 'ALL SESSIONS', 'REVIEWER · FILES', 'REVIEWER · SESSIONS', 'REVIEWER · VERDICTS AND ROUNDS', 'BUILDER · FILES', 'BUILDER · SESSIONS', 'BUILDER · REPOS AND BRANCHES', 'BUILDER · FOLLOW-UP'];
+const headings = builderConfig.split('\n').map(l => l.trimEnd()).map(l => order.indexOf(l.slice(1))).filter(i => i >= 0);
+assert.deepEqual(headings, order.map((h, i) => i), 'every setting of the app, in its sections');
+assert.ok(builderConfig.includes('Max parallel builds') && builderConfig.includes('Max parallel reviews'), "the Builder's settings show while it is off");
+const tagRows = ['Build start tag', 'Build in-progress tag', 'Review trigger tag', 'Review in-progress tag', 'Review done tag'];
+assert.ok(tagRows.every((t, i) => !i || builderConfig.indexOf(tagRows[i - 1]) < builderConfig.indexOf(t)) && !/Done tag|Reviewing tag/.test(builderConfig), 'one set of tags, in the order a ticket meets them');
+tui.key('tab');
+tui.key('4');
+const body = f => f.slice(f.indexOf('Saved to'));
+assert.equal(body(fits(tui.frame(80, 200), 'Config from the Reviewer')), body(builderConfig), 'the same Config on both sides');
+builderNeeds = [];
+frame = fits(tui.frame(80, 30), 'Builder off, nothing waiting');
+assert.ok(/Reviewer · on/.test(frame) && !/Builder · /.test(frame) && !frame.includes('tab side'), 'the Builder has no tab while it is off');
+tui.key('B');
+assert.ok(fits(tui.frame(80, 30), 'B').includes('turn it on in Config'), 'B says how to turn it on');
+tui.key('down');
+tui.key('down');
+tui.key('enter'); // the Builder's switch, in Config
+frame = fits(tui.frame(80, 30), 'Builder on');
+assert.ok(/Builder · on/.test(frame), 'switched on in Config, it gets its tab');
+tui.key('B');
 tui.key('e');
-frame = fits(tui.frame(80, 60), 'Builder Config, on');
-assert.ok(frame.includes('Max parallel builds') && /BUILDER/.test(frame) && /SHARED/.test(frame));
-assert.ok(frame.indexOf('Builder ') < frame.indexOf('SHARED') && frame.indexOf('SHARED') < frame.indexOf('Max parallel builds'), 'the switch, then Shared, then its own');
+frame = fits(tui.frame(80, 30), 'Builder off again');
+assert.ok(/Reviewer · on/.test(frame) && !/Builder · /.test(frame), 'switched off with nothing left, its tab goes and the Reviewer is in view');
 tui.key('e');
-tui.key('R');
-tui.key('e');
-assert.deepEqual(toggled, [['builder', true], ['builder', false], ['reviewer', false]], 'e toggles the side in view');
+assert.deepEqual(toggled, [['builder', true], ['builder', false], ['reviewer', false]], 'enter on a switch, and e for the side in view');
 frame = fits(tui.frame(80, 30), 'both off');
-assert.ok(/Reviewer · off/.test(frame) && /Builder · off/.test(frame) && frame.includes('Reviewer off'), 'both off');
+assert.ok(/Reviewer · off/.test(frame) && frame.includes('Reviewer off'), 'both off');
+tui.key('n');
+assert.ok(fits(tui.frame(80, 30), 'n while off').includes('The Reviewer is off'), 'n needs the Reviewer on');
 tuiApp.override = { builder: true };
 assert.ok(fits(tui.frame(80, 30), 'override').includes('Builder · on'), '--builder-only overrides the switch for this launch');
+tuiApp.override = { reviewer: true };
+tui.key('R');
+tui.key('n');
+frame = fits(tui.frame(80, 30), 'n');
+assert.ok(frame.includes('Quick review: PRs reviewed together, without a ticket') && frame.includes('Running'), 'n asks for the PRs, on the Running view');
+for (const k of 'nope') tui.key(k);
+tui.key('enter');
+assert.ok(fits(tui.frame(80, 30), 'n, bad').includes("nope isn't a PR"), 'a word that is not a PR is named');
+for (let i = 0; i < 4; i++) tui.key('backspace');
+for (const k of `https://github.com/octo-org/api/pull/5 octo-org/web#${'7'.repeat(60)}`) tui.key(k);
+fits(tui.frame(80, 30), 'n, long input');
+for (let i = 0; i < 59; i++) tui.key('backspace');
+tui.key('enter');
+await new Promise(r => setTimeout(r, 0));
+assert.deepEqual(asked, [[{ repo: 'octo-org/api', number: 5 }, { repo: 'octo-org/web', number: 7 }]], 'submitted as one review');
+assert.ok(fits(tui.frame(80, 30), 'n, sent').includes('Reviewing 2 PRs together as QUICK-1'));
 
 // ---- Fix my PRs removed: the first-launch migration ----
 const { migrateFixes, needsMigration } = await import('./migrate.mjs');
