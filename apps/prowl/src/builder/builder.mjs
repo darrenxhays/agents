@@ -271,11 +271,15 @@ export function createBuilder(app, deps) {
    */
   async function handOff(w) {
     const { isStart, has } = tags();
-    const now = (await trackerOf(w).readItem(cfg(), w.ref)).tags;
-    const landed = w.handOff && (w.handOff.held ? !has(now, b().tags.inProgress) : has(now, b().tags.done) || has(now, b().tags.reviewing));
+    const tracker = trackerOf(w);
+    const item = await tracker.readItem(cfg(), w.ref);
+    const now = item.tags;
+    // Without In Development to go by, the history says whether the done tag went on since (a review may have come and gone).
+    const landed = w.handOff && (w.handOff.held ? !has(now, b().tags.inProgress)
+      : has(now, b().tags.done) || has(now, b().tags.reviewing) || (await tracker.tagAddedSince(cfg(), w.ref, w.handOff.rev, t => has([t], b().tags.done))));
     if (landed) log('info', `${w.key}: its handoff to review already went through`);
     else {
-      w.handOff ??= { at: Date.now(), held: has(now, b().tags.inProgress) };
+      w.handOff ??= { at: Date.now(), held: has(now, b().tags.inProgress), rev: item.rev };
       touch(w);
       await trackerOf(w).retag(cfg(), w.ref, t => isStart(t) || has([t], b().tags.inProgress) || has([t], b().tags.done), b().tags.done);
     }
@@ -890,10 +894,10 @@ export function createBuilder(app, deps) {
   /** Ends a round (or an adoption): back to the done tag, and the round's worktrees go. */
   async function endRound(w) {
     checkStop(w);
-    await handOff(w);
+    const handedOff = await handOff(w);
     if (w.round) await tidy(w, [], w.round.prs);
-    // Feedback since the round collected its own (posted during its session or CI wait, say) is still due.
-    Object.assign(w, { status: 'following', step: null, lastActivityAt: w.round?.collectedAt || Date.now(), round: null, roundPrs: [] });
+    // Feedback since the round collected its own (posted during its session or CI wait, say), or since the handoff, is still due.
+    Object.assign(w, { status: 'following', step: null, lastActivityAt: w.round?.collectedAt || handedOff, round: null, roundPrs: [] });
     touch(w);
     log('ok', `${w.key}: marked '${b().tags.done}'${w.rounds ? ` after feedback round ${w.rounds}` : ''}; following its PRs`);
   }

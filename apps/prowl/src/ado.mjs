@@ -124,13 +124,26 @@ export function readded(updates, isTag) {
 
 /** True when someone took a tag `isTag` accepts off the work item and put it back after revision `since` (up to `upTo`). */
 export async function tagsChangedSince(cfg, ref, since, upTo, isTag) {
+  return readded((await updatesOf(ref)).filter(u => u.rev > since && (upTo == null || u.rev <= upTo)), isTag);
+}
+
+/** True when a change after revision `since` put on a tag `isTag` accepts. */
+export async function tagAddedSince(cfg, ref, since, isTag) {
+  return (await updatesOf(ref)).filter(u => u.rev > since).some(u => {
+    const t = u.fields?.['System.Tags'];
+    return t && !splitTags(t.oldValue).some(isTag) && splitTags(t.newValue).some(isTag);
+  });
+}
+
+/** Every update of a work item, oldest first. */
+async function updatesOf(ref) {
   const updates = [];
   for (let skip = 0; ; skip += 200) {
     const page = (await api(ref.org, `${enc(ref.project)}/_apis/wit/workItems/${ref.id}/updates?$top=200&$skip=${skip}&api-version=7.1`)).value;
     updates.push(...page);
     if (page.length < 200) break;
   }
-  return readded(updates.filter(u => u.rev > since && (upTo == null || u.rev <= upTo)), isTag);
+  return updates;
 }
 
 /** The field and values that define a team's board, e.g. System.AreaPath UNDER 'My Project\My Team'. */

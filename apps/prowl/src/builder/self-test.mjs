@@ -639,6 +639,28 @@ async function builds(assert) {
   assert.deepEqual([h.b.history()[0].status, h.server.tags(123)], ['following', ['Web', 'In Review']], 'the review keeps its claim');
   assert.ok(h.b.history()[0].lastActivityAt <= firstTry, 'feedback counts from the first try, not the retry');
   h.done();
+  // Adoptions whose handoff landed but whose answer was lost, and a review that came and went before the retry.
+  const pr9 = () => ({ repo: 'octo-org/web', number: 9, url: 'https://github.com/octo-org/web/pull/9', title: 'AB#123: Save the cart', body: '', head: 'feature/cart', base: 'main', draft: false, state: 'OPEN', author: 'octocat', reviews: [], threads: [], checks: [], replies: [] });
+  for (const source of ['manual', 'follow']) {
+    let drop1 = true;
+    h = harness('ado', twoRepoBuild(), { trackerWrap: t => ({ ...t, retag: async (...a) => { const rev = await t.retag(...a); if (a[3] === 'Ready for Review' && drop1) { drop1 = false; throw new Error('ADO GET /x: 502 Bad Gateway'); } return rev; } }) });
+    h.gh.prs.push(pr9());
+    git(path.join(h.root, 'seed', 'octo-org/web'), 'push', '-q', 'origin', 'HEAD:refs/heads/feature/cart');
+    if (source === 'follow') h.server.setTags(123, ['Web']);
+    await h.b.enqueue('AB#123', source);
+    await h.b.drain();
+    await new Promise(r => setTimeout(r, 5)); // the review comes after the handoff's first try
+    h.gh.prs[0].reviews.push({ user: 'lead', state: 'CHANGES_REQUESTED', at: new Date().toISOString(), body: 'Handle empty carts, please.' });
+    h.server.setTags(123, ['Web', 'Reviewed']); // the review ran, and finished
+    await new Promise(r => setTimeout(r, 5));
+    h.b.history()[0]._retryAt = 0;
+    await h.b.drain();
+    assert.deepEqual(h.server.tags(123), ['Web', 'Reviewed'], `${source}: the handoff isn't repeated after the review it started`);
+    await h.poll();
+    assert.equal(h.b.history()[0].rounds, 1, `${source}: and that review's feedback still gets its round`);
+    h.done();
+  }
+
   // An adoption's handoff (no In Development to swap) that failed outright is tried again.
   let refuse = true;
   h = harness('ado', twoRepoBuild(), { trackerWrap: t => ({ ...t, retag: async (...a) => { if (a[3] === 'Ready for Review' && refuse) { refuse = false; throw new Error('ADO PATCH /x: 503 Service Unavailable'); } return t.retag(...a); } }) });

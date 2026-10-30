@@ -217,6 +217,18 @@ export function readded(histories, isTag) {
 
 /** True when someone took a label `isTag` accepts off the issue and put it back after changelog entry `since` (up to `upTo`). */
 export async function tagsChangedSince(cfg, ref, since, upTo, isTag) {
+  const entries = await changelogSince(cfg, ref, since, upTo);
+  return readded(upTo == null ? entries : entries.slice(0, upTo - since), isTag);
+}
+
+/** True when a changelog entry after `since` put on a label `isTag` accepts. */
+export async function tagAddedSince(cfg, ref, since, isTag) {
+  return (await changelogSince(cfg, ref, since)).some(h => h.items.some(it => it.field === 'labels'
+    && !(it.fromString || '').split(' ').some(l => l && isTag(l)) && (it.toString || '').split(' ').some(l => l && isTag(l))));
+}
+
+/** The changelog entries from `since` (up to `upTo`), oldest first. */
+async function changelogSince(cfg, ref, since, upTo = null) {
   const entries = [];
   for (let at = since; upTo == null || at < upTo;) {
     const page = await api(cfg, `/rest/api/3/issue/${enc(ref.key)}/changelog?startAt=${at}&maxResults=100`);
@@ -224,7 +236,7 @@ export async function tagsChangedSince(cfg, ref, since, upTo, isTag) {
     at += page.values.length;
     if (!page.values.length || at >= page.total) break;
   }
-  return readded(upTo == null ? entries : entries.slice(0, upTo - since), isTag);
+  return entries;
 }
 
 const textOf = v => (v && typeof v === 'object' ? adfText(v) : String(v ?? '')).replace(/\n{3,}/g, '\n\n').trim();

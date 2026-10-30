@@ -179,8 +179,8 @@ function writeTargets(cmd) {
   const wrappers = { sudo: /^-[ughpCDRTU]$/, env: /^(?:-[uCS]|--(?:unset|chdir|split-string))$/, command: null, builtin: null, exec: /^-a$/, nohup: null, time: /^-[of]$/ };
   let split = null;
   let chdir = null; // env -C dir: where the command runs
-  while (at < words.length && (/^\w+=/.test(words[at].text) || lead.includes(words[at].text))) {
-    const wrapper = words[at++].text;
+  while (at < words.length && (/^\w+=/.test(words[at].text) || lead.includes(words[at].text) || Object.hasOwn(wrappers, path.basename(words[at].text)))) {
+    const wrapper = path.basename(words[at++].text); // /usr/bin/env too
     if (!Object.hasOwn(wrappers, wrapper)) continue;
     while (at < words.length && /^-/.test(words[at].text)) { // command -- rm, env -i rm, env -u NAME rm
       const [opt, attached] = /^(-[CS]|--chdir=|--split-string=)(.+)$/.exec(words[at].text)?.slice(1) || [words[at].text, null]; // -C/dir, -S'rm -rf'
