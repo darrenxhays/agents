@@ -670,7 +670,7 @@ assert.deepEqual([seen.retags, seen.side.state.releases.length], [['Ready for Re
     reviewedSince: async () => true, isOpen: async () => true, postComment: async (pr, file) => comments.push([pr.number, JSON.parse(fs.readFileSync(file, 'utf8')).body]) };
   const comments = [];
   const side = createReviewer(app, { log: (level, msg) => { logs.push(msg); return true; }, forget() {}, hoot() {}, appDir, trackers: { ado: { retag: async (...a) => retags.push(a) } }, github: gh });
-  side.state = { runs: [{ ticket: 'QUICK-4', quick: true, status: 'done', endedAt: 1, prs: [] }], failures: {} };
+  side.state = { runs: [{ ticket: 'QUICK#4', quick: true, status: 'done', endedAt: 1, prs: [] }], failures: {} };
   let opts;
   side.startReview = (c, dir, o) => {
     opts = o;
@@ -678,7 +678,7 @@ assert.deepEqual([seen.retags, seen.side.state.releases.length], [['Ready for Re
       reportPath: path.join(rvTmp, 'quick.md'), logPath: path.join(rvTmp, 'quick.ndjson') };
   };
   const run = await side.reviewPrs([{ repo: 'octo-org/r1', number: 1 }, { repo: 'octo-org/r2', number: 2 }]);
-  assert.deepEqual([run.ticket, opts.prs.map(p => p.number), opts.quick, opts.heads[prOf(2).url]], ['QUICK-5', [1, 2], true, 'sha2'], 'both PRs, as one set, numbered after the last quick review');
+  assert.deepEqual([run.ticket, opts.prs.map(p => p.number), opts.quick, opts.heads[prOf(2).url]], ['QUICK#5', [1, 2], true, 'sha2'], 'both PRs, as one set, numbered after the last quick review');
   assert.equal(opts.ticket.title, 'Quick review: r1#1, r2#2');
   const links = `[r1#1](${prOf(1).url}), [r2#2](${prOf(2).url})`;
   assert.deepEqual(comments.map(([n, body]) => [n, body.includes(`is reviewing ${links}.`), body.endsWith('<!-- prowl-review QUICK5-r1 started -->')]), [[1, true, true], [2, true, true]],
@@ -686,6 +686,26 @@ assert.deepEqual([seen.retags, seen.side.state.releases.length], [['Ready for Re
   await assert.rejects(side.reviewPrs([{ repo: 'octo-org/r3', number: 3 }]), /r3#3 is merged/, 'only open PRs');
   app.cfg.maxConcurrentReviews = 1;
   await assert.rejects(side.reviewPrs([{ repo: 'octo-org/r1', number: 1 }]), /Max parallel reviews/, 'it waits for a free slot like any review');
+  {
+    // Asked for twice while the first is still cloning: the first holds the slot and its number.
+    side.state.runs = side.state.runs.filter(r => r !== run);
+    let release;
+    gh.cloneMissing = () => new Promise(r => { release = r; });
+    const first = side.reviewPrs([{ repo: 'octo-org/r1', number: 1 }]);
+    await assert.rejects(side.reviewPrs([{ repo: 'octo-org/r2', number: 2 }]), /Max parallel reviews/, 'a quick review being prepared holds its slot');
+    await new Promise(r => setTimeout(r, 0));
+    app.on = false; // switched off while it clones
+    release([]);
+    await assert.rejects(first, /switched off before the review started/, 'nothing starts once the Reviewer is off');
+    app.on = true;
+    gh.cloneMissing = async () => [];
+    app.cfg.maxConcurrentReviews = 2;
+    const [a, b] = await Promise.all([side.reviewPrs([{ repo: 'octo-org/r1', number: 1 }]), side.reviewPrs([{ repo: 'octo-org/r2', number: 2 }])]);
+    assert.deepEqual([a.ticket, b.ticket], ['QUICK#8', 'QUICK#9'], 'two at once get their own numbers (a start that was turned down used one too)');
+    side.state.runs = side.state.runs.filter(r => r !== a && r !== b);
+    side.state.runs.push(run);
+    app.cfg.maxConcurrentReviews = 1;
+  }
   app.on = false;
   await assert.rejects(side.reviewPrs([{ repo: 'octo-org/r1', number: 1 }]), /Reviewer is off/);
   run._result = { subtype: 'error_during_execution', is_error: true, result: 'boom' };
@@ -780,7 +800,7 @@ const toggled = [];
 const asked = [];
 const tui = startTui(tuiApp, {
   sides: tuiSides, pollNow() {}, togglePause() {}, saveConfig() {}, saveToken: () => '', quit() {},
-  reviewPrs: async refs => { asked.push(refs); return { ticket: 'QUICK-1', prs: refs }; },
+  reviewPrs: async refs => { asked.push(refs); return { ticket: 'QUICK#1', prs: refs }; },
   toggleSide: n => { const now = !tuiApp.sideOn(n); tuiApp.cfg[n].enabled = now; delete tuiApp.override[n]; toggled.push([n, now]); return now; },
 }, { headless: true });
 const fits = (frame, what) => { for (const l of frame) assert.ok(l.length <= 80, `${what}: ${JSON.stringify(l)} is ${l.length} columns`); return frame.join('\n'); };
@@ -844,7 +864,7 @@ for (let i = 0; i < 59; i++) tui.key('backspace');
 tui.key('enter');
 await new Promise(r => setTimeout(r, 0));
 assert.deepEqual(asked, [[{ repo: 'octo-org/api', number: 5 }, { repo: 'octo-org/web', number: 7 }]], 'submitted as one review');
-assert.ok(fits(tui.frame(80, 30), 'n, sent').includes('Reviewing 2 PRs together as QUICK-1'));
+assert.ok(fits(tui.frame(80, 30), 'n, sent').includes('Reviewing 2 PRs together as QUICK#1'));
 
 // ---- Fix my PRs removed: the first-launch migration ----
 const { migrateFixes, needsMigration } = await import('./migrate.mjs');

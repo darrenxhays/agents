@@ -187,6 +187,7 @@ for (const [key, source] of [[workKey, 'manual'], [followKey, 'follow']]) {
 if (reviewRefs) {
   if (!app.sideOn('reviewer')) app.override.reviewer = true;
   try {
+    await reviewer.settle(); // reviews that ended since the last launch free their slots first
     const run = await reviewer.reviewPrs(reviewRefs);
     console.log(run ? `Reviewing ${run.prs.map(p => p.url).join(' ')} together as ${run.ticket}.` : 'Dry run: logged what would be reviewed.');
   } catch (e) {

@@ -22,6 +22,10 @@ export function createReviewer(app, { log, forget, hoot, appDir, trackers, githu
   side.finished = () => side.state.runs.filter(r => r.status !== 'running' && r.status !== 'stopping').sort((a, b) => b.endedAt - a.endedAt);
   side.needs = () => []; // nothing waits on you: a review either runs, or leaves its ticket tagged for a person
   side.alive = () => side.running().some(rv.alive);
+  // Quick reviews still being prepared hold a slot, and their number, from the moment they're asked for.
+  let starting = 0;
+  let lastQuick = 0;
+  const busy = () => side.running().length + starting;
 
   // Tags this side sets itself are matched exactly; only the trigger tag is matched loosely.
   const ours = t => [cfg().tags.inProgress, cfg().tags.done].some(x => norm(x) === norm(t));
@@ -43,6 +47,7 @@ export function createReviewer(app, { log, forget, hoot, appDir, trackers, githu
       return;
     }
     hoot(`Checking ${boards.length > 1 ? 'the boards' : 'the board'} for new review tasks...`);
+    await checkHumanApprovals();
     const seen = new Set();
     let allRead = true;
     for (const board of boards) {
@@ -66,7 +71,6 @@ export function createReviewer(app, { log, forget, hoot, appDir, trackers, githu
     const untagged = allRead ? Object.keys(side.state.capped || {}).filter(t => !seen.has(t)) : [];
     for (const t of untagged) delete side.state.capped[t];
     if (untagged.length) save();
-    await checkHumanApprovals();
   };
 
   async function consider(tracker, ticket) {
@@ -74,7 +78,7 @@ export function createReviewer(app, { log, forget, hoot, appDir, trackers, githu
     const c = cfg();
     const key = `ticket:${ticket.key}`;
     if (side.running().some(r => r.ticket === ticket.key)) return; // re-tagged mid-review: re-reviewed once this one ends
-    if (side.running().length >= c.maxConcurrentReviews) {
+    if (busy() >= c.maxConcurrentReviews) {
       log('info', `${ticket.key}: waiting, ${c.maxConcurrentReviews} reviews already running`, key);
       return;
     }
@@ -178,7 +182,20 @@ export function createReviewer(app, { log, forget, hoot, appDir, trackers, githu
   side.reviewPrs = async function reviewPrs(refs) {
     const c = cfg();
     if (!on()) throw new Error('the Reviewer is off');
-    if (side.running().length >= c.maxConcurrentReviews) throw new Error(`${c.maxConcurrentReviews} reviews are already running (Max parallel reviews)`);
+    if (busy() >= c.maxConcurrentReviews) throw new Error(`${c.maxConcurrentReviews} reviews are already running (Max parallel reviews)`);
+    // QUICK#1, #2, …: each its own entry in History. # keeps it from ever being a Jira key (PROJ-1) or matching an
+    // Azure DevOps one (AB#1), so a quick review is never taken for a ticket's earlier review.
+    lastQuick = Math.max(lastQuick, ...side.state.runs.filter(r => r.quick).map(r => Number(r.ticket.split('#').pop()) || 0)) + 1;
+    const ticket = { key: `QUICK#${lastQuick}`, url: '', ref: null };
+    starting++;
+    try {
+      return await prepare(c, ticket, refs);
+    } finally {
+      starting--;
+    }
+  };
+
+  async function prepare(c, ticket, refs) {
     app.me ||= await gh.me();
     const prs = [];
     for (const ref of refs) {
@@ -187,9 +204,7 @@ export function createReviewer(app, { log, forget, hoot, appDir, trackers, githu
       prs.push(pr);
     }
     const names = prs.map(p => `${p.repo.split('/')[1]}#${p.number}`).join(', ');
-    // QUICK-1, -2, …: keeps each quick review its own entry in History.
-    const n = 1 + Math.max(0, ...side.state.runs.filter(r => r.quick).map(r => Number(r.ticket.split('-').pop()) || 0));
-    const ticket = { key: `QUICK-${n}`, title: `Quick review: ${names}`, url: '', ref: null };
+    ticket.title = `Quick review: ${names}`;
     if (app.dryRun()) { log('info', `${ticket.key}: would review ${prs.map(p => p.url).join(' ')}`); return null; }
     try {
       const cloned = await gh.cloneMissing(prs, c.workDir);
@@ -199,6 +214,7 @@ export function createReviewer(app, { log, forget, hoot, appDir, trackers, githu
     }
     const heads = {};
     for (const pr of prs) heads[pr.url] = await gh.headSha(pr).catch(() => '');
+    if (!on()) throw new Error('the Reviewer was switched off before the review started');
     const run = (side.startReview || rv.startReview)(c, appDir, { tracker: null, ticket, prs, me: app.me, heads, quick: true });
     side.state.runs.push(run);
     save();
@@ -206,7 +222,7 @@ export function createReviewer(app, { log, forget, hoot, appDir, trackers, githu
     log('ok', `${ticket.key}: quick review started on ${names}`);
     await announce(run);
     return run;
-  };
+  }
 
   /**
    * Posts the Review started comment (output.md) on each PR under review, so people can see Prowl has it. A quick

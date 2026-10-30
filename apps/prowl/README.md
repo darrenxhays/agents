@@ -74,7 +74,7 @@ Prowl has two sides, each with its own tab: the **Reviewer** and the **Builder**
 
 **Failures**, including a session that ends without writing its report, are retried once automatically (the trigger tag is put back), except a review stopped by a spend, turn or time cap, so a runaway review isn't paid for twice. A review that ends without posting its review also fails. Each review the session posts ends with a hidden marker line Prowl gives it; once the session ends, every PR still open must have a review from you carrying that marker. GitHub also files each reply on a thread as an empty review, so replies alone don't count, and a review whose own post was blocked (by an auto-mode permission check, say) no longer passes as done. That failure names the PRs and the session log, and isn't retried automatically, since a retry would most likely be blocked again. A PR merged or closed mid-review, or one Prowl couldn't look up, doesn't count as missing, and a review without the marker still counts, with a warning in the Log. After a second failure Prowl waits for someone to re-tag. **Stopping** a review removes **In Review**; re-tag the ticket to run it again.
 
-**Quick reviews**: `n` on the Reviewer's tab, or `prowl --review <pr> [<pr>...]` from the command line, asks for PRs to review without a ticket: PR links (`https://github.com/owner/repo/pull/12`) or `owner/repo#12`, separated by spaces or commas. It's a full review, the same as a ticket's: the PRs are reviewed together as one set, with the same settings, and History lists the review as `QUICK-1`, `QUICK-2`, …. Only open PRs are taken, and the review counts toward `maxConcurrentReviews`. No tag is read or written, and a failed quick review isn't retried: press `n` again. Instead of the *Review started* comment, which links to the ticket, each PR gets the *Quick review started* comment from `output.md`, which links the PRs reviewed together.
+**Quick reviews**: `n` on the Reviewer's tab, or `prowl --review <pr> [<pr>...]` from the command line, asks for PRs to review without a ticket: PR links (`https://github.com/owner/repo/pull/12`) or `owner/repo#12`, separated by spaces or commas. It's a full review, the same as a ticket's: the PRs are reviewed together as one set, with the same settings, and History lists the review as `QUICK#1`, `QUICK#2`, …. Only open PRs are taken, and the review counts toward `maxConcurrentReviews`. No tag is read or written, and a failed quick review isn't retried: press `n` again. Instead of the *Review started* comment, which links to the ticket, each PR gets the *Quick review started* comment from `output.md`, which links the PRs reviewed together.
 
 **Hoot** sleeps until there's news. He wakes up to say when he's checking the boards, when he picks up a ticket and starts its reviews, when each PR's review is posted, when a ticket is done, and when something goes wrong (with what went wrong).
 
@@ -82,7 +82,7 @@ Prowl has two sides, each with its own tab: the **Reviewer** and the **Builder**
 
 ## The Builder
 
-Off by default: turn it on with `e` on its tab, or `builder.enabled`.
+Off by default, and its tab shows once it's on: turn it on in Config (`4`) with `enter` on the **Builder** row, or with `builder.enabled`.
 
 ### Picking up a ticket
 
