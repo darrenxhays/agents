@@ -34,6 +34,19 @@ const GIT_BUILTINS = new Set(('add am apply archive bisect blame branch bundle c
   + 'replace reset restore rev-list rev-parse revert rm send-pack shortlog show show-branch show-ref sparse-checkout stash status submodule '
   + 'subtree switch symbolic-ref tag update-index update-ref var verify-commit version whatchanged worktree write-tree lfs').split(' '));
 
+/**
+ * True when git alias `name` pushes, following aliases that call other aliases (pf = p --force, p = push), and
+ * shell aliases (!…) that run git. `lookup(name)` is the alias's value, or ''.
+ */
+function aliasPushes(name, lookup, seen = new Set()) {
+  if (seen.has(name) || seen.size > 20 || GIT_BUILTINS.has(name)) return false;
+  seen.add(name);
+  const value = lookup(name) || '';
+  if (/\b(?:push|send-pack)\b/.test(value)) return true;
+  const calls = value.startsWith('!') ? [...value.matchAll(/\bgit\s+(?:-\S+\s+)*([\w-]+)/g)].map(m => m[1]) : [value.trim().split(/\s+/)[0]];
+  return calls.filter(Boolean).some(c => aliasPushes(c, lookup, seen));
+}
+
 /** Why setting git config `key` to `value` changes how or where git pushes, or ''. */
 function pushConfig(key, value) {
   if (new RegExp(`^${PUSH_CONFIG}$`, 'i').test(key)) return 'changing where a remote pushes';
@@ -205,6 +218,13 @@ function substitutions(text) {
   return out;
 }
 
+/** `words` after brace expansion: one word each for what {a,b} makes; one the fence can't follow is marked unreadable. */
+const expand = words => words.flatMap(x => {
+  if (!x.braces) return [x];
+  const made = braceExpand(x.text);
+  return made ? made.map(text => ({ ...x, text })) : [{ ...x, unreadable: true }];
+});
+
 /** The words a command writes to: its redirections' targets, and the paths tee, cp, mv and rm write or remove. */
 function writeTargets(cmd) {
   const targets = [];
@@ -216,7 +236,7 @@ function writeTargets(cmd) {
     if (target) i++;
     if (!target || t.op.startsWith('<')) continue; // input, or a heredoc
     if (t.op.endsWith('&') && /^(?:\d+|-)$/.test(target.text)) continue; // 2>&1: a descriptor, not a file
-    targets.push({ ...target, redirect: true }); // the shell opens it, where the shell is (not env -C's folder)
+    targets.push(...expand([{ ...target, redirect: true }])); // the shell opens it, where the shell is (not env -C's folder)
   }
   let at = 0;
   const lead = ['sudo', 'env', 'command', 'builtin', 'exec', 'nohup', 'time', 'if', 'then', 'else', 'elif', 'while', 'until', 'do', '!', '{'];
@@ -242,7 +262,7 @@ function writeTargets(cmd) {
     return { name: '', words, args: [], chdir, split: [split.text, ...words.slice(at).map(quote)].join(' '), targets: targets.filter(Boolean) };
   }
   const name = path.basename(words[at]?.text || '');
-  const args = words.slice(at + 1);
+  const args = expand(words.slice(at + 1)); // cp a{,.bak} is two operands
   const operands = args.filter(a => a.dynamic || !a.text.startsWith('-') || a.text === '-');
   // cp and mv's destination folder: -t dir, -tdir, bundled (-vt dir, -vtdir), --target-directory dir or =dir.
   const dirFlag = args.findIndex(a => /^--target-directory(?:=|$)|^-[a-zA-Z]*t/.test(a.text));
@@ -409,21 +429,17 @@ export function deniedCommand(command, ctx = {}) {
         for (const base of [cwd, ...others]) {
           const dir = otherRepo ? null : moves.reduce((d, m) => (d == null ? null : resolvePath(m, d, envSet) || null), runsIn(base));
           if (dir == null) return `the git command '${sub}', which may be an alias, in a folder the fence can't read`;
-          if (/\b(?:push|send-pack)\b/.test(ctx.alias(sub, dir) || '')) return `the git alias '${sub}', which pushes`;
+          if (aliasPushes(sub, name => ctx.alias(name, dir))) return `the git alias '${sub}', which pushes`;
         }
       }
     }
     if (!roots.length) continue;
-    for (const target of targets) {
-      const expanded = target.braces ? braceExpand(target.text) : [target.text];
-      if (!expanded) return `writing to ${target.text}, a path the fence can't resolve`;
-      for (const t of expanded.map(text => ({ ...target, text }))) {
-        if (/^\/dev\/(?:null|stdout|stderr|tty|fd\/\d+)$/.test(t.text)) continue;
-        for (const base of [cwd, ...others]) {
-          const file = resolvePath(t, t.redirect ? base : runsIn(base), envSet);
-          if (!file) return `writing to ${t.text}, a path the fence can't resolve`;
-          if (!insideRoots(file, writable)) return `writing outside the session's folders (${file})`;
-        }
+    for (const t of targets) {
+      if (/^\/dev\/(?:null|stdout|stderr|tty|fd\/\d+)$/.test(t.text)) continue;
+      for (const base of [cwd, ...others]) {
+        const file = !t.unreadable && resolvePath(t, t.redirect ? base : runsIn(base), envSet);
+        if (!file) return `writing to ${t.text}, a path the fence can't resolve`;
+        if (!insideRoots(file, writable)) return `writing outside the session's folders (${file})`;
       }
     }
     if (name === 'cd') { // after if, then and the like too; cd -- dir, cd -P dir; a dir it can't read leaves the cwd unknown
