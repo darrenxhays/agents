@@ -279,6 +279,7 @@ export function createBuilder(app, deps) {
       : has(now, b().tags.done) || has(now, b().tags.reviewing) || (await tracker.tagAddedSince(cfg(), w.ref, w.handOff.rev, t => has([t], b().tags.done))));
     if (landed) log('info', `${w.key}: its handoff to review already went through`);
     else {
+      checkStop(w); // s while the ticket was read: no handoff
       w.handOff ??= { at: Date.now(), held: has(now, b().tags.inProgress), rev: item.rev };
       touch(w);
       await trackerOf(w).retag(cfg(), w.ref, t => isStart(t) || has([t], b().tags.inProgress) || has([t], b().tags.done), b().tags.done);

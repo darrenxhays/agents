@@ -661,6 +661,13 @@ async function builds(assert) {
     h.done();
   }
 
+  // s while the handoff reads the ticket: no Ready for Review.
+  h = harness('ado', twoRepoBuild(), { trackerWrap: t => ({ ...t, readItem: async (...a) => { const item = await t.readItem(...a); if (h.stopOnRead) { h.stopOnRead = false; h.b.stop(h.b.history()[0]); } return item; } }) });
+  h.gh.prForBranch = async (...a) => { h.stopOnRead = true; return null; }; // from the PRs on, the next read is the handoff's
+  await h.poll();
+  assert.deepEqual([h.b.history()[0].status, h.server.tags(123).includes('Ready for Review')], ['stopped', false], 'stopped before the handoff');
+  h.done();
+
   // An adoption's handoff (no In Development to swap) that failed outright is tried again.
   let refuse = true;
   h = harness('ado', twoRepoBuild(), { trackerWrap: t => ({ ...t, retag: async (...a) => { if (a[3] === 'Ready for Review' && refuse) { refuse = false; throw new Error('ADO PATCH /x: 503 Service Unavailable'); } return t.retag(...a); } }) });

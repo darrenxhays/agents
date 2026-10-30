@@ -357,11 +357,14 @@ for (const c of ['echo x > /etc/x', 'echo x >> ~/outside.txt', 'ls | tee /etc/li
   'command -- rm -rf /etc/other', 'env -i rm -f /etc/x', 'cd -- /etc && rm -rf build', 'cd "$SOMEWHERE" && rm -rf build', 'env -u NODE_OPTIONS rm -rf /etc/other',
   "env -S 'rm -rf /etc/other'", "env -S 'rm -rf' /etc/other", 'env -C /etc rm -rf build', 'env --chdir=/etc rm -rf build', 'env -C/etc rm -rf build',
   "env -S'rm -rf' /etc/other", 'mv --target-directory=/etc config.json', 'cp -t/etc config.json', 'cp --target-directory /etc a', 'mv -t /etc a',
-  'cp -vt /etc config.json', 'cp -vt/etc config.json', '/usr/bin/env rm -f /etc/config.json', '/usr/bin/sudo rm -f /etc/x']) {
+  'cp -vt /etc config.json', 'cp -vt/etc config.json', '/usr/bin/env rm -f /etc/config.json', '/usr/bin/sudo rm -f /etc/x',
+  `TMPDIR=/etc bash -c 'rm -f "$TMPDIR/config.json"'`, 'export HOME=/etc; rm -f ~/x', 'sudo --user root rm -f /etc/config.json', 'sudo -D /etc rm -f x',
+  'cat > README.md <<EOF\nClean with `rm -rf /etc/cache` or $(rm -rf /etc/other).\nEOF']) {
   assert.equal(bash(c), 'deny', `denies a write outside: ${c}`);
 }
 for (const c of ['echo x > notes.md', `echo x > ${path.join(briefDir, 'result.json')}`, 'cp a b', 'rm -rf build', 'mv a.js b.js', 'npm test 2>&1 | tee test.log',
-  `echo x > ${path.join(os.tmpdir(), 'prowl-scratch.txt')}`, '(cd sub && rm -rf build)', 'cd "$TMPDIR" && rm -rf scratch', 'cd -P sub && rm -rf build', 'echo x > "$TMPDIR/x"', 'ls 2>&1 >/dev/null', "cat > notes.md <<'EOF'\nfoo > /etc/passwd\nEOF"]) {
+  `echo x > ${path.join(os.tmpdir(), 'prowl-scratch.txt')}`, '(cd sub && rm -rf build)', "cat > README.md <<'EOF'\nClean with `rm -rf /etc/cache`.\nEOF",
+  "cat > NOTES.md <<EOF\nIt's done; don't \\`rm -rf /etc\\`.\nEOF", 'cd "$TMPDIR" && rm -rf scratch', 'cd -P sub && rm -rf build', 'echo x > "$TMPDIR/x"', 'ls 2>&1 >/dev/null', "cat > notes.md <<'EOF'\nfoo > /etc/passwd\nEOF"]) {
   assert.equal(bash(c), 'allow', `allows a write inside: ${c}`);
 }
 assert.equal(lex("a 'b; c' | d").length, 2, 'quotes keep ; and | inside one word');

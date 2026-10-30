@@ -71,18 +71,19 @@ export function lex(text) {
   const end = () => {
     if (!word) return;
     cmds.at(-1).push(word);
-    if (wantDelim) { heredocs.push({ delim: word.text, cmd: cmds.at(-1) }); wantDelim = false; }
+    if (wantDelim) { heredocs.push({ delim: word.text, cmd: cmds.at(-1), expands: !word.quoted }); wantDelim = false; } // <<EOF, not <<'EOF'
     word = null;
   };
   const next = () => { end(); if (cmds.at(-1).length) cmds.push([]); };
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
     if (c === "'") {
+      w().quoted = true;
       const j = text.indexOf("'", i + 1);
       w().text += text.slice(i + 1, j < 0 ? undefined : j);
       i = j < 0 ? text.length : j;
     } else if (c === '"') {
-      w();
+      w().quoted = true;
       for (i++; i < text.length && text[i] !== '"'; i++) {
         if (text[i] === '\\' && i + 1 < text.length) { word.text += text[++i]; continue; }
         if (text[i] === '$' || text[i] === '`') word.dynamic = true;
@@ -104,6 +105,7 @@ export function lex(text) {
         word.text += text[i];
       }
     } else if (c === '\\') {
+      if (word || text[i + 1] !== '\n') w().quoted = true;
       if (text[i + 1] === '\n') i++;
       else w().text += text[++i] ?? '';
     } else if (c === '$' && text[i + 1] === '(') {
@@ -129,11 +131,12 @@ export function lex(text) {
     } else if (c === '\n' || c === ';' || c === '|' || (c === '&' && text[i + 1] !== '>')) {
       next();
       if ((c === '&' || c === '|') && text[i + 1] === c) i++;
-      for (const { delim, cmd } of c === '\n' ? heredocs.splice(0) : []) { // skip the body, up to the line holding only its delimiter
+      for (const { delim, cmd, expands } of c === '\n' ? heredocs.splice(0) : []) { // skip the body, up to the line holding only its delimiter
         const from = i + 1;
         let eol = text.indexOf('\n', i + 1);
         while (eol >= 0 && text.slice(i + 1, eol).replace(/^\t+/, '') !== delim) { i = eol; eol = text.indexOf('\n', i + 1); }
         (cmd.bodies ??= []).push(text.slice(from, i + 1)); // kept: a shell reading it runs it
+        if (expands) subs.push(...substitutions(text.slice(from, i + 1))); // an unquoted delimiter: its $(…) and `…` run
         i = eol < 0 ? text.length : eol;
       }
     } else if (c === '>' || (c === '&' && text[i + 1] === '>')) {
@@ -160,6 +163,25 @@ export function lex(text) {
   return Object.assign(cmds.filter(cmd => cmd.length), { subs });
 }
 
+/** The commands inside $(…) and `…` in `text` (a heredoc body, where quotes don't count). */
+function substitutions(text) {
+  const out = [];
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\\') { i++; continue; }
+    if (text[i] === '$' && text[i + 1] === '(') {
+      let depth = 0;
+      const from = i;
+      for (; i < text.length; i++) { if (text[i] === '(') depth++; else if (text[i] === ')' && --depth === 0) break; }
+      out.push(text.slice(from + 2, i));
+    } else if (text[i] === '`') {
+      const j = text.indexOf('`', i + 1);
+      out.push(text.slice(i + 1, j < 0 ? undefined : j));
+      i = j < 0 ? text.length : j;
+    }
+  }
+  return out;
+}
+
 /** The words a command writes to: its redirections' targets, and the paths tee, cp, mv and rm write or remove. */
 function writeTargets(cmd) {
   const targets = [];
@@ -176,7 +198,7 @@ function writeTargets(cmd) {
   let at = 0;
   const lead = ['sudo', 'env', 'command', 'builtin', 'exec', 'nohup', 'time', 'if', 'then', 'else', 'elif', 'while', 'until', 'do', '!', '{'];
   // Each wrapper's options, and those of them that take a value (env -u NAME, sudo -u user). env -S runs its value.
-  const wrappers = { sudo: /^-[ughpCDRTU]$/, env: /^(?:-[uCS]|--(?:unset|chdir|split-string))$/, command: null, builtin: null, exec: /^-a$/, nohup: null, time: /^-[of]$/ };
+  const wrappers = { sudo: /^(?:-[ughpCDRTU]|--(?:user|group|host|prompt|chdir|role|type|close-from|other-user|command-timeout))$/, env: /^(?:-[uCS]|--(?:unset|chdir|split-string))$/, command: null, builtin: null, exec: /^-a$/, nohup: null, time: /^-[of]$/ };
   let split = null;
   let chdir = null; // env -C dir: where the command runs
   while (at < words.length && (/^\w+=/.test(words[at].text) || lead.includes(words[at].text) || Object.hasOwn(wrappers, path.basename(words[at].text)))) {
@@ -186,7 +208,7 @@ function writeTargets(cmd) {
       const [opt, attached] = /^(-[CS]|--chdir=|--split-string=)(.+)$/.exec(words[at].text)?.slice(1) || [words[at].text, null]; // -C/dir, -S'rm -rf'
       const value = attached != null ? { ...words[at], text: attached } : words[at + 1];
       if (wrapper === 'env' && /^(?:-S|--split-string=?)$/.test(opt)) split = value;
-      if (wrapper === 'env' && /^(?:-C|--chdir=?)$/.test(opt)) chdir = value;
+      if ((wrapper === 'env' && /^(?:-C|--chdir=?)$/.test(opt)) || (wrapper === 'sudo' && /^(?:-D|--chdir)$/.test(opt))) chdir = value;
       if (attached != null) { at++; continue; }
       at += wrappers[wrapper]?.test(words[at].text) ? 2 : 1;
     }
@@ -211,14 +233,20 @@ function writeTargets(cmd) {
   return { name, words, args, chdir, split: '', targets: targets.filter(Boolean) };
 }
 
-/** `p` as an absolute path, or '' when it depends on something the shell expands (or on a cwd the fence lost: null). */
-function resolvePath(word, cwd) {
+/**
+ * `p` as an absolute path, or '' when it depends on something the shell expands (or on a cwd the fence lost: null).
+ * $HOME and $TMPDIR are known, unless the command line sets them (`envSet`).
+ */
+function resolvePath(word, cwd, envSet = false) {
   let p = word.text;
   if (word.dynamic) {
-    p = p.replace(/\$\{?(TMPDIR|TMP|TEMP|HOME)\}?(?![\w])/g, (m, v) => (v === 'HOME' ? os.homedir() : os.tmpdir()));
+    if (!envSet) p = p.replace(/\$\{?(TMPDIR|TMP|TEMP|HOME)\}?(?![\w])/g, (m, v) => (v === 'HOME' ? os.homedir() : os.tmpdir()));
     if (/[$`]/.test(p)) return '';
   }
-  if (p === '~' || p.startsWith('~/')) p = path.join(os.homedir(), p.slice(1));
+  if (p === '~' || p.startsWith('~/')) {
+    if (envSet) return '';
+    p = path.join(os.homedir(), p.slice(1));
+  }
   if (cwd == null && !path.isAbsolute(p)) return '';
   return path.resolve(cwd, p);
 }
@@ -281,6 +309,8 @@ export function deniedCommand(command, ctx = {}) {
   const roots = (ctx.roots || []).filter(Boolean);
   const writable = [...roots, os.tmpdir(), ...(process.platform === 'win32' ? [] : ['/tmp'])];
   let cwd = ctx.cwd === null ? null : ctx.cwd || process.cwd(); // null: lost (cd to a dir the fence can't read)
+  const envSet = ctx.envSet || /\b(?:TMPDIR|TMP|TEMP|HOME)=/.test(text); // then $TMPDIR and $HOME aren't what the fence knows
+  ctx = { ...ctx, envSet };
   const cmds = lex(text);
   for (const sub of cmds.subs) {
     const why = deniedCommand(sub, { ...ctx, cwd });
@@ -296,7 +326,7 @@ export function deniedCommand(command, ctx = {}) {
     const web = webWrite(cmd, ctx.trackerHosts || [], text);
     if (web) return web;
     const { name, words, args, chdir, split, targets } = writeTargets(cmd);
-    const here = chdir ? resolvePath(chdir, cwd) || null : cwd; // where this one command runs
+    const here = chdir ? resolvePath(chdir, cwd, envSet) || null : cwd; // where this one command runs
     if (split) { // env -S 'rm -rf x': the value is the command
       const why = deniedCommand(split, { ...ctx, cwd: here });
       if (why) return why;
@@ -316,7 +346,7 @@ export function deniedCommand(command, ctx = {}) {
       let i = 0; // in git's own words, after env, command and the like
       let dir = here; // the alias is looked up where git runs: -C moves it
       while (args[i] && /^-/.test(args[i].text)) {
-        if (args[i].text === '-C' && args[i + 1]) dir = dir == null ? null : resolvePath(args[i + 1], dir) || null; // unreadable: unknown
+        if (args[i].text === '-C' && args[i + 1]) dir = dir == null ? null : resolvePath(args[i + 1], dir, envSet) || null; // unreadable: unknown
         if (/^--git-dir\b/.test(args[i].text)) dir = null; // another repository's config: not looked up
         if (args[i].text === '-c' && args[i + 1]) { // -c 'alias.x=push …', -c remote.origin.pushurl=…
           const why = pushConfig(args[i + 1].text.split('=')[0], args[i + 1].text.split('=').slice(1).join('='));
@@ -343,13 +373,13 @@ export function deniedCommand(command, ctx = {}) {
     if (!roots.length) continue;
     for (const t of targets) {
       if (/^\/dev\/(?:null|stdout|stderr|tty|fd\/\d+)$/.test(t.text)) continue;
-      const file = resolvePath(t, t.redirect ? cwd : here);
+      const file = resolvePath(t, t.redirect ? cwd : here, envSet);
       if (!file) return `writing to ${t.text}, a path the fence can't resolve`;
       if (!insideRoots(file, writable)) return `writing outside the session's folders (${file})`;
     }
     if (name === 'cd') { // after if, then and the like too; cd -- dir, cd -P dir; a dir it can't read leaves the cwd unknown
       const dir = args.find(a => a.dynamic || !/^-/.test(a.text));
-      cwd = dir ? resolvePath(dir, cwd) || null : os.homedir();
+      cwd = dir ? resolvePath(dir, cwd, envSet) || null : os.homedir();
     }
   }
   return '';
