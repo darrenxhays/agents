@@ -132,7 +132,8 @@ export function lex(text) {
       cmds.push([]);
     } else if (c === '\n' || c === ';' || c === '|' || (c === '&' && text[i + 1] !== '>')) {
       next();
-      cmds.at(-1).after = c === '&' && text[i + 1] === '&' ? '&&' : c; // how the next command is joined to this one
+      // How the next command is joined to this one; a line break after && (or | or ||) carries on the same join.
+      if (!(c === '\n' && cmds.at(-1).after && !cmds.at(-1).length)) cmds.at(-1).after = c === '&' && text[i + 1] === '&' ? '&&' : c;
       if ((c === '&' || c === '|') && text[i + 1] === c) i++;
       for (const { delim, cmd, expands } of c === '\n' ? heredocs.splice(0) : []) { // skip the body, up to the line holding only its delimiter
         const from = i + 1;
@@ -326,26 +327,36 @@ export function deniedCommand(command, ctx = {}) {
       else if (outer.length) cwd = outer.pop();
       continue;
     }
+    const others = failed.filter(f => f.applies).map(f => f.dir);
+    // Checks `script` as a command line run from `at` (or from each folder the shell may be in), returning why not.
+    const nested = (script, at = null) => {
+      for (const base of [cwd, ...others]) {
+        const why = deniedCommand(script, { ...ctx, cwd: at ? at(base) : base });
+        if (why) return why;
+      }
+      return '';
+    };
     for (const sub of cmd.subs || []) {
-      const why = deniedCommand(sub, { ...ctx, cwd });
+      const why = nested(sub);
       if (why) return why;
     }
     const web = webWrite(cmd, ctx.trackerHosts || [], text);
     if (web) return web;
     const { name, words, args, chdir, split, targets } = writeTargets(cmd);
-    const here = chdir ? resolvePath(chdir, cwd, envSet) || null : cwd; // where this one command runs
+    const runsIn = base => (chdir ? resolvePath(chdir, base, envSet) || null : base); // where this one command runs, from `base`
+    const here = runsIn(cwd);
     if (split) { // env -S 'rm -rf x': the value is the command
-      const why = deniedCommand(split, { ...ctx, cwd: here });
+      const why = nested(split, runsIn);
       if (why) return why;
     }
     const dashC = ['sh', 'bash', 'zsh', 'dash', 'ksh'].includes(name) ? args.findIndex(x => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(x.text)) : -1; // -c, -lc, -ec
     if (dashC >= 0 && args[dashC + 1]) {
-      const why = deniedCommand(args[dashC + 1].text, { ...ctx, cwd: here });
+      const why = nested(args[dashC + 1].text, runsIn);
       if (why) return why;
     }
     if (['sh', 'bash', 'zsh', 'dash', 'ksh'].includes(name) && dashC < 0) {
       for (const body of cmd.bodies || []) { // bash <<'SH' … SH: the heredoc is the script
-        const why = deniedCommand(body, { ...ctx, cwd: here });
+        const why = nested(body, runsIn);
         if (why) return why;
       }
     }
@@ -379,11 +390,10 @@ export function deniedCommand(command, ctx = {}) {
       }
     }
     if (!roots.length) continue;
-    const others = failed.filter(f => f.applies).map(f => f.dir);
     for (const t of targets) {
       if (/^\/dev\/(?:null|stdout|stderr|tty|fd\/\d+)$/.test(t.text)) continue;
       for (const base of [cwd, ...others]) {
-        const at = t.redirect || !chdir ? base : resolvePath(chdir, base, envSet) || null;
+        const at = t.redirect ? base : runsIn(base);
         const file = resolvePath(t, at, envSet);
         if (!file) return `writing to ${t.text}, a path the fence can't resolve`;
         if (!insideRoots(file, writable)) return `writing outside the session's folders (${file})`;
