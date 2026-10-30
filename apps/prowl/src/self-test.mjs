@@ -299,7 +299,7 @@ for (const c of ['git commit -m "AB#1: fix"', 'git status && git diff HEAD~1', '
   assert.equal(bash(c), 'allow', `allows: ${c}`);
 }
 // Every other way to push, or to change where a push goes.
-for (const c of ['git send-pack origin main', 'git subtree push --prefix lib origin main', 'git lfs push origin main', 'git p', 'git -C sub sync',
+for (const c of ['git send-pack origin main', 'git subtree push --prefix lib origin main', 'git subtree --prefix=lib push origin x', 'git lfs push origin main', 'git p', 'git -C sub sync',
   'git config alias.up push', "git config --global alias.ship '!git push origin'", 'git -c alias.x=push x', 'git config remote.origin.pushurl https://example.invalid/r.git',
   'git config url.https://example.invalid/.insteadOf https://github.com/', 'git -c url.git@example.invalid:.pushInsteadOf=https://github.com/ push2']) {
   assert.equal(bash(c), 'deny', `denies a push path: ${c}`);
@@ -358,7 +358,7 @@ for (const c of ['echo x > /etc/x', 'echo x >> ~/outside.txt', 'ls | tee /etc/li
   "env -S 'rm -rf /etc/other'", "env -S 'rm -rf' /etc/other", 'env -C /etc rm -rf build', 'env --chdir=/etc rm -rf build', 'env -C/etc rm -rf build',
   "env -S'rm -rf' /etc/other", 'mv --target-directory=/etc config.json', 'cp -t/etc config.json', 'cp --target-directory /etc a', 'mv -t /etc a',
   'cp -vt /etc config.json', 'cp -vt/etc config.json', '/usr/bin/env rm -f /etc/config.json', '/usr/bin/sudo rm -f /etc/x',
-  `TMPDIR=/etc bash -c 'rm -f "$TMPDIR/config.json"'`, 'export HOME=/etc; rm -f ~/x', 'sudo --user root rm -f /etc/config.json', 'sudo -D /etc rm -f x',
+  `TMPDIR=/etc bash -c 'rm -f "$TMPDIR/config.json"'`, 'export HOME=/etc; rm -f ~/x', 'sudo --user root rm -f /etc/config.json', 'sudo -D /etc rm -f x', 'sudo --chdir=/etc rm -f x', 'sudo -D/etc rm -f x',
   'cat > README.md <<EOF\nClean with `rm -rf /etc/cache` or $(rm -rf /etc/other).\nEOF']) {
   assert.equal(bash(c), 'deny', `denies a write outside: ${c}`);
 }

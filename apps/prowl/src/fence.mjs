@@ -205,10 +205,10 @@ function writeTargets(cmd) {
     const wrapper = path.basename(words[at++].text); // /usr/bin/env too
     if (!Object.hasOwn(wrappers, wrapper)) continue;
     while (at < words.length && /^-/.test(words[at].text)) { // command -- rm, env -i rm, env -u NAME rm
-      const [opt, attached] = /^(-[CS]|--chdir=|--split-string=)(.+)$/.exec(words[at].text)?.slice(1) || [words[at].text, null]; // -C/dir, -S'rm -rf'
+      const [opt, attached] = /^(-[CDS]|--chdir=|--split-string=)(.+)$/.exec(words[at].text)?.slice(1) || [words[at].text, null]; // -C/dir, -D/dir, -S'rm -rf'
       const value = attached != null ? { ...words[at], text: attached } : words[at + 1];
       if (wrapper === 'env' && /^(?:-S|--split-string=?)$/.test(opt)) split = value;
-      if ((wrapper === 'env' && /^(?:-C|--chdir=?)$/.test(opt)) || (wrapper === 'sudo' && /^(?:-D|--chdir)$/.test(opt))) chdir = value;
+      if ((wrapper === 'env' && /^(?:-C|--chdir=?)$/.test(opt)) || (wrapper === 'sudo' && /^(?:-D|--chdir=?)$/.test(opt))) chdir = value;
       if (attached != null) { at++; continue; }
       at += wrappers[wrapper]?.test(words[at].text) ? 2 : 1;
     }
@@ -357,7 +357,8 @@ export function deniedCommand(command, ctx = {}) {
       const sub = args[i]?.text;
       const then = args[i + 1]?.text;
       // The same as DENY, for options the regexes can't step over (a quoted -C "My App", say).
-      if (sub === 'push' || sub === 'send-pack' || (['subtree', 'lfs'].includes(sub) && then === 'push')) return 'pushing: Prowl pushes the work itself once it has checked it';
+      // subtree and lfs take options before their own subcommand (git subtree --prefix=lib push …).
+      if (sub === 'push' || sub === 'send-pack' || (['subtree', 'lfs'].includes(sub) && args.slice(i + 1).some(a => a.text === 'push'))) return 'pushing: Prowl pushes the work itself once it has checked it';
       if (sub === 'remote' && /^(?:add|remove|rm|rename|set-url|set-head|set-branches|prune|update)$/.test(then || '')) return 'changing git remotes';
       if (sub === 'config') { // git config [set|add …] [options] key [value]
         const rest = args.slice(i + 1).filter(a => !a.text.startsWith('-')).map(a => a.text);
