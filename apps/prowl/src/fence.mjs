@@ -34,19 +34,6 @@ const GIT_BUILTINS = new Set(('add am apply archive bisect blame branch bundle c
   + 'replace reset restore rev-list rev-parse revert rm send-pack shortlog show show-branch show-ref sparse-checkout stash status submodule '
   + 'subtree switch symbolic-ref tag update-index update-ref var verify-commit version whatchanged worktree write-tree lfs').split(' '));
 
-/**
- * True when git alias `name` pushes, following aliases that call other aliases (pf = p --force, p = push), and
- * shell aliases (!…) that run git. `lookup(name)` is the alias's value, or ''.
- */
-function aliasPushes(name, lookup, seen = new Set()) {
-  if (seen.has(name) || seen.size > 20 || GIT_BUILTINS.has(name)) return false;
-  seen.add(name);
-  const value = lookup(name) || '';
-  if (/\b(?:push|send-pack)\b/.test(value)) return true;
-  const calls = value.startsWith('!') ? [...value.matchAll(/\bgit\s+(?:-\S+\s+)*([\w-]+)/g)].map(m => m[1]) : [value.trim().split(/\s+/)[0]];
-  return calls.filter(Boolean).some(c => aliasPushes(c, lookup, seen));
-}
-
 /** Why setting git config `key` to `value` changes how or where git pushes, or ''. */
 function pushConfig(key, value) {
   if (new RegExp(`^${PUSH_CONFIG}$`, 'i').test(key)) return 'changing where a remote pushes';
@@ -259,7 +246,8 @@ function writeTargets(cmd) {
   if (split) {
     // env -S 'rm -rf' x: the split string and the words after it make one command line.
     const quote = x => (x.dynamic ? `"${x.text.replace(/["\\]/g, '\\$&')}"` : `'${x.text.replace(/'/g, "'\\''")}'`);
-    return { name: '', words, args: [], chdir, split: [split.text, ...words.slice(at).map(quote)].join(' '), targets: targets.filter(Boolean) };
+    const after = expand(words.slice(at)).map(x => (x.unreadable ? '"${unreadable}"' : quote(x))); // the shell expands braces before env sees them
+    return { name: '', words, args: [], chdir, split: [split.text, ...after].join(' '), targets: targets.filter(Boolean) };
   }
   const name = path.basename(words[at]?.text || '');
   const args = expand(words.slice(at + 1)); // cp a{,.bak} is two operands
@@ -271,6 +259,7 @@ function writeTargets(cmd) {
   const intoDir = dirFlag < 0 ? null : attached ? { ...args[dirFlag], text: attached } : args[dirFlag + 1];
   if (name === 'tee' || name === 'rm' || name === 'rmdir' || name === 'unlink') targets.push(...operands);
   else if (name === 'mv') targets.push(...operands, ...(intoDir ? [intoDir] : [])); // a move also removes its sources
+  else if (name === 'cp' && operands.some(a => a.unreadable)) targets.push(...operands.filter(a => a.unreadable)); // which is the destination is unknown
   else if (name === 'cp' && intoDir) targets.push(intoDir);
   else if (name === 'cp' && operands.length > 1) targets.push(operands.at(-1));
   return { name, words, args, chdir, split: '', targets: targets.filter(Boolean) };
@@ -429,7 +418,12 @@ export function deniedCommand(command, ctx = {}) {
         for (const base of [cwd, ...others]) {
           const dir = otherRepo ? null : moves.reduce((d, m) => (d == null ? null : resolvePath(m, d, envSet) || null), runsIn(base));
           if (dir == null) return `the git command '${sub}', which may be an alias, in a folder the fence can't read`;
-          if (aliasPushes(sub, name => ctx.alias(name, dir))) return `the git alias '${sub}', which pushes`;
+          // What the alias expands to is checked like any command: git <value>, or a shell alias's command line, so
+          // aliases calling aliases (pf = p --force, p = push) and their own options (-C) are followed too.
+          const value = ctx.alias(sub, dir) || '';
+          if (value && (ctx.depth || 0) >= 10) return `the git alias '${sub}', which calls aliases too deep for the fence`;
+          const why = value && deniedCommand(value.startsWith('!') ? value.slice(1) : `git ${value}`, { ...ctx, cwd: dir, depth: (ctx.depth || 0) + 1 });
+          if (why) return `the git alias '${sub}': ${why}`;
         }
       }
     }
