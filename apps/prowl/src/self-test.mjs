@@ -342,6 +342,8 @@ const viaRepo = (command, root) => fenceDecision({ cwd: path.join(wt, 'src'), to
   Object.assign(n => deploy[n] || '', { root: () => root }))?.hookSpecificOutput.permissionDecision || 'allow';
 assert.deepEqual([viaRepo('git deploy push origin gh-pages', wt), viaRepo('git deploy split', wt), viaRepo('git cleanup', wt), viaRepo('git cleanup', '')],
   ['deny', 'allow', 'allow', 'deny'], "an alias's arguments; a shell alias runs from the repository's top folder (unknown: denied)");
+assert.equal(bash("git -c 'alias.deploy=subtree --prefix=dist' deploy push origin gh-pages"), 'deny', 'an alias the call sets itself with -c');
+assert.deepEqual([bash('cp --target-directory=/etc "$TMPDIR/generated.json"'), bash('cp -t/etc "$TMPDIR/x"')], ['deny', 'deny'], "cp's -t folder beside a variable source");
 const shipHere = (name, dir) => (name === 'ship' && dir === wt ? 'push --force' : '');
 assert.equal(fenceDecision({ cwd: wt, tool_name: 'Bash', tool_input: { command: `cd ${other}; git ship origin HEAD:main` } }, workEnv, shipHere)?.hookSpecificOutput.permissionDecision, 'deny', 'an alias where a failed cd left the shell');
 // curl and wget writes to GitHub's API, and GraphQL the fence can't read; reads are allowed.

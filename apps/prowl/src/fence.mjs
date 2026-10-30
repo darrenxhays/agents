@@ -264,10 +264,12 @@ function writeTargets(cmd) {
   const intoDir = dirFlag < 0 ? null : attached ? { ...args[dirFlag], text: attached } : args[dirFlag + 1];
   if (name === 'tee' || name === 'rm' || name === 'rmdir' || name === 'unlink') targets.push(...operands);
   else if (name === 'mv') targets.push(...operands, ...(intoDir ? [intoDir] : [])); // a move also removes its sources
-  else if (name === 'cp' && operands.some(a => a.unreadable)) targets.push(...operands.filter(a => a.unreadable)); // which is the destination is unknown
-  else if (name === 'cp' && operands.length === 1 && operands[0].dynamic) targets.push(operands[0]); // "$@"-like: it may be several, the last the destination
-  else if (name === 'cp' && intoDir) targets.push(intoDir);
-  else if (name === 'cp' && operands.length > 1) targets.push(operands.at(-1));
+  else if (name === 'cp') {
+    if (intoDir) targets.push(intoDir);
+    if (operands.some(a => a.unreadable)) targets.push(...operands.filter(a => a.unreadable)); // which is the destination is unknown
+    else if (!intoDir && operands.length === 1 && operands[0].dynamic) targets.push(operands[0]); // "$@"-like: it may be several, the last the destination
+    else if (!intoDir && operands.length > 1) targets.push(operands.at(-1));
+  }
   return { name, words, args, chdir, split: '', targets: targets.filter(Boolean) };
 }
 
@@ -398,12 +400,15 @@ export function deniedCommand(command, ctx = {}) {
       let i = 0; // in git's own words, after env, command and the like
       const moves = []; // git -C dirs, in order: the alias is looked up where git runs
       let otherRepo = false; // --git-dir: another repository's config, not looked up
+      const inline = {}; // aliases this call sets itself: git -c 'alias.x=…' x
       while (args[i] && /^-/.test(args[i].text)) {
         if (args[i].text === '-C' && args[i + 1]) moves.push(args[i + 1]);
         if (/^--git-dir\b/.test(args[i].text)) otherRepo = true;
         if (args[i].text === '-c' && args[i + 1]) { // -c 'alias.x=push …', -c remote.origin.pushurl=…
-          const why = pushConfig(args[i + 1].text.split('=')[0], args[i + 1].text.split('=').slice(1).join('='));
+          const [key, ...value] = args[i + 1].text.split('=');
+          const why = pushConfig(key, value.join('='));
           if (why) return why;
+          if (/^alias\./i.test(key)) inline[key.slice(6).toLowerCase()] = value.join('=');
         }
         i += /^(?:-[Cc]|--(?:git-dir|work-tree|namespace|exec-path|config-env))$/.test(args[i].text) ? 2 : 1;
       }
@@ -427,7 +432,7 @@ export function deniedCommand(command, ctx = {}) {
           // What the alias expands to is checked like any command: git <value>, or a shell alias's command line, so
           // aliases calling aliases (pf = p --force, p = push) and their own options (-C) are followed too.
           // Git appends the call's own arguments (git deploy push …), and runs a shell alias from the repository's top folder.
-          const value = (ctx.alias(sub, dir) || '').trim();
+          const value = (inline[sub.toLowerCase()] ?? ctx.alias(sub, dir) ?? '').trim();
           if (value && (ctx.depth || 0) >= 10) return `the git alias '${sub}', which calls aliases too deep for the fence`;
           const shell = value.startsWith('!');
           const line = `${shell ? value.slice(1) : `git ${value}`} ${unparse(args.slice(i + 1))}`;
