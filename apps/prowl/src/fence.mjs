@@ -199,10 +199,11 @@ function writeTargets(cmd) {
   const name = path.basename(words[at]?.text || '');
   const args = words.slice(at + 1);
   const operands = args.filter(a => a.dynamic || !a.text.startsWith('-') || a.text === '-');
-  // cp and mv's destination folder: -t dir, -tdir, --target-directory dir or --target-directory=dir.
-  const dirFlag = args.findIndex(a => /^(?:-t|--target-directory)(?:=|$)|^-t./.test(a.text));
-  const intoDir = dirFlag < 0 ? null : /^(?:-t|--target-directory)$/.test(args[dirFlag].text) ? args[dirFlag + 1]
-    : { ...args[dirFlag], text: args[dirFlag].text.replace(/^(?:--target-directory=|-t=?)/, '') };
+  // cp and mv's destination folder: -t dir, -tdir, bundled (-vt dir, -vtdir), --target-directory dir or =dir.
+  const dirFlag = args.findIndex(a => /^--target-directory(?:=|$)|^-[a-zA-Z]*t/.test(a.text));
+  const flag = args[dirFlag]?.text || '';
+  const attached = flag.startsWith('--') ? flag.split('=').slice(1).join('=') : flag.replace(/^-[a-zA-Z]*?t/, '');
+  const intoDir = dirFlag < 0 ? null : attached ? { ...args[dirFlag], text: attached } : args[dirFlag + 1];
   if (name === 'tee' || name === 'rm' || name === 'rmdir' || name === 'unlink') targets.push(...operands);
   else if (name === 'mv') targets.push(...operands, ...(intoDir ? [intoDir] : [])); // a move also removes its sources
   else if (name === 'cp' && intoDir) targets.push(intoDir);

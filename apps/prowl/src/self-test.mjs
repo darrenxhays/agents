@@ -356,7 +356,8 @@ for (const c of ['echo x > /etc/x', 'echo x >> ~/outside.txt', 'ls | tee /etc/li
   'if rm -rf /etc/other; then echo cleaned; fi', 'while true; do rm -f /etc/x; done', '{ rm -rf /etc/other; }', 'if cd /etc; then rm -rf build; fi',
   'command -- rm -rf /etc/other', 'env -i rm -f /etc/x', 'cd -- /etc && rm -rf build', 'cd "$SOMEWHERE" && rm -rf build', 'env -u NODE_OPTIONS rm -rf /etc/other',
   "env -S 'rm -rf /etc/other'", "env -S 'rm -rf' /etc/other", 'env -C /etc rm -rf build', 'env --chdir=/etc rm -rf build', 'env -C/etc rm -rf build',
-  "env -S'rm -rf' /etc/other", 'mv --target-directory=/etc config.json', 'cp -t/etc config.json', 'cp --target-directory /etc a', 'mv -t /etc a']) {
+  "env -S'rm -rf' /etc/other", 'mv --target-directory=/etc config.json', 'cp -t/etc config.json', 'cp --target-directory /etc a', 'mv -t /etc a',
+  'cp -vt /etc config.json', 'cp -vt/etc config.json']) {
   assert.equal(bash(c), 'deny', `denies a write outside: ${c}`);
 }
 for (const c of ['echo x > notes.md', `echo x > ${path.join(briefDir, 'result.json')}`, 'cp a b', 'rm -rf build', 'mv a.js b.js', 'npm test 2>&1 | tee test.log',

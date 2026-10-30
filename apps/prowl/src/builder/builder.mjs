@@ -264,21 +264,25 @@ export function createBuilder(app, deps) {
   }
 
   /**
-   * In Development → the done tag (Ready for Review), the Reviewer's trigger. A retry after a try that may have landed
-   * (its answer lost) leaves a ticket without In Development as it is: a review may have claimed it since. It never
-   * takes the reviewing tag off.
+   * In Development → the done tag (Ready for Review), the Reviewer's trigger; never takes the reviewing tag off.
+   * A retry after a try that may have landed (its answer lost) leaves the ticket as it is if that try shows: In
+   * Development gone (when it was there), or the done or reviewing tag on (when it wasn't), as a review may have
+   * claimed it since. Resolves with the time of the first try, from which feedback counts.
    */
   async function handOff(w) {
-    if (w.handingOff && !tags().has((await trackerOf(w).readItem(cfg(), w.ref)).tags, b().tags.inProgress)) {
-      log('info', `${w.key}: its handoff to review already went through`);
-    } else {
-      w.handingOff = true;
+    const { isStart, has } = tags();
+    const now = (await trackerOf(w).readItem(cfg(), w.ref)).tags;
+    const landed = w.handOff && (w.handOff.held ? !has(now, b().tags.inProgress) : has(now, b().tags.done) || has(now, b().tags.reviewing));
+    if (landed) log('info', `${w.key}: its handoff to review already went through`);
+    else {
+      w.handOff ??= { at: Date.now(), held: has(now, b().tags.inProgress) };
       touch(w);
-      const { isStart, has } = tags();
       await trackerOf(w).retag(cfg(), w.ref, t => isStart(t) || has([t], b().tags.inProgress) || has([t], b().tags.done), b().tags.done);
     }
-    w.handingOff = false;
+    const { at } = w.handOff;
+    w.handOff = null;
     touch(w);
+    return at;
   }
 
   /** Sets the tags Prowl owns on `w`'s ticket to `add` ('' for none); while the tracker fails, again each minute. Resolves true once done. */
@@ -600,9 +604,9 @@ export function createBuilder(app, deps) {
       touch(w);
     }
     checkStop(w);
-    await handOff(w);
+    const handedOff = await handOff(w); // feedback from then on counts, even when a retry finishes the handoff later
     Object.assign(w, {
-      prs: recs.map(r => ({ repo: r.repo, number: r.pr.number, url: r.pr.url, title: r.pr.title })), prsOpenedAt: Date.now(), lastActivityAt: Date.now(), lastPushAt: Date.now(),
+      prs: recs.map(r => ({ repo: r.repo, number: r.pr.number, url: r.pr.url, title: r.pr.title })), prsOpenedAt: Date.now(), lastActivityAt: handedOff, lastPushAt: Date.now(),
       status: b().followUp ? 'following' : 'done', step: null, checkFails: 0, ...(!b().followUp && { endedAt: Date.now(), note: 'PRs opened' }),
     });
     touch(w);

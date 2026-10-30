@@ -625,16 +625,30 @@ async function builds(assert) {
 
   // A handoff that landed but whose answer was lost: its retry leaves a review that claimed the ticket since alone.
   let lose = true;
+  let firstTry = 0;
   h = harness('ado', twoRepoBuild(), { trackerWrap: t => ({ ...t, retag: async (cfg, ref, drop, add) => {
     const rev = await t.retag(cfg, ref, drop, add);
-    if (add === 'Ready for Review' && lose) { lose = false; throw new Error('ADO GET /x: 502 Bad Gateway'); }
+    if (add === 'Ready for Review' && lose) { lose = false; firstTry = Date.now(); throw new Error('ADO GET /x: 502 Bad Gateway'); }
     return rev;
   } }) });
   await h.poll();
   h.server.setTags(123, ['Web', 'In Review']); // a teammate's Reviewer claims it
+  await new Promise(r => setTimeout(r, 5)); // the retry comes later
   h.b.history()[0]._retryAt = 0;
   await h.b.drain();
   assert.deepEqual([h.b.history()[0].status, h.server.tags(123)], ['following', ['Web', 'In Review']], 'the review keeps its claim');
+  assert.ok(h.b.history()[0].lastActivityAt <= firstTry, 'feedback counts from the first try, not the retry');
+  h.done();
+  // An adoption's handoff (no In Development to swap) that failed outright is tried again.
+  let refuse = true;
+  h = harness('ado', twoRepoBuild(), { trackerWrap: t => ({ ...t, retag: async (...a) => { if (a[3] === 'Ready for Review' && refuse) { refuse = false; throw new Error('ADO PATCH /x: 503 Service Unavailable'); } return t.retag(...a); } }) });
+  h.gh.prs.push({ repo: 'octo-org/web', number: 9, url: 'https://github.com/octo-org/web/pull/9', title: 'AB#123: Save the cart', body: '', head: 'feature/cart', base: 'main', draft: false, state: 'OPEN', author: 'octocat', reviews: [], threads: [], checks: [], replies: [] });
+  h.server.setTags(123, ['Web']);
+  await h.b.enqueue('AB#123', 'follow');
+  await h.b.drain();
+  h.b.history()[0]._retryAt = 0;
+  await h.b.drain();
+  assert.deepEqual(h.server.tags(123), ['Web', 'Ready for Review'], 'handed off on the retry');
   h.done();
 
   // A merge whose conflict resolution adds a secret: the merge's own lines are scanned too.
