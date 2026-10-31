@@ -247,7 +247,7 @@ const worktreeOf = (w, repo) => w.repos.find(r => r.repo === repo).worktree;
 
 /** The session most builds use: investigate (asking for octo-org/api), plan both repos, then commit in both. */
 const twoRepoBuild = (overrides = {}) => (w, prompt) => {
-  if (prompt.startsWith('/prowl:prowl-work ')) {
+  if (prompt.startsWith('/prowl:prowl-build ')) {
     fs.writeFileSync(path.join(w.briefDir, 'investigation.md'), '# Investigation\n');
     return { result: { status: 'needs-repos', repos: [{ repo: 'octo-org/api', why: 'the API stores carts' }], investigation: 'investigation.md' } };
   }
@@ -349,10 +349,9 @@ async function pure(assert) {
   }
 
   // The brief: the prompts and the resume messages, in the result contract's words.
-  const bp = brief.buildPrompt({ command: '', briefDir: '/w/AB123', ticket: { key: 'AB#123', title: 'Save', url: 'https://dev.azure.com/o/Shop/_workitems/edit/123' },
+  const bp = brief.buildPrompt({ briefDir: '/w/AB123', ticket: { key: 'AB#123', title: 'Save', url: 'https://dev.azure.com/o/Shop/_workitems/edit/123' },
     repos: [{ repo: 'octo-org/web', worktree: '/p/.prowl-worktrees/work-AB123/web', defaultBranch: 'main' }], unavailable: [{ repo: 'other-org/lib', why: "it isn't under the GitHub org" }] });
-  assert.ok(bp.startsWith(`/prowl:prowl-work ${path.join('/w/AB123', 'ticket.md')}\n`) && bp.includes('octo-org/web: /p/.prowl-worktrees/work-AB123/web (detached at main') && bp.includes('other-org/lib: it isn'));
-  assert.ok(brief.buildPrompt({ command: '/my-build', briefDir: '/w', ticket: { key: 'AB#1', title: '', url: '' }, repos: [] }).startsWith('/my-build '), 'builder.command replaces the skill');
+  assert.ok(bp.startsWith(`/prowl:prowl-build ${path.join('/w/AB123', 'ticket.md')}\n`) && bp.includes('octo-org/web: /p/.prowl-worktrees/work-AB123/web (detached at main') && bp.includes('other-org/lib: it isn'));
   assert.equal(brief.resume.repos([{ repo: 'octo-org/api', worktree: '/wt/api' }], [{ repo: 'other-org/lib', why: 'not allowed' }]), 'repos ready:\nocto-org/api: /wt/api\n\nrepos not available:\nother-org/lib: not allowed');
   assert.ok(brief.resume.approve([{ repo: 'octo-org/web', branch: 'prowl/1-x' }]).startsWith('approve\nocto-org/web: prowl/1-x\n'));
   assert.equal(brief.resume.answers([{ id: 'Q1', answer: 'Yes' }, { id: 'blocked', answer: 'Use the sandbox' }]), 'answers:\nQ1: Yes\nblocked: Use the sandbox');
@@ -364,7 +363,7 @@ async function pure(assert) {
     branch: 'prowl/123-save', headSha: 'abc1234', worktree: '/wt/web-4', details: '# Details', reviews: [{ user: 'lead', at: '2026-10-29T11:00:00Z', body: 'Please handle empty carts.' }],
     threads: [{ id: 'PRRT_1', author: 'lead', path: 'src/cart.js', line: 3, url: 'https://github.com/octo-org/web/pull/4#discussion_r1', body: 'Empty carts?\n<!-- prowl-review rb F-01 -->', lastBody: 'Empty carts?\n<!-- prowl-review rb F-01 -->' }] }] });
   assert.ok(fb.includes('## octo-org/web#4: Save') && fb.includes('detached at its head, abc1234') && fb.includes('#### Thread PRRT_1') && fb.includes('> Please handle empty carts.') && !fb.includes('<!-- prowl-review'));
-  assert.ok(brief.feedbackPrompt({ briefDir: '/w', feedbackPath: '/w/feedback-1.md' }).startsWith('/prowl:prowl-work feedback /w/feedback-1.md\n'));
+  assert.ok(brief.feedbackPrompt({ briefDir: '/w', feedbackPath: '/w/feedback-1.md' }).startsWith('/prowl:prowl-build feedback /w/feedback-1.md\n'));
 
   // The session's arguments and environment: one session id, resumed; fenced as kind 'work'; never a tracker token.
   const scfg = { ...loadConfig(), workDir: '/p', taskBoard: 'jira', jira: { site: 'https://example.atlassian.net' } };
@@ -457,7 +456,7 @@ async function builds(assert) {
   let w = h.b.history().find(r => r.key === 'AB#123');
   assert.ok(w, 'claimed AB#123, assigned to me');
   assert.ok(!h.b.history().some(r => r.key === 'AB#126'), "not someone else's ticket");
-  assert.deepEqual(h.session.turns.map(t => t.prompt.split('\n')[0].split(' ')[0]), ['/prowl:prowl-work', 'repos', 'approve'], 'investigate, more repos, approve');
+  assert.deepEqual(h.session.turns.map(t => t.prompt.split('\n')[0].split(' ')[0]), ['/prowl:prowl-build', 'repos', 'approve'], 'investigate, more repos, approve');
   assert.ok(h.session.turns.slice(1).every(t => t.resumed && t.sessionId === h.session.turns[0].sessionId), 'one session id, resumed at each step');
   assert.ok(read(path.join(w.briefDir, 'ticket.md')).startsWith('# AB#123: Save the cart between visits'), 'ticket.md in the brief folder');
   const branch = 'prowl/123-save-the-cart-between-visits';
@@ -507,6 +506,18 @@ async function builds(assert) {
   assert.ok(h.session.turns.some(t => t.prompt.startsWith('checks failed:\nocto-org/web: node -e')), 'a failing check gets one more turn with its output');
   assert.equal(h.b.needs()[0]?.kind, 'checks', 'a second failure goes to Needs you');
   assert.ok(!remoteHas(h.bares['octo-org/web'], branch) && !remoteHas(h.bares['octo-org/api'], branch), 'nothing is pushed until every repo passes');
+  h.done();
+  // A checks.json that doesn't parse goes to Needs you, never a push without checks; enter, once it's fixed, checks again.
+  h = harness('ado', twoRepoBuild());
+  fs.writeFileSync(CHECKS_PATH, '{ "octo-org/*": { "run": [ }');
+  await h.poll();
+  assert.equal(h.b.needs()[0]?.kind, 'checks');
+  assert.match(h.b.needs()[0].question, /checks\.json isn't valid JSON/);
+  assert.ok(!remoteHas(h.bares['octo-org/web'], branch), 'nothing pushed');
+  fs.writeFileSync(CHECKS_PATH, '// mine\n{ "octo-org/*": { "run": ["node -e \\"process.exit(0)\\""] }, }\n');
+  h.b.answer(h.b.needs()[0], '');
+  await h.b.drain();
+  assert.ok(remoteHas(h.bares['octo-org/web'], branch) && h.gh.prs.length === 2, 'enter checks again (comments allowed), then pushes');
   h.done();
   fs.writeFileSync(CHECKS_PATH, '{}');
   h = harness('ado', twoRepoBuild({ files: { web: { '.github/workflows/ci.yml': 'on: push\n' }, api: { 'src/carts.js': 'x\n' } } }));
@@ -823,8 +834,14 @@ async function builds(assert) {
   assert.equal(h.b.history()[0].status, 'following', '--work AB#123');
   await assert.rejects(h.b.enqueue('AB#123', 'manual'), /already being followed/);
   h.done();
+  // Tag for review when done, off: In Development just comes off.
+  h = harness('ado', twoRepoBuild(), { cfgOver: { requestReview: false } });
+  await h.poll();
+  assert.deepEqual([h.gh.prs.length, h.b.history()[0].status, h.server.tags(123)], [2, 'following', ['Web']], 'requestReview off: PRs open, no Ready for Review');
+  assert.ok(h.logs.some(l => /2 PRs open, 'In Development' removed/.test(l)));
+  h.done();
   h = harness('jira', (w, prompt) => {
-    if (prompt.startsWith('/prowl:prowl-work ')) {
+    if (prompt.startsWith('/prowl:prowl-build ')) {
       fs.writeFileSync(path.join(w.briefDir, 'plan.md'), '# Plan\n');
       return { result: { status: 'needs-approval', plan: 'plan.md', changes: [{ repo: 'octo-org/web' }], openQuestions: [] } };
     }
@@ -849,7 +866,7 @@ async function feedback(assert) {
   const roundScript = (moved = null) => (w, prompt) => {
     if (w.turnKind !== 'round') return twoRepoBuild()(w, prompt);
     const p = w.round.prs[0];
-    const again = (prompt.startsWith('/prowl:prowl-work feedback ') ? '' : `// turn ${w.turns.length}\n`) + (w.n > 1 ? `// record ${w.n}\n` : ''); // a later turn or record commits on top
+    const again = (prompt.startsWith('/prowl:prowl-build feedback ') ? '' : `// turn ${w.turns.length}\n`) + (w.n > 1 ? `// record ${w.n}\n` : ''); // a later turn or record commits on top
     const sha = commit(p.worktree, { 'src/cart.js': `export const save = cart => (cart.length ? cart : null);\n${again}` }, `${w.key}: handle empty carts`);
     if (moved) moved(p);
     return { result: { status: 'fixed', summary: 'Empty carts are not saved.', commits: [{ pr: `${p.repo}#${p.number}`, sha }], checks: [],
@@ -879,7 +896,7 @@ async function feedback(assert) {
   await h.poll();
   assert.equal(w.rounds, 1, 'feedback newer than the last push: a round');
   const roundTurn = h.session.turns.at(-1);
-  assert.ok(roundTurn.prompt.startsWith('/prowl:prowl-work feedback ') && !roundTurn.resumed, 'a fresh session');
+  assert.ok(roundTurn.prompt.startsWith('/prowl:prowl-build feedback ') && !roundTurn.resumed, 'a fresh session');
   assert.ok(read(w.round ? w.round.feedbackPath : path.join(w.briefDir, 'feedback-1.md')).includes('Handle empty carts, please.'), 'briefed with the reviews requesting changes');
   assert.equal(remoteFile(h.bares['octo-org/web'], web.head, 'src/cart.js'), 'export const save = cart => (cart.length ? cart : null);\n', "pushed to the PR's branch");
   assert.deepEqual(web.replies.map(r => [r.commentId, /prowl-fix AB#123 r1\.1 PRRT_\d (fixed|disputed)/.exec(r.body)?.[1]]), [[11, 'fixed'], [12, 'disputed']], 'one reply per thread fixed or disputed');
@@ -985,7 +1002,7 @@ async function feedback(assert) {
   h.app.dryRun = () => false;
   h.b.stopFollowing(fw);
   await h.b.drain();
-  assert.deepEqual([fw.rounds, fw.status, h.session.turns.filter(t => t.prompt.startsWith('/prowl:prowl-work feedback')).length], [0, 'stopped', 0], 'stop following: the queued round never runs');
+  assert.deepEqual([fw.rounds, fw.status, h.session.turns.filter(t => t.prompt.startsWith('/prowl:prowl-build feedback')).length], [0, 'stopped', 0], 'stop following: the queued round never runs');
   h.done();
 
   // A round that only disputes is dropped too when the branch moved: its replies would answer an old head.
@@ -1141,7 +1158,7 @@ async function feedback(assert) {
   h.server.edit('PROJ-123', [{ remove: 'Ready-for-Review' }, { add: 'Reviewed' }]);
   h.server.rivalNext();
   await h.poll();
-  assert.deepEqual([jw.rounds, jw.status, h.session.turns.filter(t => t.prompt.startsWith('/prowl:prowl-work feedback')).length], [0, 'following', 0], 'Jira: the round claim lost, nothing started');
+  assert.deepEqual([jw.rounds, jw.status, h.session.turns.filter(t => t.prompt.startsWith('/prowl:prowl-build feedback')).length], [0, 'following', 0], 'Jira: the round claim lost, nothing started');
   assert.ok(h.logs.some(l => /round not started.*another copy of Prowl/.test(l)));
   await h.poll();
   assert.equal(jw.rounds, 0, "Jira: waits while someone else's In-Development is on");

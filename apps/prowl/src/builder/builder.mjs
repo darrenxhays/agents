@@ -4,7 +4,7 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CHECKS_PATH, HOME, writeJson } from '../config.mjs';
+import { HOME, readChecks, writeJson } from '../config.mjs';
 import { matchChecks, runChecks, TAIL } from '../checks.mjs';
 import { actionable, appendAnswer, parkedUrls, pastAnswers, readAnswers, repliesToPost, stripParked, validateFeedback } from '../feedback.mjs';
 import { addWorktree, fetchBranch, git, push, remoteSha, removeWorktree, short, succeeds } from '../git.mjs';
@@ -265,6 +265,7 @@ export function createBuilder(app, deps) {
 
   /**
    * In Development → the done tag (Ready for Review), the Reviewer's trigger; never takes the reviewing tag off.
+   * With builder.requestReview off, In Development just comes off.
    * A retry after a try that may have landed (its answer lost) leaves the ticket as it is if that try shows: In
    * Development gone (when it was there), or the done or reviewing tag on (when it wasn't), as a review may have
    * claimed it since. Resolves with the time of the first try, from which feedback counts.
@@ -275,20 +276,23 @@ export function createBuilder(app, deps) {
     const item = await tracker.readItem(cfg(), w.ref);
     const now = item.tags;
     // Without In Development to go by, the history says whether the done tag went on since (a review may have come and gone).
+    const ask = b().requestReview;
     const landed = w.handOff && (w.handOff.held ? !has(now, b().tags.inProgress)
-      : has(now, cfg().tags.trigger) || has(now, cfg().tags.inProgress) || (await tracker.tagAddedSince(cfg(), w.ref, w.handOff.rev, t => has([t], cfg().tags.trigger))));
+      : !ask || has(now, cfg().tags.trigger) || has(now, cfg().tags.inProgress) || (await tracker.tagAddedSince(cfg(), w.ref, w.handOff.rev, t => has([t], cfg().tags.trigger))));
     if (landed) log('info', `${w.key}: its handoff to review already went through`);
     else {
       checkStop(w); // s while the ticket was read: no handoff
       w.handOff ??= { at: Date.now(), held: has(now, b().tags.inProgress), rev: item.rev };
       touch(w);
-      await trackerOf(w).retag(cfg(), w.ref, t => isStart(t) || has([t], b().tags.inProgress) || has([t], cfg().tags.trigger), cfg().tags.trigger);
+      await trackerOf(w).retag(cfg(), w.ref, t => isStart(t) || has([t], b().tags.inProgress) || (ask && has([t], cfg().tags.trigger)), ask ? cfg().tags.trigger : '');
     }
     const { at } = w.handOff;
     w.handOff = null;
     touch(w);
     return at;
   }
+
+  const marked = () => (b().requestReview ? `marked '${cfg().tags.trigger}'` : `'${b().tags.inProgress}' removed`);
 
   /** Sets the tags Prowl owns on `w`'s ticket to `add` ('' for none); while the tracker fails, again each minute. Resolves true once done. */
   async function retagSoon(w, add) {
@@ -372,7 +376,7 @@ export function createBuilder(app, deps) {
     if (answers.length) fs.writeFileSync(path.join(w.briefDir, 'answers.md'), brief.answersMd(answers));
     Object.assign(w, {
       repos, sessionId: randomUUID(), sessionStarted: false, sessionCostUsd: 0, turnKind: 'build', step: 'turn',
-      prompt: brief.buildPrompt({ command: b().command, briefDir: w.briefDir, ticket: w, repos, unavailable, answers: answers.length > 0 }),
+      prompt: brief.buildPrompt({ briefDir: w.briefDir, ticket: w, repos, unavailable, answers: answers.length > 0 }),
     });
     touch(w);
     log('info', `${w.key}: read the ticket; ${repos.length ? `checked out ${repos.map(r => r.repo).join(', ')}` : 'no repo found yet'}`);
@@ -534,8 +538,14 @@ export function createBuilder(app, deps) {
   /** Runs checks.json and the guards on each repo; throws or resumes the session on a failure. Resolves true when all pass. */
   async function checkAll(w, recs, { base, expected, onBranch }) {
     const failures = [];
+    let checks;
+    try {
+      checks = readChecks();
+    } catch (e) {
+      throw new NeedsYou('checks', `${e.message}. Fix it (Config, Checks before push), then enter checks again.`, { retry: w.step }); // never push unchecked: enter runs this step again
+    }
     for (const rec of recs) {
-      const spec = matchChecks(readJson(CHECKS_PATH), rec.repo);
+      const spec = matchChecks(checks, rec.repo);
       if (spec) {
         const res = await runChecks(spec, rec.worktree);
         if (!res.ok) failures.push({ repo: rec.repo, command: res.command, output: res.tail });
@@ -616,7 +626,7 @@ export function createBuilder(app, deps) {
       status: b().followUp ? 'following' : 'done', step: null, checkFails: 0, ...(!b().followUp && { endedAt: Date.now(), note: 'PRs opened' }),
     });
     touch(w);
-    log('ok', `${w.key}: ${w.prs.length} PR${w.prs.length > 1 ? 's' : ''} open, marked '${cfg().tags.trigger}'`);
+    log('ok', `${w.key}: ${w.prs.length} PR${w.prs.length > 1 ? 's' : ''} open, ${marked()}`);
     hoot(`Opened ${w.prs.length > 1 ? `${w.prs.length} PRs` : 'a PR'} for ${w.title}`, 'cheer');
     notifyIf(`Prowl: PRs open for ${w.key}`, w.title);
     await tidy(w, w.repos);
@@ -901,7 +911,7 @@ export function createBuilder(app, deps) {
     // Feedback since the round collected its own (posted during its session or CI wait, say), or since the handoff, is still due.
     Object.assign(w, { status: 'following', step: null, lastActivityAt: w.round?.collectedAt || handedOff, round: null, roundPrs: [] });
     touch(w);
-    log('ok', `${w.key}: marked '${cfg().tags.trigger}'${w.rounds ? ` after feedback round ${w.rounds}` : ''}; following its PRs`);
+    log('ok', `${w.key}: ${marked()}${w.rounds ? ` after feedback round ${w.rounds}` : ''}; following its PRs`);
   }
 
   // ---- Stopping, and Needs you ----

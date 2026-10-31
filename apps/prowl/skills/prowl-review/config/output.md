@@ -118,7 +118,7 @@ Fix the findings below in order, most severe first. Each one quotes the code at 
 ## Coverage
 
 **Axes reviewed:**
-<one line per axis, by its full name without the catalog letter, as "- Correctness & Logic">
+<one line per axis, by its full name without its letter, as "- Correctness & Logic">
 
 **Checked and found clean:**
 <one line per axis, the same way>

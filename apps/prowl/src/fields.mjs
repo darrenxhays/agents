@@ -5,20 +5,19 @@
 // calls tags labels: `jira` replaces the label and help shown when it is the task board.
 import fs from 'node:fs';
 import path from 'node:path';
-import { CHECKS_PATH, CONFIG_DIR, CONFIG_PATH } from './config.mjs';
+import { CHECKS_PATH, CONFIG_DIR, CONFIG_PATH, EFFORTS, MODELS } from './config.mjs';
 
 const isDir = p => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
 const https = v => /^https:\/\/\S+$/.test(v) || 'must be an https:// URL';
 export const ADO = c => c.taskBoard === 'ado';
 export const JIRA = c => c.taskBoard === 'jira';
-const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const opens = 'enter opens it. Updates never overwrite your edits.';
 const inFile = 'Edit them in the settings file: enter opens it.';
 const capped = "It fails with the cap named and isn't retried, so a runaway review isn't paid for twice.";
 
 export const CONFIG_FIELDS = [
   { heading: 'Prowl' },
-  { file: CONFIG_PATH, label: 'Settings file', help: `Every setting on this page, as JSON. ${opens}` },
+  { file: CONFIG_PATH, label: 'Settings file', help: `Every setting on this page, as JSON, each with a comment saying what it does. ${opens}` },
   { switch: 'reviewer', label: 'Reviewer', help: 'Reviews the PRs of tickets tagged for review. enter turns it on or off, at once. Off: nothing new is claimed or started, and running reviews finish.' },
   { switch: 'builder', label: 'Builder', help: 'Builds tickets tagged to start, opens their PRs and follows them through review. Its tab shows once it is on. enter turns it on or off, at once. Off: nothing new is claimed or started, and running sessions finish.' },
   { key: 'pollSeconds', label: 'Poll interval (sec)', type: 'int', min: 30, max: 86400, help: 'How often the boards are checked, and config.json re-read. r polls the side in view now.' },
@@ -59,13 +58,12 @@ export const CONFIG_FIELDS = [
   { key: 'caffeinate', label: 'Keep Mac awake', type: 'bool', when: () => process.platform === 'darwin', help: "on: the Mac doesn't idle-sleep while a session runs (caffeinate), since sleep stalls it and stretches it out. Closing the lid still sleeps it." },
 
   { heading: 'Reviewer · Files' },
-  { file: path.join(CONFIG_DIR, 'review.md'), label: 'Review rules', help: `Reviewer stance, severity definitions, and the verdict each severity gives. Applies from the next review. ${opens}` },
-  { file: path.join(CONFIG_DIR, 'review-axis-catalog.md'), label: 'Review checklists', help: `What reviewers check: the review axes and their checklists. Applies from the next review. ${opens}` },
+  { file: path.join(CONFIG_DIR, 'review.md'), label: 'Review rules', help: `Reviewer stance, what reviewers look for, severity definitions, and the verdict each severity gives. Applies from the next review. ${opens}` },
   { file: path.join(CONFIG_DIR, 'output.md'), label: 'Output templates', help: `How everything posted on GitHub looks: review-started comment, banner, review body, details file, comments, replies (the Builder's too), approvals-off comment. ${opens}` },
 
   { heading: 'Reviewer · Sessions' },
   { key: 'maxConcurrentReviews', label: 'Max parallel reviews', type: 'int', min: 1, max: 10, help: "Extra tickets stay tagged until a slot frees, so a teammate's poller can take them." },
-  { key: 'claude.model', label: 'Model', type: 'text', help: "Model for review sessions, and for build sessions while the Builder's Model is empty." },
+  { key: 'claude.model', label: 'Model', type: 'enum', values: MODELS, help: `Model for review sessions, and for build sessions while the Builder's Model is empty. enter cycles; another model id can go in the settings file.` },
   { key: 'claude.effort', label: 'Effort', type: 'enum', values: EFFORTS, help: 'Reasoning effort for review sessions. enter cycles.' },
   { key: 'claude.maxBudgetUsd', label: 'Spend cap per review ($)', type: 'int', min: 0, max: 100000, help: `Stops a review once it has spent this much. ${capped} 0 = no cap.` },
   { key: 'claude.maxTurns', label: 'Turn cap per review', type: 'int', min: 0, max: 100000, help: `Stops a review after this many turns. ${capped} 0 = no cap.` },
@@ -80,15 +78,14 @@ export const CONFIG_FIELDS = [
   { key: 'parkHumanOnly', label: 'Park human-only findings', type: 'bool', help: "on: a re-review parks an earlier finding that only a person can fix outside the code (a CI pipeline, tracker or permissions config, a product decision). It isn't re-posted, is listed under Parked in the details file, and doesn't hold up the verdict." },
 
   { heading: 'Builder · Files' },
-  { file: path.join(CONFIG_DIR, 'work.md'), label: 'Build rules', help: `How build sessions investigate, plan, build and work through review feedback. Your projects' CLAUDE.md files win over it. ${opens}` },
-  { file: CHECKS_PATH, label: 'Checks before push', help: 'Commands the Builder runs in a worktree before it pushes, per repo, e.g. { "my-org/*": { "run": ["npm test"] } }. Nothing matches: no checks. Never overwritten. enter opens it.' },
+  { file: path.join(CONFIG_DIR, 'build.md'), label: 'Build rules', help: `How build sessions investigate, plan, build and work through review feedback. Your projects' CLAUDE.md files win over it. ${opens}` },
+  { file: CHECKS_PATH, label: 'Checks before push', help: 'Commands the Builder runs in a worktree before it pushes, per repo. The file has commented examples (a linter, pytest) to copy. Nothing matches: no checks. Never overwritten once edited. enter opens it.' },
 
   { heading: 'Builder · Sessions' },
   { key: 'builder.assignedToMe', label: 'Only my tickets', type: 'bool', help: 'on: only tickets assigned to you are built. off: any ticket with the build start tag on your boards.' },
   { key: 'builder.maxConcurrent', label: 'Max parallel builds', type: 'int', min: 1, max: 10, help: 'Tickets built at once, counted from the claim until their PRs open, Needs you included. Feedback rounds are not counted.' },
   { key: 'builder.approvePlans', label: 'Approve plans', type: 'enum', values: ['auto', 'ask'], help: 'auto: Prowl approves a plan with no open questions; each open question goes to Needs you. ask: every plan waits in Needs you (enter with nothing typed approves it).' },
-  { key: 'builder.command', label: 'Build command', type: 'text', empty: true, emptyShows: '(the bundled prowl-work skill)', help: "A slash command to build with instead of /prowl:prowl-work, given ticket.md. It builds only, and must keep the result contract. Feedback rounds always use prowl-work." },
-  { key: 'builder.model', label: 'Model', type: 'text', empty: true, emptyShows: "(the Reviewer's Model)", help: "Model for build sessions. Empty: the Reviewer's Model." },
+  { key: 'builder.model', label: 'Model', type: 'enum', values: ['', ...MODELS], empty: true, emptyShows: "(the Reviewer's Model)", help: "Model for build sessions, or the Reviewer's Model. enter cycles; another model id can go in the settings file." },
   { key: 'builder.effort', label: 'Effort', type: 'enum', values: EFFORTS, help: 'Reasoning effort for build sessions. enter cycles.' },
   { key: 'builder.maxBudgetUsd', label: 'Spend cap per session ($)', type: 'int', min: 0, max: 100000, help: "Stops a session once all its turns have spent this much. It goes to Needs you and isn't retried. 0 = no cap." },
   { key: 'builder.ticketBudgetUsd', label: 'Spend cap per ticket ($)', type: 'int', min: 0, max: 100000, help: 'Every build session on one ticket, builds and rounds. At the cap the ticket goes to Needs you. 0 = no cap.' },
@@ -106,6 +103,7 @@ export const CONFIG_FIELDS = [
   { key: 'builder.protectedPaths', label: 'Protected paths', type: 'list', help: `Globs, e.g. .github/workflows/**. A push that changes one goes to Needs you. ${inFile}` },
   { key: 'builder.maxChangedLines', label: 'Max lines per push', type: 'int', min: 1, max: 1000000, help: 'A push that changes more lines than this goes to Needs you.' },
   { key: 'builder.draftPrs', label: 'Open PRs as drafts', type: 'bool', help: 'on: PRs open as drafts, which the Reviewer leaves alone until you mark them ready. off: ready for review.' },
+  { key: 'builder.requestReview', label: 'Tag for review when done', type: 'bool', help: "on: once the PRs open, and after each feedback round, In Development is swapped for the Review trigger tag, so the Reviewer reviews them. off: In Development just comes off, and asking for a review is up to you." },
 
   { heading: 'Builder · Follow-up' },
   { key: 'builder.followUp', label: 'Follow PRs', type: 'bool', help: 'on: after the PRs open, Prowl works through review feedback in rounds and flags READY TO MERGE. Merging stays with you.' },

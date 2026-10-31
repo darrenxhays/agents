@@ -1,13 +1,13 @@
 ---
 name: prowl-review
-description: Reviews a SET of related GitHub pull requests as one body of work, review-only — no fix loop, no code changes, no pushes. Given any number of PR links/numbers (any mix of repos), the orchestrator inspects every PR to build a batch brief (the goal of the work, how the PRs depend on and fit together), writes one review specification per PR (naming the axes that apply to it: batch coherence/integration, correctness, security, data/migrations, concurrency, tests, performance, operations, user interface, conventions…), and fans each spec out to its own reviewer subagent. Reviewers report findings back and post nothing. Every finding is then independently verified (verifier subagents, or the orchestrator for trivially checkable ones); refuted or mis-scoped findings go back to the originating reviewer for revision. Only verified findings are posted, as one batched review per PR with inline comments, from the user's own gh identity. Use when asked to "review these PRs together", "batch review", "review this set/stack of PRs", "review the PRs for this feature/slice/work item", "cross-PR review", or when several related PR links are pasted for review without asking for fixes. Do NOT use when a fix-and-re-review loop is wanted (`adversarial-pr-review`), for PRs Claude created this session (`pr-review-loop`), or for reading/responding to existing PR comments (`pr-review`). Requires the `gh` CLI and subagent (Agent) support.
+description: Reviews a set of related GitHub PRs together as one body of work, for Prowl's Reviewer. Builds a batch brief, gives each PR its own reviewer subagent, verifies every finding independently, and posts only verified findings as one review per PR. Review-only; never changes code.
 ---
 
 # PR-Owl Review
 
 ## Role
 
-You are the orchestrator of a **review-only** pipeline over a set of related PRs. Your jobs, in order: parse and verify the PR list; **inspect the PRs to understand the work as a whole**; write one review specification per PR; fan those out to reviewer subagents, one per PR; triage and dedupe what comes back; get every finding independently verified; route verification notes back to reviewers for revision; post only the verified findings to the PRs; synthesize.
+You are the orchestrator of a **review-only** pipeline over a set of related PRs. Your jobs, in order: parse and verify the PR list; **inspect the PRs to understand the work as a whole**; write one review specification per PR; fan those out to reviewer subagents, one per PR; triage and dedupe what comes back; get every finding independently verified; post only the verified findings to the PRs; synthesize.
 
 How this differs from `adversarial-pr-review`, and why:
 
@@ -29,7 +29,7 @@ A batch run is long. Context may be summarized part-way through, so keep your wo
 
 `<SKILL_DIR>` below means the absolute "Base directory for this skill" path shown when this skill loaded (it differs per install: personal skill, plugin, `--plugin-dir`); use that absolute path in every subagent prompt. **Never pass a literal `~` or a relative path to a subagent** — subagent file tools do not expand it, the instructions file silently fails to load, and the subagent falls back to a shallow ad-hoc review.
 
-**Config.** Three files set how PRs are reviewed and what posts look like: `review.md` (reviewer stance, severity, verdict), `review-axis-catalog.md` (the checklists) and `output.md` (the templates for everything posted: banner, review body, the details file, inline comments, replies, the approvals-off comment). Each ships in `<SKILL_DIR>/config/`; Prowl keeps the user's copy of each in `<PROWL_HOME>/config/`, where `<PROWL_HOME>` is the output of `echo "${PROWL_HOME:-$HOME/.prowl}"`. `<CONFIG>/<file>` below means the user's copy when it exists, otherwise the default. Resolve all three to absolute paths now, list them in `config-paths.md` in the run folder, read `review.md` and `output.md`, and pass the absolute paths to subagents.
+**Config.** Two files set how PRs are reviewed and what posts look like: `review.md` (reviewer stance, what to look for, severity, verdict) and `output.md` (the templates for everything posted: banner, review body, the details file, inline comments, replies, the approvals-off comment). Each ships in `<SKILL_DIR>/config/`; Prowl keeps the user's copy of each in `<PROWL_HOME>/config/`, where `<PROWL_HOME>` is the output of `echo "${PROWL_HOME:-$HOME/.prowl}"`. `<CONFIG>/<file>` below means the user's copy when it exists, otherwise the default. Resolve both to absolute paths now, list them in `config-paths.md` in the run folder, read `review.md` and `output.md`, and pass the absolute paths to subagents.
 
 ## Step 1 — Parse and verify the PR list
 
@@ -44,11 +44,11 @@ gh pr view <number> --repo <owner/repo> --json number,title,body,state,url,autho
 - **Report unresolvable entries explicitly.** Never silently drop one — a missing row in the final table reads as "reviewed and clean".
 - **No PR list found → ask the user for one.** Never guess at open PRs.
 - **Already approved** (the invocation lists the PR as approved earlier and unchanged since) → treat it exactly like a PR whose state is not OPEN, below. It gets no spec or reviewer, and nothing is posted on it.
-- **State not OPEN** (merged/closed) → keep the PR **as context** for the batch brief (its code has landed and the others depend on it) but mark it `no-post`: it gets no review comments. Findings against it are reported in the final synthesis under "Findings on merged/closed PRs (not posted)".
+- **State not OPEN** (merged/closed) → keep the PR **as context** for the batch brief (its code has landed and the others depend on it) but mark it `no-post`: it gets no review comments. Findings against it are reported in the report under "Findings on merged/closed PRs (not posted)".
 
 **Posting mode per PR.** Everything posts from the default `gh` identity; never set or override `GH_TOKEN`. GitHub rejects `APPROVE`/`REQUEST_CHANGES` on a PR authored by the authenticated user, so resolve the login once (`gh api user -q .login`) and set each PR to `formal` (author is someone else — verdict lands as a real review event) or `comment` (author is the user — verdict stated in the body of a `COMMENT` review). Tell the user which PRs are in comment mode.
 
-**Flags.** If the invocation says *comments only*, *no verdict*, or *don't request changes*, set **no-verdict mode**: every PR posts as a `COMMENT` event with the assessment in the body. If it says *don't post*, *report only*, or *dry run*, set **dry-run mode**: run everything through Step 7 and produce the synthesis, but skip Step 8. If it says *approvals off*, set **approvals-off mode**: no PR is approved (Step 8, *Verdict*); blocking verdicts post as usual. Echo the active mode back to the user in one line.
+**Flags.** If the invocation says *comments only*, *no verdict*, or *don't request changes*, set **no-verdict mode**: every PR posts as a `COMMENT` event with the assessment in the body. If it says *don't post*, *report only*, or *dry run*, set **dry-run mode**: run everything through Step 7 and write the report, but skip Step 8. If it says *approvals off*, set **approvals-off mode**: no PR is approved (Step 8, *Verdict*); blocking verdicts post as usual. Echo the active mode back to the user in one line.
 
 ## Step 2 — Build the batch brief (inspect the PRs)
 
@@ -82,26 +82,23 @@ Write them to `existing-comments.md`, per PR: each thread with its `id`, its fir
 
 ## Step 3 — Write one review specification per PR
 
-Every open PR gets one spec and one reviewer. Merged and closed PRs get none: they are context in the brief, and the reviewers of the open PRs read them where they share a surface. Read `<CONFIG>/review-axis-catalog.md`, then for each open PR:
+Every open PR gets one spec and one reviewer. Merged and closed PRs get none: they are context in the brief, and the reviewers of the open PRs read them where they share a surface. For each open PR:
 
-- **Name the axes that apply to it.** Always include the axes the catalog marks as always included (by default **A. Batch Coherence & Integration**, scoped to this PR's side of each shared surface and dependency edge in the brief; the reviewer reads the other side in the sibling PR). Add every other axis whose triggers this PR touches (each catalog entry lists them). Skip axes with nothing to review; do not pad.
+- **Name the areas that apply to it.** Always **A. Batch Coherence & Integration**, scoped to this PR's side of each shared surface and dependency edge in the brief (the reviewer reads the other side in the sibling PR), plus the other areas this PR touches, from *What to look for* in `<CONFIG>/review.md`. Do not pad.
 - **Set the depth.** A large PR still gets one reviewer, so say which files to trace line by line and which to skim.
 - **Assign the hypotheses.** Each hypothesis from the brief goes to the spec of every PR it involves. A cross-PR finding may then come back from both reviewers; Step 5 dedupes it.
 - **Point at project conventions.** If the PR's repo has review rules (a `CLAUDE.md`, convention docs, lint config), list the relevant files in the spec's *Conventions to apply* field so the reviewer reads them rather than inventing house style.
 
-Fill `<SKILL_DIR>/references/review-spec-template.md` once per open PR and save it to `specs/<repo>-<n>.md`. Every spec carries the batch brief verbatim (or its path plus the parts that matter for this PR), the PR and its head SHA, the axes and the absolute path of the catalog, the sibling PRs it shares surfaces with, and its hypotheses.
+Fill `<SKILL_DIR>/references/review-spec-template.md` once per open PR and save it to `specs/<repo>-<n>.md`. Every spec carries the batch brief verbatim (or its path plus the parts that matter for this PR), the PR and its head SHA, the areas, the sibling PRs it shares surfaces with, and its hypotheses.
 
 ## Step 4 — Review fan-out (one reviewer subagent per PR, in parallel)
 
 **Launch all reviewers in a single message** so they run concurrently. Use a general-purpose subagent (read-only work; do not grant edit intent in the prompt). Each reviewer prompt must contain:
 
-1. The instruction to read `<SKILL_DIR>/references/reviewer-instructions.md` **in full, first**, then `<CONFIG>/review.md` in full, then the sections of `<CONFIG>/review-axis-catalog.md` named in the spec (all as absolute paths).
+1. The instruction to read `<SKILL_DIR>/references/reviewer-instructions.md` **in full, first**, then `<CONFIG>/review.md` in full (both as absolute paths).
 2. The complete review spec, inline.
 3. The requirement to return the structured report defined in reviewer-instructions.md **as its final message**, verbatim structure — you file it unchanged in `reports/<repo>-<n>.md`.
 4. The three prohibitions, restated: **post nothing on the PR; change no code; never run `git checkout`/`git switch` or any mutating git command in the user's clone** (read via `gh pr diff`, `gh api`, `gh pr view`; if local inspection is unavoidable, use an isolated `git worktree add <tmpdir> <sha>` or temp shallow clone and remove it after).
-5. A note that the orchestrator may send **verification notes** later and expects a delta report in the *Revision protocol* format — so the reviewer keeps its working notes.
-
-Record each reviewer's agent ID/name against its PR; you will message it in Step 7.
 
 ## Step 5 — Triage and dedupe into the ledger
 
@@ -123,22 +120,11 @@ Triage rules:
 
 Each verifier prompt must contain: the instruction to read `<SKILL_DIR>/references/verifier-instructions.md` in full first, then `<CONFIG>/review.md` for the severity definitions (both as absolute paths); the batch brief (or its path and the dependency-graph section inline); the findings assigned, **verbatim from the ledger including the reviewer's evidence**; PR identities and head SHAs; the path of `existing-comments.md` and which PRs' sections to read; the three prohibitions from Step 4; and the requirement to return the verifier report format as its final message.
 
-Update the ledger from each verifier report: `CONFIRMED`, `ADJUSTED` (apply the adjusted severity/location/wording and note why), `REFUTED` (keep the entry with the refutation — it goes in the final report, not on the PR), `UNVERIFIABLE`, `DUPLICATE-OF F-xx`, `ADDRESSED-IN <PR>` (another PR in the batch already handles it — treated like REFUTED for posting, but noted under cross-PR observations). Copy each finding's *Already raised* line into the ledger. Add any *Related issue observed* items as new `UNINVESTIGATED` entries.
+Update the ledger from each verifier report: `CONFIRMED`, `ADJUSTED` (apply the adjusted severity/location/wording and note why), `REFUTED` (keep the entry with the refutation — it goes in the final report, not on the PR), `UNVERIFIABLE`, `DUPLICATE-OF F-xx`, `ADDRESSED-IN <PR>` (another PR in the batch already handles it — treated like REFUTED for posting, but noted under cross-PR observations). Copy each finding's *Already raised* line into the ledger. Add any *Related issue observed* items as new `UNINVESTIGATED` entries and verify them the same way.
 
-## Step 7 — Revision loop (reviewer ↔ verification notes)
+## Step 7 — Settle the ledger
 
-For each reviewer with at least one `REFUTED`, `ADJUSTED`, `UNVERIFIABLE`, or `ADDRESSED-IN` finding, or with related-issue notes in its area, send the verification notes back to **that same reviewer** with `SendMessage` (its context is intact, so it can re-examine without reloading the PR). Send the verifier's verdicts and evidence for its findings **verbatim**, and ask for a delta report per the *Revision protocol* in reviewer-instructions.md: for each affected finding, **withdraw**, **accept the adjustment**, or **contest with new evidence** (not a restatement); for each related-issue note, investigate and either add a fully evidenced new finding or say why it is not one.
-
-If the reviewer agent cannot be continued, spawn a fresh reviewer with the original spec, the original report, and the verification notes; it produces the same delta report.
-
-Then:
-
-- **Withdrawn / accepted** → ledger updated; done.
-- **Contested** → send the finding, the refutation, and the contest to a **fresh verifier** (never the one that refuted it). That verdict is final.
-- **New findings** → verify as in Step 6.
-- **Cap: two revision cycles per reviewer.** Anything still contested after that is **not posted**; it is listed in the synthesis under *Disputed — not posted* with both sides' evidence so the human decides.
-
-The loop ends when every ledger entry is in a terminal state: `CONFIRMED`, `ADJUSTED`, `REFUTED`, `ADDRESSED-IN`, `DUPLICATE-OF`, `WITHDRAWN`, `DISPUTED`, or `UNVERIFIABLE`.
+There is no revision round with the reviewers: the verifier's verdict is final. `CONFIRMED` and `ADJUSTED` findings are posted; `REFUTED`, `UNVERIFIABLE`, `DUPLICATE-OF` and `ADDRESSED-IN` are not, and go in the report's *Not posted* section with the verifier's reason. Every ledger entry must be in one of those states before Step 8.
 
 ## Step 8 — Post to the PRs
 
@@ -183,36 +169,13 @@ If the API rejects the review because a line is not in the diff, take that findi
 
 **Delegating posting.** For very large batches (more than ~8 open PRs or ~40 verified findings), you may spawn one poster subagent per PR, giving it the verbatim finding set and the body text, and requiring it to return the ID → URL map. Audit that the returned count equals the assigned count before synthesizing.
 
-## Step 9 — Final synthesis
+## Step 9 — Report
 
-Produce, in this order:
-
-1. **Batch summary** — the goal of the work in two sentences, the merge/deploy order, and the batch-level verdict in one line (the worst per-PR verdict, plus whether the batch is complete against its stated goal).
-
-2. **Per-PR table:**
-
-   | PR | Title | Role | Verdict | Critical | High | Medium | Low | Nit | Review | Status |
-   |----|-------|------|---------|----------|------|--------|-----|-----|--------|--------|
-
-   Counts are verified findings only. `Review` is the posted review URL, *already posted*, *dry run*, or *no-post (merged)*. `Status` is one of *Posted* / *Dry run* / *No-post (merged/closed)* / *No-post (already approved)* / *Failed to post: <reason>*.
-
-3. **Cross-PR findings** — the coherence/integration findings, each with the PRs involved, fix-owner, and verifier's one-line confirmation. Include *ADDRESSED-IN* notes here (a reviewer's concern that another PR already handles). Omit the section only if the coherence axis returned nothing and say so explicitly.
-
-4. **Verified findings per PR**, in PR order, in the ledger format (ID, severity, title, location, problem, failure scenario, suggested fix, verifier's confirmation). Mark the ones someone else raised first with the link to their comment (and to your reply, if any).
-
-5. **Not posted** — three short lists: *Refuted* (title + refutation in one clause), *Disputed — not posted* (both sides), *Unverifiable* (what would be needed). This is where the user sees what the pipeline filtered out and why.
-
-6. **Coverage and pipeline stats** — reviewers run (one per PR) and the axes each covered; hypotheses tested and outcomes; raw → deduped → verified → posted counts (new comments / replies on earlier threads / already raised by others, not re-posted); any subagent failures, named by axis/PR with what went wrong and an offer to re-run.
-
-Hard rules for synthesis:
-
-- **Do not soften or inflate.** Severities come from the verifier's final verdict, not your impression.
-- **Do not collapse per-PR findings into batch-level prose.** Each PR's list must stand alone for whoever owns that PR; cross-PR findings are the only entries that span PRs.
-- **Every posted comment appears in the report and every reported verified finding was posted** (or is explicitly marked already raised by others / dry-run / no-post / failed). If the numbers do not reconcile, you are not done.
+Write the report Prowl's context asks for, from the ledger and `posted.md`. Severities are the verifier's final ones. Every posted comment appears in the report and every verified finding in the report was posted (or is marked already raised by others, dry run, no-post or failed); if the numbers don't reconcile, you are not done.
 
 ## Failure handling
 
-If a reviewer, verifier, mapper, or poster subagent fails or returns something that is not a usable report: **say so in the synthesis** — which PR, which step, what went wrong — and offer to re-run that piece. Never reconstruct a report for a subagent that did not deliver one, never treat "no report" as "no findings", and never post a finding whose verification did not complete.
+If a reviewer, verifier, mapper, or poster subagent fails or returns something that is not a usable report: **say so in the report** — which PR, which step, what went wrong — and offer to re-run that piece. Never reconstruct a report for a subagent that did not deliver one, never treat "no report" as "no findings", and never post a finding whose verification did not complete.
 
 ## Hard rules (whole skill)
 

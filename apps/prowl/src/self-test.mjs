@@ -13,7 +13,7 @@ import { CONFIG_DIR, HOME } from './config.mjs';
 import { alive, awaitingHuman, buildPrompt, failUnposted, finalize, findingsOnly, isOwn, overdue, postMarker, REPORTS_DIR, retryFailed, reviewArgs, reviewEnv, roundCapped, tidyLogs } from './reviewer/reviews.mjs';
 import { processStart } from './proc.mjs';
 import { createMascot, wrap } from './mascot.mjs';
-import { changelog, newer, syncConfigFiles } from './update.mjs';
+import { changelog, hash, newer, syncConfigFiles } from './update.mjs';
 import { DISALLOWED, fenceArgs, fenceDecision, fenceEnv, fenceSettings, lex, trackerHosts } from './fence.mjs';
 import { checksState, detailsFromBodies, prThreads, reviewedIn, threadsFrom } from './github.mjs';
 import { globRe, matchChecks, runChecks, runCommand } from './checks.mjs';
@@ -224,11 +224,11 @@ const synced = {};
 assert.deepEqual(syncConfigFiles(defs, mine, synced, false), [], 'a fresh install is seeded quietly');
 assert.equal(get(mine, 'review.md'), 'r1');
 put(defs, 'review.md', 'r2');
-put(defs, 'review-axis-catalog.md', 'a1');
+put(defs, 'extra.md', 'a1');
 let notes = syncConfigFiles(defs, mine, synced, true);
 assert.equal(get(mine, 'review.md'), 'r2', 'an unedited copy moves to the new default');
-assert.equal(get(mine, 'review-axis-catalog.md'), 'a1', 'a new config file is copied in');
-assert.deepEqual(notes.map(n => n.text), ['review-axis-catalog.md added to your config folder', "review.md updated to the new default (you hadn't edited it)"]);
+assert.equal(get(mine, 'extra.md'), 'a1', 'a new config file is copied in');
+assert.deepEqual(notes.map(n => n.text), ['extra.md added to your config folder', "review.md updated to the new default (you hadn't edited it)"]);
 put(mine, 'review.md', 'my rules');
 put(defs, 'review.md', 'r3');
 notes = syncConfigFiles(defs, mine, synced, true);
@@ -243,18 +243,28 @@ notes = syncConfigFiles(defs, mine, synced, true);
 assert.equal(get(mine, 'output.md'), '# Output\n\n## Review banner\n\nmy banner\n\n## Comment prefix\n\nmy prefix\n\n## Inline comment\n\ninline\n');
 assert.ok(fs.existsSync(path.join(mine, 'signature.md.old')) && !fs.existsSync(path.join(mine, 'signature.md')));
 assert.deepEqual(notes.map(n => n.path), [path.join(mine, 'output.md')], 'the migration is announced, not as an edited copy');
-fs.rmSync(path.join(mine, 'review-axis-catalog.md'));
+// The axis catalog, folded into the skill: an unedited copy goes quietly, an edited one is kept as .old.
+put(mine, 'review-axis-catalog.md', 'a1');
+synced['review-axis-catalog.md'] = hash('a1');
+assert.deepEqual(syncConfigFiles(defs, mine, synced, true), [], 'an unedited retired file goes quietly');
+assert.ok(!fs.existsSync(path.join(mine, 'review-axis-catalog.md')) && !('review-axis-catalog.md' in synced));
 put(mine, 'axis-catalog.md', 'my axes');
-synced['axis-catalog.md'] = synced['review-axis-catalog.md'];
-delete synced['review-axis-catalog.md'];
+synced['axis-catalog.md'] = hash('a1');
 notes = syncConfigFiles(defs, mine, synced, true);
-assert.equal(get(mine, 'review-axis-catalog.md'), 'my axes', 'a renamed file keeps the edited copy');
+assert.equal(get(mine, 'axis-catalog.md.old'), 'my axes', 'an edited retired file is kept as .old');
 assert.ok(!fs.existsSync(path.join(mine, 'axis-catalog.md')) && !('axis-catalog.md' in synced));
-assert.deepEqual(notes.map(n => n.text), ['axis-catalog.md is now review-axis-catalog.md']);
+assert.match(notes[0].text, /^axis-catalog\.md is no longer a config file.*What to look for in review\.md$/);
+assert.deepEqual(syncConfigFiles(defs, mine, synced, true), [], 'announced once');
+put(mine, 'work.md', 'my build rules');
+synced['work.md'] = hash('w1');
+notes = syncConfigFiles(defs, mine, synced, true);
+assert.equal(get(mine, 'build.md'), 'my build rules', 'a renamed file keeps the edited copy');
+assert.ok(!fs.existsSync(path.join(mine, 'work.md')) && !('work.md' in synced) && synced['build.md'] === hash('w1'));
+assert.deepEqual(notes.map(n => n.text), ['work.md is now build.md']);
 fs.rmSync(cfgTmp, { recursive: true });
-// prowl-work's config defaults are synced into the same folder, so no file name may be in both skills' defaults.
+// prowl-build's config defaults are synced into the same folder, so no file name may be in both skills' defaults.
 const skillCfg = skill => fs.readdirSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'skills', skill, 'config'));
-assert.deepEqual(skillCfg('prowl-work').filter(f => skillCfg('prowl-review').includes(f)), [], 'config file names are unique across skills');
+assert.deepEqual(skillCfg('prowl-build').filter(f => skillCfg('prowl-review').includes(f)), [], 'config file names are unique across skills');
 assert.ok(!fs.existsSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'skills', 'prowl-fix')), 'Fix my PRs is removed');
 
 // A pid saved by an earlier launch is the review only if its process started with the review (not a reused pid).
@@ -581,7 +591,7 @@ for (const line of ['password = getPassword()', 'const secret = process.env.SECR
 assert.ok(SECRET_PATTERNS.length >= 10);
 
 // ---- Drafts: the Reviewer treats them as if they weren't there ----
-const { loadConfig, saveConfig, CONFIG_PATH } = await import('./config.mjs');
+const { loadConfig, parseJsonc, saveConfig, CONFIG_PATH } = await import('./config.mjs');
 const { createReviewer } = await import('./reviewer/reviewer.mjs');
 const rvTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'prowl-test-'));
 const prOf = (n, extra = {}) => ({ url: `https://github.com/octo-org/r${n}/pull/${n}`, title: `PR ${n}`, number: n, repo: `octo-org/r${n}`, author: 'teammate', draft: false, ...extra });
@@ -798,7 +808,7 @@ const offShell = createShell(offApp, [r2, b2], { log: (s, level, msg) => { offLo
 offShell.tick();
 assert.deepEqual([r2.polls, b2.polls], [0, 0], 'both off: nothing polls');
 assert.ok(offLogs.some(m => /Both sides are off/.test(m)));
-const onFile = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+const onFile = parseJsonc(fs.readFileSync(CONFIG_PATH, 'utf8'));
 onFile.builder.enabled = true;
 fs.writeFileSync(CONFIG_PATH, JSON.stringify(onFile));
 offShell.tick();
@@ -811,11 +821,34 @@ saveConfig({ ...loadConfig(), reviewer: { enabled: true }, builder: { ...loadCon
 
 {
   // Before 2.13.0 the Builder had its own done and reviewing tags: they're dropped, for the Reviewer's trigger and in-progress tags.
-  const file = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+  const file = parseJsonc(fs.readFileSync(CONFIG_PATH, 'utf8'));
   file.builder.tags = { ...file.builder.tags, done: 'Ready for QA', reviewing: 'In QA' };
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(file));
   assert.deepEqual(Object.keys(loadConfig().builder.tags), ['start', 'inProgress']);
-  assert.ok(!('done' in JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')).builder.tags), 'and the file is rewritten without them');
+  assert.ok(!('done' in parseJsonc(fs.readFileSync(CONFIG_PATH, 'utf8')).builder.tags), 'and the file is rewritten without them');
+}
+{
+  // config.json carries a comment above each setting, and still loads; 2.14.0 dropped builder.command.
+  const file = parseJsonc(fs.readFileSync(CONFIG_PATH, 'utf8'));
+  file.builder.command = '/my-build';
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(file));
+  assert.ok(!('command' in loadConfig().builder));
+  const text = fs.readFileSync(CONFIG_PATH, 'utf8');
+  assert.ok(!text.includes('/my-build') && /\n    \/\/ Model: "claude-opus-5-5"/.test(text) && /\/\/ MCP tools a build session may use.*e\.g\. \["mcp__/.test(text), 'rewritten with comments');
+  assert.deepEqual(parseJsonc(text), JSON.parse(JSON.stringify(loadConfig())), 'the commented file holds every setting');
+  // checks.json: seeded with commented examples, which parse to no checks, and to a check once uncommented.
+  const { CHECKS_PATH, readChecks, seedChecks } = await import('./config.mjs');
+  fs.mkdirSync(path.dirname(CHECKS_PATH), { recursive: true });
+  fs.writeFileSync(CHECKS_PATH, '{}');
+  seedChecks();
+  const tpl = fs.readFileSync(CHECKS_PATH, 'utf8');
+  assert.ok(tpl.includes('npx eslint') && tpl.includes('pytest'), 'the bare {} gets the examples');
+  assert.deepEqual(readChecks(), {});
+  fs.writeFileSync(CHECKS_PATH, tpl.replace(/^  \/\/ ("my-org\/web-\*")/m, '  $1').replace(/^  \/\/   ("setup": \["npm ci"\],|"run": \["npx eslint \."\])/gm, '    $1').replace(/^  \/\/ (\},)$/m, '  $1'));
+  assert.deepEqual(readChecks(), { 'my-org/web-*': { setup: ['npm ci'], run: ['npx eslint .'] } }, 'an uncommented example parses, trailing comma and all');
+  seedChecks();
+  assert.notEqual(fs.readFileSync(CHECKS_PATH, 'utf8'), tpl, 'an edited checks.json is never overwritten');
+  fs.rmSync(CHECKS_PATH);
 }
 
 // ---- The TUI: two tabs at 80 columns, and each switch from the keyboard ----
@@ -905,7 +938,6 @@ assert.ok(fits(tui.frame(80, 30), 'n, sent').includes('Reviewing 2 PRs together 
 
 // ---- Fix my PRs removed: the first-launch migration ----
 const { migrateFixes, needsMigration } = await import('./migrate.mjs');
-const { hash } = await import('./update.mjs');
 const migHome = fs.mkdtempSync(path.join(os.tmpdir(), 'prowl-test-'));
 fs.mkdirSync(path.join(migHome, 'config'));
 const migWt = path.join(migHome, 'projects', '.prowl-worktrees', 'api-12');

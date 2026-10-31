@@ -676,7 +676,7 @@ export function startTui(app, actions, io = {}) {
       ui,
     };
   }
-  out.write('\x1b[?1049h\x1b[?25l'); // alternate screen, hidden cursor
+  out.write('\x1b[22;0t\x1b]0;Prowl\x07\x1b[?1049h\x1b[?25l'); // save the tab title and set it, alternate screen, hidden cursor
   stdin.setRawMode(true);
   stdin.setEncoding('utf8');
   stdin.resume();
@@ -688,7 +688,7 @@ export function startTui(app, actions, io = {}) {
   return {
     restore() {
       clearInterval(timer);
-      out.write('\x1b[?2026l\x1b[?25h\x1b[?1049l');
+      out.write('\x1b[?2026l\x1b[?25h\x1b[?1049l\x1b[23;0t'); // …and restore the tab title
       try { stdin.setRawMode(false); } catch { /* not a TTY any more */ }
       stdin.pause();
     },

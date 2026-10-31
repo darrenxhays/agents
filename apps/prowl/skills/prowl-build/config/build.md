@@ -1,6 +1,6 @@
-# PR-Owl Work — Rules
+# PR-Owl Build — Rules
 
-How a Builder session investigates, plans and builds a ticket, and works through review feedback on its PRs. Prowl keeps your copy of this file in `~/.prowl/config/` (or `$PROWL_HOME/config/`): edit that one. Updates never overwrite a copy you've edited. The `CLAUDE.md` files in your Projects Directory and in each repo win over this file; the checks Prowl runs before a push are in `checks.json`.
+How a Builder session investigates, plans and builds a ticket, and works through review feedback on its PRs. Prowl keeps your copy of this file in `~/.prowl/config/` (or `$PROWL_HOME/config/`): edit that one. Updates never overwrite a copy you've edited. To change how the Builder works, edit or replace any section here: Prowl's skill keeps the stages and the result it hands back, so the app keeps working whatever you write. The `CLAUDE.md` files in your Projects Directory and in each repo win over this file; the checks Prowl runs before a push are in `checks.json`.
 
 ## Investigate
 

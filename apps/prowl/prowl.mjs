@@ -39,7 +39,7 @@ if (args.has('--reviewer-only') && args.has('--builder-only')) {
   process.exit(1);
 }
 
-const { CHECKS_PATH, HOME, loadConfig, saveConfig, writeJson } = await import('./src/config.mjs');
+const { HOME, loadConfig, saveConfig, seedChecks } = await import('./src/config.mjs');
 const TRACKERS = { ado: await import('./src/ado.mjs'), jira: await import('./src/jira.mjs') };
 const secrets = await import('./src/secrets.mjs');
 const { isAlive } = await import('./src/proc.mjs');
@@ -51,7 +51,7 @@ const { migrateFixes, needsMigration } = await import('./src/migrate.mjs');
 const update = await import('./src/update.mjs');
 const { parsePrRefs } = await import('./src/github.mjs');
 
-const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url)); // this folder is also the plugin with prowl-review and prowl-work
+const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url)); // this folder is also the plugin with prowl-review and prowl-build
 const ONCE = args.has('--once');
 const LOCK = path.join(HOME, 'lock');
 const workKey = valueOf('--work');
@@ -168,6 +168,7 @@ try {
 } catch (e) {
   log('prowl', 'warn', `Couldn't bring your config files in ${path.join(HOME, 'config')} up to date: ${e.message}`);
 }
+try { seedChecks(); } catch { /* the Config view seeds it again */ }
 if (migrated.length) app.notes = { version: update.localVersion(PLUGIN_DIR), versions: [], files: [], ...app.notes, files: [...(app.notes?.files || []), ...migrated] };
 
 // prowl --work <key> builds a ticket without its start tag; prowl --follow <key> adopts its PRs. Both need the Builder.
@@ -240,7 +241,7 @@ tui = startTui(app, {
   }),
   saveConfig: () => {
     saveConfig(app.cfg);
-    if (!fs.existsSync(CHECKS_PATH)) writeJson(CHECKS_PATH, {}); // the Checks before push file to fill in, never overwritten
+    seedChecks(); // the Checks before push file to fill in, with examples; never overwritten once edited
   },
   saveToken: token => {
     try { secrets.saveToken(app.cfg.jira.email, token); } catch (e) { return e.message; }

@@ -66,7 +66,7 @@ export async function migrateFixes(cfg, state, deps) {
       fs.rmSync(fixMd);
       notes.push({ text: 'fix.md (Fix rules) was deleted: you had never edited it, and nothing reads it now.', path: configDir });
     } else {
-      notes.push({ text: "Your edited fix.md (Fix rules) was kept, but nothing reads it now. The Builder's rules are in work.md: move what you need there.", path: fixMd });
+      notes.push({ text: "Your edited fix.md (Fix rules) was kept, but nothing reads it now. The Builder's rules are in build.md: move what you need there.", path: fixMd });
     }
     if (seen?.defaults) {
       delete seen.defaults['fix.md'];

@@ -11,10 +11,9 @@ Three things you never do:
 ## Read first
 
 1. This file, in full.
-2. The review spec the orchestrator gave you, in full — especially *Axes*, *Sibling PRs*, and *Hypotheses*.
-3. The review config (`review.md`) at the absolute path the orchestrator gave you: your stance and the severity definitions.
-4. The sections of the axis catalog (`review-axis-catalog.md`) named in the spec. They are your checklist.
-5. Any convention files the spec lists.
+2. The review spec the orchestrator gave you, in full — especially *Areas*, *Sibling PRs*, and *Hypotheses*.
+3. The review config (`review.md`) at the absolute path the orchestrator gave you: your stance, what to look for, and the severity definitions.
+4. Any convention files the spec lists.
 
 ## Fetching the code
 
@@ -34,7 +33,7 @@ Review the way the *Reviewer stance* section of `review.md` says.
 
 ## Scope discipline
 
-- Cover every named axis over your PR **completely**. For every checklist item, either report findings or state what you checked and why it is clean.
+- Cover axis A and the areas the spec names over your PR (*What to look for* in `review.md`). Spend your effort where defects are likely, not on accounting for every area.
 - **Do not fully investigate a sibling PR's own code.** Its reviewer covers it. If you notice something there, record it in *Out-of-scope observations* with location and one line of evidence. The orchestrator routes it to a verifier. Ignoring it loses a real defect; investigating it duplicates another reviewer's work.
 - **Report an outcome for every hypothesis** in the spec, even when the outcome is "refuted — checked X, Y, Z".
 
@@ -57,7 +56,7 @@ Your **final message is the report**. It is filed verbatim by the orchestrator a
 
 ```
 ## Review report — <owner/repo>#<n> — <batch-id>
-**Axes:** <letters and names>
+**Areas covered:** <A plus the areas named in the spec>
 **Head SHAs reviewed:** <owner/repo>#<n> @ <sha>, plus siblings read for shared surfaces
 **Summary of what this PR actually does (as verified, not as described):** 2–4 sentences
 **Discrepancies between descriptions/brief and actual behaviour:** (or "none")
@@ -68,7 +67,7 @@ Your **final message is the report**. It is filed verbatim by the orchestrator a
 
 ### Findings
 For each:
-- **R-<repo>-<n>-<k>** [SEVERITY] <one-line title>  (axis: <letter>, confidence: High|Medium|Low)
+- **R-<repo>-<n>-<k>** [SEVERITY] <one-line title>  (area: <name>, confidence: High|Medium|Low)
   - PR: <owner/repo>#<n>   Location: <file>:<line>   in-diff: yes|no
   - Fix-owner PR: <same PR | other PR#, why>   (omit if not cross-PR)
   - Evidence:
@@ -83,30 +82,11 @@ For each:
 ### Out-of-scope observations
 - <PR#> <file>:<line> — <one line: what looked wrong>. Not investigated.
 
-### Test coverage analysis   (include only if J. Testing is among your axes, or if you found an untested critical path)
+### Test coverage analysis   (include only if tests are among your areas, or if you found an untested critical path)
 - Untested changed code: <specific functions/branches>
 - Weak tests: <which, why>
 
-### Checked and found clean
-One line per checklist item you covered with no finding, so absence of findings is credible.
 
 ### Could not verify
 Anything you were unable to check, and why.
 ```
-
-## Revision protocol
-
-After verification, the orchestrator may message you with **verification notes**: for some of your findings, an independent verifier's verdict (REFUTED / ADJUSTED / UNVERIFIABLE / ADDRESSED-IN another PR) with evidence, and possibly *related issue observed* notes near your findings. Respond with a **delta report**, not a repeat of the full report:
-
-```
-## Revision — <owner/repo>#<n> — <batch-id> — cycle <1|2>
-### Per finding
-- R-<repo>-<n>-<k> — WITHDRAWN: <one clause>
-- R-<repo>-<n>-<k> — ACCEPTED ADJUSTMENT: <what changed>
-- R-<repo>-<n>-<k> — CONTESTED: <NEW evidence the verifier did not consider — quoted lines, a path they missed, a concrete input>. Restating the original finding is not a contest.
-- R-<repo>-<n>-<k> — EVIDENCE SUPPLIED: <for UNVERIFIABLE — the missing evidence, or WITHDRAWN if you cannot supply it>
-### Related-issue notes
-- <note> — NEW FINDING R-<repo>-<n>-<k+…> (full finding block as above) / NOT A FINDING: <why, in one line>
-```
-
-Rules for revision: evaluate the verifier's argument on its technical merits, not on pride of authorship. If it holds, withdraw. If it does not, contest with something *new*. Two revision cycles is the cap; after that the orchestrator marks unresolved items as disputed and does not post them.

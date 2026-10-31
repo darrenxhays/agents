@@ -70,11 +70,11 @@ export function answersMd(answers) {
 
 const repoLines = repos => repos.map(r => `  - ${r.repo}: ${r.worktree} (detached at ${r.defaultBranch}, the default branch)`);
 
-/** The first prompt of a build session. `command` is builder.command, or '' for the bundled skill. */
-export function buildPrompt({ command, briefDir, ticket, repos, unavailable = [], answers = false }) {
+/** The first prompt of a build session. */
+export function buildPrompt({ briefDir, ticket, repos, unavailable = [], answers = false }) {
   const ticketPath = path.join(briefDir, 'ticket.md');
   return [
-    `${command || '/prowl:prowl-work'} ${ticketPath}`,
+    `/prowl:prowl-build ${ticketPath}`,
     '',
     '## Context from Prowl',
     '',
@@ -93,7 +93,7 @@ export function buildPrompt({ command, briefDir, ticket, repos, unavailable = []
 /** The first prompt of a feedback round's session. */
 export function feedbackPrompt({ briefDir, feedbackPath }) {
   return [
-    `/prowl:prowl-work feedback ${feedbackPath}`,
+    `/prowl:prowl-build feedback ${feedbackPath}`,
     '',
     '## Context from Prowl',
     '',
@@ -138,7 +138,7 @@ export function feedbackMd({ ticket, round, maxRounds, prs, answers = [] }) {
   return `${lines.join('\n')}\n`;
 }
 
-// Resume messages, sent with `claude --resume` (see the result contract in skills/prowl-work/SKILL.md).
+// Resume messages, sent with `claude --resume` (see the result contract in skills/prowl-build/SKILL.md).
 export const resume = {
   repos: (ready, unavailable) => [
     ...(ready.length ? ['repos ready:', ...ready.map(r => `${r.repo}: ${r.worktree}`)] : []),

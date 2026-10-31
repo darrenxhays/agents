@@ -39,8 +39,11 @@ export function installUpdate() {
 
 export const SEEN_PATH = path.join(HOME, 'seen.json'); // the version last launched, and the defaults the user's config files match
 export const hash = s => crypto.createHash('sha256').update(s).digest('hex');
+// Config files a release folded into another (axis-catalog.md is the catalog's name before 2.3): the user's copy
+// goes, or is kept as <name>.old when they had edited it.
 // Config files renamed by a release: the user's copy, edited or not, moves to the new name.
-const RENAMED = { 'axis-catalog.md': 'review-axis-catalog.md' };
+const RENAMED = { 'work.md': 'build.md' };
+const RETIRED = { 'review-axis-catalog.md': 'review.md', 'axis-catalog.md': 'review.md' };
 const read = file => { try { return fs.readFileSync(file, 'utf8'); } catch { return null; } };
 
 /** CHANGELOG.md's entries, [{ version, items }]: a `## x.y.z` heading, then `- ` items (an item may wrap onto more lines). */
@@ -64,7 +67,7 @@ function section(text, heading) {
 
 /**
  * Keeps the user's copies of the review config (userDir) in step with the shipped defaults (defaultDir): copies in any
- * that are missing, moves a pre-2.3 signature.md into output.md, moves renamed files to their new names, and replaces a copy the user never edited when its
+ * that are missing, moves a pre-2.3 signature.md into output.md, moves renamed files to their new names, retires files folded into another, and replaces a copy the user never edited when its
  * default changes. An edited copy is never touched. `synced` maps each file to the hash of the default it was last
  * synced with, and is updated in place. `announce` notes files new to the folder (not on a fresh install).
  * Returns what changed: [{ text, path }].
@@ -94,6 +97,15 @@ export function syncConfigFiles(defaultDir, userDir, synced, announce) {
     if (from in synced) synced[to] = synced[from];
     delete synced[from];
     notes.push({ text: `${from} is now ${to}`, path: now });
+  }
+  for (const [name, into] of Object.entries(RETIRED)) {
+    const mine = path.join(userDir, name);
+    const cur = read(mine);
+    if (cur !== null && hash(cur) !== synced[name]) {
+      fs.renameSync(mine, `${mine}.old`);
+      notes.push({ text: `${name} is no longer a config file: what reviewers look for is in ${into} now. Your edited copy is kept as ${name}.old; to keep your own checks, add them to What to look for in ${into}`, path: `${mine}.old` });
+    } else if (cur !== null) fs.rmSync(mine);
+    delete synced[name];
   }
   for (const name of fs.readdirSync(defaultDir).filter(f => f.endsWith('.md')).sort()) {
     const def = read(path.join(defaultDir, name));
@@ -129,7 +141,7 @@ export function updateNotes(appDir) {
   const version = localVersion(appDir);
   const synced = seen?.defaults || {};
   // Both skills' defaults share one folder, so their file names must differ.
-  const files = ['prowl-review', 'prowl-work'].flatMap(skill => syncConfigFiles(path.join(appDir, 'skills', skill, 'config'), CONFIG_DIR, synced, !fresh));
+  const files = ['prowl-review', 'prowl-build'].flatMap(skill => syncConfigFiles(path.join(appDir, 'skills', skill, 'config'), CONFIG_DIR, synced, !fresh));
   const added = fresh ? [] : newSettings();
   if (added.length) {
     saveConfig(loadConfig()); // writes the new settings with their defaults, so they are announced once
