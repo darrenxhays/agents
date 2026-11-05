@@ -18,6 +18,7 @@ export function createShell(app, sides, { log, reload, now = Date.now }) {
       log(s.name, 'error', e.message, 'poll');
     } finally {
       s.polling = false;
+      s.lastPoll = now(); // when the last poll finished, for the Boards card beside Hoot
       s.nextPoll = now() + app.cfg.pollSeconds * 1000;
     }
   }

@@ -1,7 +1,8 @@
-// Hoot, the reviewing owl. He lives in the left quarter of the scene strip, and what he does there follows his mood
-// and how much he has on: asleep with nothing to do, glancing about while he talks, flying over the boards while
-// they're checked, reading one review, juggling two to four, typing away at five or more, dancing when something is
-// done, and sitting under a rain cloud when something went wrong. render() returns `height` rows of [style, text].
+// Hoot, the reviewing owl. He keeps to one spot on his patch of ground at the left of the scene strip, and what he does
+// there follows his mood and how much he has on: asleep with nothing to do, glancing about while he talks, hovering
+// with flapping wings while the boards are checked, reading one review, juggling two to four, typing away at five or
+// more, bouncing when something is done, and sitting under a rain cloud when something went wrong. His speech box goes
+// beside him. render() returns `height` rows of [style, text].
 
 const C = {
   body: '\x1b[38;5;180m', eye: '\x1b[1;38;5;220m', beak: '\x1b[38;5;208m', grass: '\x1b[38;5;71m', dirt: '\x1b[38;5;95m',
@@ -48,75 +49,66 @@ export function wrap(text, w, max) {
 /** What he's up to: the mood, and for reviews how many: 1 reads, 2–4 juggle, 5 or more type. */
 const activity = (mood, busy) => (mood !== 'review' ? mood : busy >= 5 ? 'type' : busy >= 2 ? 'juggle' : 'read');
 
+/** His patch of ground: `patch` columns when given, else the left quarter of `width`, never narrower than him and his laptop. */
+const zone = (width, patch) => Math.max(W_OWL + LAPTOP, patch || Math.floor(width / 4));
+/** His spot: the middle of his patch, a little to the left when his laptop is out, so that it stays on the ground too. */
+const spot = (width, patch, now) => {
+  const home = Math.floor((zone(width, patch) - W_OWL) / 2);
+  return now === 'type' ? Math.min(home, zone(width, patch) - W_OWL - LAPTOP) : home;
+};
+
 export function createMascot(random = Math.random) {
-  let x = 2;
+  let x = 0;
   let y = 0; // rows above the ground
   let vy = 0;
   let frame = 0;
   let doing = '';
-  let idle = { act: 'still', left: 0, target: 2 }; // the idle bit he's doing, and for how many frames more
-  let dir = 1;
+  let idle = { act: 'still', left: 0 }; // the idle bit he's doing, and for how many frames more
   let particles = [];
   let say = '';
 
-  const zone = width => Math.max(W_OWL + LAPTOP, Math.floor(width / 4)); // his quarter of the strip
   const spawn = (px, py, ch, style, vx, pvy, g, life) => particles.push({ x: px, y: py, ch, style, vx, vy: pvy, g, life });
-  const walkTo = (target, speed) => {
-    if (Math.abs(target - x) <= speed) { x = target; return true; }
-    dir = Math.sign(target - x);
-    x += dir * speed;
-    return false;
-  };
 
-  function step(width, height, mood, busy, speech) {
+  function step(width, height, mood, busy, speech, patch) {
     frame++;
     const now = activity(mood, busy);
-    if (now !== doing) { doing = now; idle = { act: 'still', left: 0, target: x }; frame = 0; }
+    if (now !== doing) { doing = now; idle = { act: 'still', left: 0 }; frame = 0; }
     const headroom = Math.max(0, height - 1 - 4);
-    const maxX = Math.max(0, zone(width) - W_OWL - (now === 'type' ? LAPTOP : 0));
-    x = Math.min(x, maxX);
+    x = spot(width, patch, now);
     const top = () => height - 1 - 4 - Math.round(y);
     const fall = () => {
       if (y > 0 || vy > 0) { y = Math.min(headroom, y + vy); vy -= 0.3; if (y <= 0) { y = 0; vy = 0; } }
     };
 
     if (now === 'sleep') {
-      walkTo(1, 0.2);
       y = 0;
       if (frame % 18 === 0) spawn(x + W_OWL - 1, top(), 'z', C.z, 0.12, -0.08, 0, 30);
       if (frame % 60 === 30) spawn(x + 4, top() + 1, 'o', C.z, 0.05, -0.04, 0, 14); // a snore bubble
     } else if (now === 'idle') {
-      // Little bits of business, one after another: glancing about, a wink, a stretch, a stroll, a hop.
+      // Little bits of business, one after another, on the spot: glancing about, a wink, a stretch, a flap, a bounce.
       if (--idle.left <= 0) {
-        const act = ['still', 'look', 'look', 'wink', 'stretch', 'walk', 'walk', 'hop'][Math.floor(random() * 8)];
-        idle = { act, left: { still: 30, look: 40, wink: 8, stretch: 18, walk: 80, hop: 12 }[act], target: Math.round(random() * maxX) };
-        if (act === 'hop' && y === 0) vy = 1.1;
+        const act = ['still', 'still', 'look', 'look', 'wink', 'stretch', 'flap', 'bounce'][Math.floor(random() * 8)];
+        idle = { act, left: { still: 40, look: 40, wink: 8, stretch: 18, flap: 16, bounce: 10 }[act] };
+        if (act === 'bounce' && y === 0) vy = 0.8;
       }
-      if (idle.act === 'walk' && walkTo(idle.target, 0.35)) idle.left = Math.min(idle.left, 4);
       fall();
     } else if (now === 'poll') {
-      // Flying back and forth over his patch, bobbing, leaving a trail.
-      x += dir * 0.7;
-      if (x <= 0 || x >= maxX) { x = Math.max(0, Math.min(maxX, x)); dir = -dir; }
+      // Hovering over his spot with his wings going, peering about for new work.
       y = Math.max(0, Math.min(headroom, 1 + Math.sin(frame / 3)));
-      if (frame % 3 === 0) spawn(x + (dir > 0 ? -1 : W_OWL), top() + 1, '~', C.trail, 0, 0, 0, 5);
+      if (frame % 4 === 0) spawn(x + 1 + random() * 5, top() + 4, '~', C.trail, 0, 0.2, 0, 3); // the downdraft
       if (frame % 25 === 0) spawn(x + 3, top() - 1, '?', C.alert, 0, -0.1, 0, 10);
     } else if (now === 'read') {
-      // Pacing slowly with the review open, now and then struck by something.
-      if (frame % 120 === 0) idle.target = Math.round(random() * maxX);
-      walkTo(idle.target, 0.15);
+      // Reading the review open in his wings, now and then struck by something.
       y = 0;
       if (frame % 50 === 47) spawn(x + 5, top() - 1, '!', C.alert, 0.05, -0.12, 0, 10);
     } else if (now === 'juggle') {
-      walkTo(Math.round(maxX / 2), 0.3); // to the middle of his patch, for room either side
       y = 0;
     } else if (now === 'type') {
-      walkTo(Math.min(1, maxX), 0.4);
       y = 0;
       if (frame % 2 === 0) spawn(x + W_OWL + 3 + random() * 3, height - 2, random() < 0.5 ? '*' : '+', C.spark, (random() - 0.5) * 0.6, -0.35, 0.05, 5);
       if (frame % 14 === 0) spawn(x + (random() < 0.5 ? 0 : W_OWL - 1), top(), '°', C.sweat, random() < 0.5 ? -0.35 : 0.35, -0.3, 0.08, 12);
     } else if (now === 'cheer') {
-      if (y === 0 && random() < 0.35) vy = 1.4;
+      if (y === 0 && random() < 0.3) vy = 1.0; // bouncing on the spot
       fall();
       for (let i = 0; i < 2; i++) spawn(x + 3, top(), '*+.o'[Math.floor(random() * 4)], CONFETTI[Math.floor(random() * 5)], (random() - 0.5) * 1.6, -0.5 - random() * 0.3, 0.07, 25);
     } else if (now === 'error') {
@@ -156,23 +148,25 @@ export function createMascot(random = Math.random) {
     if (act === 'look') return owl({ eyes: left > 20 ? '<,<' : '>,>' });
     if (act === 'wink') return owl({ eyes: '-,o' });
     if (act === 'stretch') return owl({ eyes: '^,^', up: '\\/' });
-    if (act === 'walk') return owl({ feet: Math.floor(x * 2) % 2 ? '-"-"-' : '"-"-"' });
+    if (act === 'flap') return t % 4 < 2 ? owl({ up: '\\/' }) : owl({ side: '/\\' });
+    if (act === 'bounce') return owl({ eyes: '^,^', feet: '"-"-"' });
     return owl({ eyes: t % 40 < 2 ? '-,-' : 'o,o' }); // blinking now and then
   }
 
-  function draw(width, height, mood, busy) {
+  function draw(width, height, mood, busy, patch) {
     const now = activity(mood, busy);
+    const ground = Math.min(width, zone(width, patch));
     const grid = Array.from({ length: height }, () => Array.from({ length: width }, () => [' ', '']));
     const put = (r, c, ch, style) => { if (r >= 0 && r < height && c >= 0 && c < width) grid[r][c] = [ch, style]; };
     const text = (r, c, s, style) => [...s].forEach((ch, i) => { if (ch !== ' ') put(r, c + i, ch, style); });
-    for (let c = 0; c < width; c++) {
+    for (let c = 0; c < ground; c++) { // his patch only: the rest of the strip is for the speech box and the cards
       const ch = GROUND[c % GROUND.length];
       put(height - 1, c, ch, ch === '_' ? C.dirt : C.grass);
     }
     for (const p of particles) put(Math.round(p.y), Math.round(p.x), p.ch, p.style);
     const sprite = pose(now);
     const shake = now === 'error' && frame % 30 < 8 ? (frame % 2 ? 1 : -1) : 0;
-    const sx = Math.max(0, Math.round(x) + shake);
+    const sx = Math.max(0, spot(width, patch, now) + shake);
     const top = height - 1 - sprite.length - Math.round(y);
     let right = sx + W_OWL; // the first column clear of him and his things, for the speech box
 
@@ -204,7 +198,7 @@ export function createMascot(random = Math.random) {
     sprite.forEach((line, r) => [...line].forEach((ch, c) => { if (ch !== ' ') put(top + r, sx + c, ch, cellStyle(r, ch, now === 'read' ? 'review' : mood)); }));
 
     if (say) {
-      // A speech box to his right, wrapped to at most 3 lines.
+      // A speech box to his right, wrapped to at most 3 lines, in what's left of `width`.
       const room = Math.min(56, width - right - 1);
       const lines = wrap(say, room - 4, Math.min(3, height - 3));
       const inner = Math.max(0, ...lines.map(l => [...l].length));
@@ -223,12 +217,16 @@ export function createMascot(random = Math.random) {
   }
 
   return {
-    /** Advances the animation one frame (when `advance`) and draws it. `busy`: how many sessions are running. */
-    render(width, height, mood, speech, advance = true, busy = 0) {
-      if (advance) step(width, height, mood, busy, speech);
-      return draw(width, height, mood, busy);
+    /**
+     * Advances the animation one frame (when `advance`) and draws it, `width` columns wide. `busy`: how many sessions
+     * are running. `patch`: the columns of ground that are his, the left quarter when not given; his speech box uses
+     * the rest of `width`.
+     */
+    render(width, height, mood, speech, advance = true, busy = 0, patch = 0) {
+      if (advance) step(width, height, mood, busy, speech, patch);
+      return draw(width, height, mood, busy, patch);
     },
-    /** Where he is, for the self-test: his column, the activity, and the right edge of his quarter. */
-    at: width => ({ x, doing, zone: zone(width) }),
+    /** Where he is, for the self-test: his column, the activity, and the right edge of his patch. */
+    at: (width, patch) => ({ x, doing, zone: zone(width, patch) }),
   };
 }

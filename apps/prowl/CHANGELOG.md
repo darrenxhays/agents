@@ -2,6 +2,11 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.17.0
+- The bottom bars no longer leave keys out on a narrow window: each one stacks into a grid instead, in as few rows as fit, with the same number of buttons on each row and the columns lined up. Only on a window too short for that do the least-used navigation buttons come off, so the bars never take more than a third of the screen.
+- Hoot stays on his spot now. He flaps, hovers and bounces where he stands instead of moving across the screen, and his ground ends at the edge of his patch.
+- On a wide window, the rest of Hoot's strip shows two cards. Boards: each side on, off, paused or checking, with its next poll; the boards and tags watched; when the last poll finished. Needs you: the Builder's questions and stops, PRs waiting on a person's approval, round caps, and errors, or All clear. Click a line to go to it.
+
 ## 2.16.0
 - Everything you can click lights up under the pointer: buttons, tabs, links, and rows in the lists and in Config.
 - The bottom is now two bars of buttons. The darker top bar is for moving around (sides, views, quick review, poll, pause, on/off, / for every key, quit), and the bottom bar is the screen you're on, with its keys as keycaps in its side's colour. Click a button to press its key. Messages, questions and typing take the bars over while they last.

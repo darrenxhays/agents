@@ -36,7 +36,7 @@ const SPIN = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
 const SIDES = ['reviewer', 'builder'];
 const NAMES = { reviewer: 'Reviewer', builder: 'Builder' };
 const TABS = ['Running', 'History', 'Needs you', 'Config', 'Log'];
-const [RUNNING, HISTORY, NEEDS, CONFIG] = [0, 1, 2, 3];
+const [RUNNING, HISTORY, NEEDS, CONFIG, LOG] = [0, 1, 2, 3, 4];
 
 const LABEL_W = Math.max(...CONFIG_FIELDS.map(f => f.label?.length || 0)) + 2; // the Config view's label column
 
@@ -56,6 +56,22 @@ const clock = ms => { const s = Math.max(0, Math.ceil(ms / 1000)); return `${Mat
 const dur = ms => { const s = Math.floor(ms / 1000); const h = Math.floor(s / 3600); const m = Math.floor((s % 3600) / 60); return h ? `${h}h${pad2(m)}m` : `${m}m${pad2(s % 60)}s`; };
 const stamp = ms => { const d = new Date(ms); return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
 const time = ms => new Date(ms).toTimeString().slice(0, 8);
+const ago = ms => { const m = Math.floor((Date.now() - ms) / 60_000); return m < 1 ? 'now' : m < 60 ? `${m}m` : m < 1440 ? `${Math.floor(m / 60)}h` : `${Math.floor(m / 1440)}d`; };
+/** `segs` cut to exactly `n` columns: an ellipsis where they're cut short, spaces where they run out. */
+const clip = (segs, n) => {
+  const out = [];
+  let used = 0;
+  for (const [style, raw, ...rest] of segs) {
+    const text = clean(raw);
+    if (used >= n) break;
+    const part = text.length > n - used ? `${text.slice(0, Math.max(0, n - used - 1))}…` : text;
+    out.push([style, part, ...rest]);
+    used += part.length;
+  }
+  return [...out, ['', ' '.repeat(Math.max(0, n - used))]];
+};
+// Hoot's strip: his patch of ground, his speech box beside him, then cards on a wide enough screen.
+const STRIP = { talkMin: 34, talkMax: 44, cardMin: 30, cardMax: 60, border: '\x1b[38;5;239m' };
 const spin = () => SPIN[Math.floor(Date.now() / 100) % SPIN.length];
 const rule = W => [[ST.grey, '─'.repeat(W)]];
 const getPath = (o, k) => k.split('.').reduce((v, p) => v?.[p], o);
@@ -562,37 +578,133 @@ export function startTui(app, actions, io = {}) {
     const one = caps.length === 1 ? caps[0][3] : undefined;
     return [...caps, [t.text, ` ${label} `, undefined, one, one && t.labelHover], ['', ' ']];
   }
-  /** The buttons that fit in `room` columns, in order. */
-  const fit = (list, room, t) => list.reduce((out, b) => { const segs = button(b, t); return width(out) + width(segs) <= room ? [...out, ...segs] : out; }, []);
   const tag = text => [[`${ST.bold}${acc().fg}`, ' ▌'], [`${ST.bold}${acc().fg}`, `${text}  `]];
-  /** The bottom bar: what's on screen, named in the side's colour, then the buttons that fit beside it. */
-  const tagged = (text, list, W) => { const lead = tag(text); return [...lead, ...fit(list, W - width(lead), KEYBAR)]; };
 
   /**
-   * The two bars along the bottom: navigation on top, and the screen's own keys below. A message, a question or
-   * typing takes them over while it lasts.
+   * Buttons across `W` columns. On one row when they fit, `right` (the last ones) at its right end. Else stacked as a
+   * grid in as few rows as fit, as many buttons on each, with its columns lined up. `lead` starts the first row and the
+   * others line up under its first button.
    */
-  function footer(W) {
-    const nav = segs => bar(segs, NAV);
-    const keys = segs => bar(segs, KEYBAR);
+  function stack(list, t, W, lead = [['', ' ']], right = []) {
+    const btns = [...list, ...right].map(b => button(b, t));
+    const room = W - width(lead);
+    if (btns.reduce((n, b) => n + width(b), 0) < room) {
+      const left = [...lead, ...btns.slice(0, list.length).flat()];
+      const rt = btns.slice(list.length).flat();
+      return [rt.length ? spread(left, rt, W) : left];
+    }
+    for (let rows = 2; ; rows++) {
+      const cols = Math.ceil(btns.length / rows);
+      const colW = Array.from({ length: cols }, (_, c) => Math.max(0, ...btns.filter((b, i) => i % cols === c).map(width)));
+      if (cols === 1 || colW.reduce((a, b) => a + b, 0) <= room) {
+        return Array.from({ length: Math.ceil(btns.length / cols) }, (_, r) => [...(r ? [['', ' '.repeat(width(lead))]] : lead),
+          ...btns.slice(r * cols, (r + 1) * cols).flatMap((b, c) => [...b, ['', ' '.repeat(colW[c] - width(b))]])]);
+      }
+    }
+  }
+
+  /**
+   * The bars along the bottom: navigation on top, and the screen's own keys below, each stacking onto more rows when
+   * the window is too narrow for one. A message, a question or typing takes them over while it lasts.
+   */
+  function footer(W, H) {
     const say = (style, text) => [[style, ` ${text}`]];
-    if (ui.notes) return [nav(say(NAV.text, 'Update Notes: ↑↓ scrolls them, and any other key or a click closes them.')), keys(tagged('Update Notes', [['↑ ↓', 'scroll'], ['esc', 'close']], W))];
-    if (ui.confirm) {
+    const keys = (name, list) => stack(list, KEYBAR, W, tag(name));
+    let nav;
+    let own;
+    if (ui.notes) [nav, own] = [[say(NAV.text, 'Update Notes: ↑↓ scrolls them, and any other key or a click closes them.')], keys('Update Notes', [['↑ ↓', 'scroll'], ['esc', 'close']])];
+    else if (ui.confirm) {
       const answers = ui.confirm.key ? [[ui.confirm.key, 'quit'], ['n', 'stay']] : [['y', 'yes'], ['n', 'no']];
-      return [nav(say(`${ST.bold}${ST.yellow}`, ui.confirm.text)), keys(tagged('Confirm', answers, W))];
-    }
-    if (ui.edit) {
+      [nav, own] = [[say(`${ST.bold}${ST.yellow}`, ui.confirm.text)], keys('Confirm', answers)];
+    } else if (ui.edit) {
       const about = ui.edit.prs ? 'Quick review: paste PR links or owner/repo#12, then enter.' : ui.edit.secret ? 'Paste the token, then enter.' : 'Type, then enter to save.';
-      return [nav(say(NAV.text, about)), keys(tagged('Typing', [['enter', ui.edit.prs ? 'review' : 'save'], ['esc', 'cancel'], ['← →', 'move']], W))];
+      [nav, own] = [[say(NAV.text, about)], keys('Typing', [['enter', ui.edit.prs ? 'review' : 'save'], ['esc', 'cancel'], ['← →', 'move']])];
+    } else if (ui.keys) [nav, own] = [[say(NAV.text, 'All keys: any other key closes this list and does its job.')], keys('Keys', [['↑ ↓', 'scroll'], ['/', 'close'], ['esc', 'close']])];
+    else {
+      const list = viewKeys();
+      own = list.length ? keys(TABS[view()], list) : [[...tag(TABS[view()]), [fg(245), EMPTY[view()] || 'no keys here']]];
+      // Every button that fits in a third of the screen's rows; on a small one, the least used come off first.
+      let moves = [...(SIDES.filter(visible).length > 1 ? [['tab', 'side']] : []), ['← →', 'views'], ...(ui.side === 'reviewer' ? [NEW_REVIEW] : []),
+        ['r', 'poll'], ['p', 'pause'], ['e', 'on/off'], ['↑ ↓', 'select']];
+      for (;;) {
+        nav = stack(moves, NAV, W, [['', ' ']], [['/', 'all keys'], ['q', 'quit']]);
+        if (nav.length + own.length <= Math.max(2, Math.floor(H / 3)) || !moves.length) break;
+        moves = moves.slice(0, -1);
+      }
     }
-    const flashing = Date.now() < ui.flashUntil;
-    if (ui.keys) return [nav(flashing ? say(ST.green, ui.flash) : say(NAV.text, 'All keys: any other key closes this list and does its job.')), keys(tagged('Keys', [['↑ ↓', 'scroll'], ['/', 'close'], ['esc', 'close']], W))];
-    const right = fit([['/', 'all keys'], ['q', 'quit']], W, NAV);
-    const left = fit([...(SIDES.filter(visible).length > 1 ? [['tab', 'side']] : []), ['← →', 'views'], ...(ui.side === 'reviewer' ? [NEW_REVIEW] : []),
-      ['r', 'poll'], ['p', 'pause'], ['e', 'on/off'], ['↑ ↓', 'select']], W - width(right) - 2, NAV);
-    const own = viewKeys();
-    return [nav(flashing ? say(`${ST.bold}${ST.green}`, ui.flash) : spread([['', ' '], ...left], right, W)),
-      keys(own.length ? tagged(TABS[view()], own, W) : [...tag(TABS[view()]), [fg(245), EMPTY[view()] || 'no keys here']])];
+    if (Date.now() < ui.flashUntil && !ui.notes && !ui.confirm && !ui.edit) nav = [say(`${ST.bold}${ST.green}`, ui.flash), ...nav.slice(1).map(() => [])];
+    ui.bars = [nav.length, own.length];
+    return [...nav.map(r => bar(r, NAV)), ...own.map(r => bar(r, KEYBAR))];
+  }
+
+  // ---- Beside Hoot, on a wide screen: the boards at a glance, and what needs you ----
+  /** A card: a rounded box `w` wide and 7 rows tall, its title in the top edge, and up to 5 lines of segments. */
+  function card(w, title, titleStyle, lines) {
+    const shown = lines.length > 5 ? [...lines.slice(0, 4), [[ST.grey, `+${lines.length - 4} more`]]] : lines;
+    return [
+      [[STRIP.border, '╭─'], [titleStyle, ` ${title} `], [STRIP.border, `${'─'.repeat(Math.max(0, w - 5 - clean(title).length))}╮`]],
+      ...Array.from({ length: 5 }, (_, i) => [[STRIP.border, '│ '], ...clip(shown[i] || [], w - 4), [STRIP.border, ' │']]),
+      [[STRIP.border, `╰${'─'.repeat(w - 2)}╯`]],
+    ];
+  }
+  /** A card's line that does `go` when clicked, lighting up under the pointer like any button. */
+  const goes = (segs, go) => segs.map(([style, text]) => [style, text, undefined, go]);
+  const show = (name, v, at) => () => {
+    if (!visible(name)) return flash(`The ${NAMES[name]} is off: turn it on in Config (4).`);
+    ui.side = name;
+    ui.view[name] = v;
+    if (at != null) ui.sel[name][v] = at;
+    return undefined;
+  };
+
+  /** Boards: each side on, off, paused or checking, and its next poll; the boards and tags watched; the last poll. */
+  function boardsCard(w) {
+    const state = name => {
+      const s = sides[name];
+      if (!isOn(name)) return [[ST.grey, 'off']];
+      if (s.polling) return [[ST.yellow, `${spin()} checking now`]];
+      if (s.paused) return [[ST.grey, '‖ paused']];
+      return [[s.lastError ? ST.red : ST.green, s.lastError ? '● error' : 'on'], [ST.grey, ` · next ${clock(s.nextPoll - Date.now())}`]];
+    };
+    const last = Math.max(0, ...SIDES.map(n => sides[n].lastPoll || 0));
+    const label = text => [ST.grey, text.padEnd(9)];
+    return card(w, 'Boards', `${ST.bold}${fg(117)}`, [
+      ...SIDES.map(name => goes([[`${ST.bold}${acc(name).fg}`, NAMES[name].padEnd(9)], ...state(name)], show(name, RUNNING))),
+      [label('Boards'), ['', app.boards().map(b => app.tracker().boardLabel(b)).join(', ') || 'none yet: Config (4)']],
+      [label(JIRA(app.cfg) ? 'Labels' : 'Tags'), ['', [app.cfg.tags.trigger, ...(isOn('builder') ? [app.cfg.builder.tags.start] : [])].join(' · ')]],
+      [label('Polled'), ['', last ? time(last) : 'not yet'], ...(app.dryRun() ? [[ST.yellow, ' · dry run']] : [])],
+    ]);
+  }
+
+  /** Needs you: the Builder's questions and stops, PRs waiting on a person's approval, round caps, and errors. */
+  function needsCard(w) {
+    const flag = (who, what, go, extra = []) => goes([[ST.yellow, '⚑ '], [ST.bold, `${who} `], ['', what], ...extra], go);
+    const items = [
+      ...needs('builder').map((n, i) => flag(n.ticket, n.kind, show('builder', NEEDS, i), [[ST.grey, ` · ${ago(n.createdAt)}`]])),
+      ...history('reviewer').flatMap((r, i) => (r.pr || !waiting(r).length ? [] : [flag(r.ticket, `${plural(waiting(r).length, 'PR')} to approve`, show('reviewer', HISTORY, i))])),
+      ...Object.keys(reviewer.state.capped || {}).map(t => flag(t, 'round cap reached', show('reviewer', HISTORY, history('reviewer').findIndex(r => r.ticket === t)))),
+      ...SIDES.filter(n => sides[n].lastError).map(n => goes([[ST.red, '● '], ['', `${NAMES[n]}: ${sides[n].lastError}`]], show(n, LOG))),
+    ];
+    return items.length ? card(w, `Needs you · ${items.length}`, `${ST.bold}${ST.yellow}`, items)
+      : card(w, 'Needs you', `${ST.bold}${ST.green}`, [[[ST.green, '✓ All clear'], [ST.grey, ': nothing waiting on you']]]);
+  }
+
+  /**
+   * Hoot's strip, `W` wide: his patch (a quarter of it), his speech box, and as many cards as fit to the right, each
+   * 30 to 60 columns, flush right.
+   */
+  function strip(W, advance, said) {
+    const cards = [boardsCard, needsCard];
+    const patch = Math.max(15, Math.floor(W / 4));
+    let n = cards.length;
+    while (n && W - patch - n * (STRIP.cardMin + 1) < STRIP.talkMin) n--;
+    const talk = n ? Math.min(STRIP.talkMax, W - patch - n * (STRIP.cardMin + 1)) : W - patch;
+    const hoot = owl.render(patch + talk, 7, mood(said), said?.text || '', advance, allLive(), patch);
+    if (!n) return hoot;
+    const cw = Math.min(STRIP.cardMax, Math.floor((W - patch - talk) / n) - 1);
+    const shown = cards.slice(0, n).map(c => c(cw));
+    const gap = ['', ' '.repeat(W - patch - talk - n * (cw + 1))];
+    return hoot.map((r, i) => [...r, gap, ...shown.flatMap(c => [['', ' '], ...c[i]])]);
   }
 
   /** The full list of keys (/): this view's first, then the side's other views, then the rest, in columns when there's room. */
@@ -628,12 +740,13 @@ export function startTui(app, actions, io = {}) {
     if (!visible(ui.side)) ui.side = 'reviewer'; // the Builder was switched off with nothing left to show
     const out = [titleBar(W)];
     const said = app.speech(); // read with Hoot off too, so what he'd have said doesn't pile up
-    if (H >= 27 && app.cfg.hoot !== false && !ui.keys) out.push(...owl.render(W, 7, mood(said), said?.text || '', advance, allLive()));
+    if (H >= 27 && app.cfg.hoot !== false && !ui.keys) out.push(...strip(W, advance, said));
     out.push(sideBar(W), tabBar(), rule(W));
-    const bodyH = H - out.length - 2;
+    const bars = footer(W, H);
+    const bodyH = H - out.length - bars.length;
     const body = (ui.notes ? notesView : ui.keys ? keysView : [runningView, historyView, needsView, configView, logView][view()])(W, bodyH).slice(0, bodyH);
     while (body.length < bodyH) body.push([]);
-    out.push(...body, ...footer(W));
+    out.push(...body, ...bars);
     ui.frame = out;
     ui.text = out.map(r => r.map(seg => clean(seg[1])).join('').slice(0, W));
     if (!ui.drag?.moved) return ui.hover ? out.map((r, y) => (y === ui.hover.y ? hovered(r, ui.hover.x) : r)) : out;

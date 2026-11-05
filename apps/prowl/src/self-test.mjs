@@ -297,6 +297,16 @@ for (const [mood, busy, doing] of [['sleep', 0, 'sleep'], ['idle', 0, 'idle'], [
   }
   assert.equal(hoot.at(120).doing, doing, `${mood} with ${busy} running: ${doing}`);
 }
+// He stays on his spot whatever he's doing, and his ground ends where his patch does.
+for (const [mood, busy] of [['idle', 0], ['poll', 0], ['review', 1], ['review', 3], ['cheer', 0], ['sleep', 0]]) {
+  const hoot = createMascot();
+  const spots = new Set();
+  let rows;
+  for (let i = 0; i < 200; i++) { rows = hoot.render(100, 7, mood, '', true, busy, 30); spots.add(hoot.at(100, 30).x); }
+  assert.equal(spots.size, 1, `${mood} ${busy}: stays put`);
+  const ground = rows[6].map(([, t]) => t).join('');
+  assert.ok(ground.slice(0, 30).trim().length === 30 && !ground.slice(30).trim(), `${mood}: ground across his patch only`);
+}
 
 // The session fence (kind 'work'): pushes, GitHub and tracker writes, MCP tools outside the allow list and writes
 // outside the session's folders are denied; commits, reads and the temp folder are not.
@@ -899,6 +909,7 @@ assert.ok(frame.includes('READY TO MERGE') && frame.includes('AB#123'), "the Bui
 assert.ok(/Builder · off · ⚑ 1/.test(frame), 'the Needs-you count on its tab');
 tui.key('4');
 const builderConfig = fits(tui.frame(80, 200), 'Config from the Builder');
+const builderBars = [...tui.ui.bars];
 const order = ['PROWL', 'BOARDS AND REPOS', 'TAGS', 'ALL SESSIONS', 'REVIEWER · FILES', 'REVIEWER · SESSIONS', 'REVIEWER · VERDICTS AND ROUNDS', 'BUILDER · FILES', 'BUILDER · SESSIONS', 'BUILDER · REPOS AND BRANCHES', 'BUILDER · FOLLOW-UP'];
 const headings = builderConfig.split('\n').map(l => /^ ▍ (.+?) ─*$/.exec(l.trimEnd())?.[1]).map(h => order.indexOf(h)).filter(i => i >= 0);
 assert.deepEqual(headings, order.map((h, i) => i), 'every setting of the app, in its sections');
@@ -907,8 +918,9 @@ const tagRows = ['Build start tag', 'Build in-progress tag', 'Review trigger tag
 assert.ok(tagRows.every((t, i) => !i || builderConfig.indexOf(tagRows[i - 1]) < builderConfig.indexOf(t)) && !/Done tag|Reviewing tag/.test(builderConfig), 'one set of tags, in the order a ticket meets them');
 tui.key('tab');
 tui.key('4');
-const body = f => f.split('\n').slice(0, -2).join('\n').slice(f.indexOf('Saved to')); // without the two bars, which follow the side
-assert.equal(body(fits(tui.frame(80, 200), 'Config from the Reviewer')), body(builderConfig), 'the same Config on both sides');
+const body = (f, [nav, own] = tui.ui.bars) => { const lines = f.split('\n'); return lines.slice(0, lines.length - nav - own).join('\n').slice(f.indexOf('Saved to')).trimEnd(); }; // without the bars, which follow the side
+const builderBody = body(builderConfig, builderBars);
+assert.equal(body(fits(tui.frame(80, 200), 'Config from the Reviewer')), builderBody, 'the same Config on both sides');
 builderNeeds = [];
 frame = fits(tui.frame(80, 30), 'Builder off, nothing waiting');
 assert.ok(/Reviewer · on/.test(frame) && !/Builder · /.test(frame) && !frame.includes('tab side'), 'the Builder has no tab while it is off');
@@ -951,8 +963,9 @@ assert.ok(fits(tui.frame(80, 30), 'n, sent').includes('Reviewing 2 PRs together 
 // ---- The two bars, the full list of keys (/), the mouse and hover, and Hoot's switch ----
 // Text with each run of spaces squashed, since keycaps are padded: "[ / ][ all keys ]" reads "/ all keys".
 const flat = l => l.replace(/\s+/g, ' ').trim();
-const navLine = f => flat(f.split('\n').at(-2));
-const keyLine = f => flat(f.split('\n').at(-1));
+// The bars' text, each run as one line: the navigation rows, then the screen's own.
+const navLine = f => flat(f.split('\n').slice(-tui.ui.bars[0] - tui.ui.bars[1], -tui.ui.bars[1]).join(' '));
+const keyLine = f => flat(f.split('\n').slice(-tui.ui.bars[1]).join(' '));
 tui.ui.flashUntil = 0;
 tui.key('1');
 let frameText = fits(tui.frame(80, 30), 'bars, Reviewer Running');
@@ -999,9 +1012,9 @@ assert.equal(tui.ui.keys, null, 'and on its keycap: esc closes the list');
 const raw = () => tui.frame(80, 30, true);
 lines = tui.frame(80, 30);
 tui.hover(...at('all keys'));
-let lit = raw().at(-2);
+let lit = raw().find(l => l.includes('all keys'));
 assert.ok(lit.includes('48;5;252m') && lit.includes('48;5;240m'), 'a hovered button: its keycap and its label');
-assert.ok(!raw().at(-1).includes('48;5;252m'), 'and nothing else');
+assert.ok(raw().filter(l => l.includes('48;5;252m')).length === 1, 'and nothing else');
 tui.hover(...at(' 3 Needs you'));
 assert.ok(raw().find(l => l.includes('Needs you')).includes('\x1b[1m\x1b[38;5;222m\x1b[48;5;237m'), 'a hovered tab, not selected: a ghost of its side\'s colour');
 assert.ok(raw().find(l => l.includes('Needs you')).includes('48;5;222m 2 History'), "the selected view: the lighter shade of the Reviewer's amber");
@@ -1034,6 +1047,39 @@ assert.ok(!copied[0].split('\n').some(l => l !== l.trimEnd()), 'without trailing
 assert.ok(tui3.frame(80, 30).join('\n').includes('Copied'), 'it says so');
 tui3.drag(5, 0, 5, 0);
 assert.equal(copied.length, 1, 'a press and release in place is a click, not a copy');
+// The bars stack, as a grid, when the window is too narrow for one row each; nothing is left out while there's room.
+const navButtons = ['tab side', '← → views', 'n quick review', 'r poll', 'p pause', 'e on/off', '↑ ↓ select', '/ all keys', 'q quit'];
+tui3.key('R');
+tui3.key('1');
+tui3.ui.flashUntil = 0; // the copy's message from above
+tuiApp.override = { reviewer: true, builder: true };
+for (const [W, rowsWanted] of [[160, 1], [80, 2], [50, 3], [44, 5]]) {
+  const f = tui3.frame(W, 40);
+  assert.ok(f.every(l => l.length <= W), `${W}: fits`);
+  assert.equal(tui3.ui.bars[0], rowsWanted, `${W} columns: the navigation bar in ${rowsWanted} rows`);
+  const nav = flat(f.slice(-tui3.ui.bars[0] - tui3.ui.bars[1], -tui3.ui.bars[1]).join(' '));
+  assert.ok(navButtons.every(b => nav.includes(b)), `${W}: every button: ${nav}`);
+  if (rowsWanted > 1) {
+    // Where each button starts: its first keycap (the navigation bar's keycaps sit on colour 239).
+    const starts = row => { let [c, prev] = [0, false]; return row.flatMap(([st, t]) => { const cap = st.includes('48;5;239m'); const at = cap && !prev ? [c] : []; [c, prev] = [c + t.length, cap]; return at; }); };
+    const [first, second] = tui3.ui.frame.slice(-tui3.ui.bars[0] - tui3.ui.bars[1]).map(starts);
+    assert.deepEqual(second, first.slice(0, second.length), `${W}: its columns line up`);
+  }
+}
+tui3.frame(40, 14);
+assert.ok(tui3.ui.bars[0] + tui3.ui.bars[1] <= 4, 'a small window: the least used buttons come off, so the bars take a third of it at most');
+// Beside Hoot on a wide screen: the Boards card, then Needs you, each clickable.
+assert.ok(!tui3.frame(80, 30).join('\n').includes('╭─ Boards'), '80 columns: no cards');
+let wide = tui3.frame(110, 30).join('\n');
+assert.ok(wide.includes('╭─ Boards') && !wide.includes('Needs you ·') && /Reviewer\s+on · next/.test(wide), '110: the Boards card');
+lines = tui3.frame(150, 30);
+wide = lines.join('\n');
+assert.ok(wide.includes('╭─ Boards') && wide.includes('╭─ Needs you · 1') && wide.includes('⚑ AB#124 question') && lines.every(l => l.length <= 150), '150: both, Needs you with its count');
+tui3.mouse(...at('AB#124 question'));
+assert.deepEqual([tui3.ui.side, tui3.ui.view.builder], ['builder', 2], 'a click on what needs you opens it');
+tui3.key('R');
+builderNeeds = [];
+assert.ok(tui3.frame(150, 30).join('\n').includes('✓ All clear'), 'nothing waiting: all clear');
 // Hoot's switch: off, no owl and the views get his rows.
 const ground = "_,_._'__._,_";
 assert.ok(tui3.frame(80, 30).join('\n').includes(ground), 'Hoot, on');
