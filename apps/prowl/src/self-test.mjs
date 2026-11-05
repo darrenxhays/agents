@@ -949,7 +949,7 @@ builderNeeds = [{ id: 'n1', ticket: 'AB#124', kind: 'question', question: 'Keep 
 tui.key('B');
 tui.key('2');
 bar = lastLine(fits(tui.frame(80, 30), 'keys bar, Builder History'));
-assert.ok(['enter brief', 'o open PRs', 'c Claude session', 'w follow'].every(k => bar.includes(k)) && !bar.includes('quick review'), "the bar follows the view in sight: the Builder History's keys");
+assert.ok(['enter brief', 'o open PRs', 'a ticket', 'w follow'].every(k => bar.includes(k)) && !bar.includes('quick review'), "the bar follows the view in sight: the Builder History's keys");
 tui.key('/');
 let keysList = fits(tui.frame(80, 60), 'all keys');
 assert.ok(keysList.includes('Builder · History · this view') && keysList.includes('Builder · Needs you') && keysList.includes('Moving around') && keysList.includes('Mouse')
@@ -967,7 +967,6 @@ const at = (text, from = 0) => { const y = lines.findIndex((l, i) => i >= from &
 tui.mouse(...at(' 2 History'));
 lines = tui.frame(80, 30);
 assert.ok(lines.join('\n').includes('READY TO MERGE'), "a click on a view's tab opens it");
-const opened = [];
 tui.ui.sel.builder[1] = 5;
 tui.mouse(...at('AB#123'));
 assert.equal(tui.ui.sel.builder[1], 0, 'a click on a row selects it');
@@ -999,50 +998,11 @@ assert.ok(!copied[0].split('\n').some(l => l !== l.trimEnd()), 'without trailing
 assert.ok(tui3.frame(80, 30).join('\n').includes('Copied'), 'it says so');
 tui3.drag(5, 0, 5, 0);
 assert.equal(copied.length, 1, 'a press and release in place is a click, not a copy');
-// c: the selected item's session, forked into a new tab; with no session yet, it says so.
-const sessDir = fs.mkdtempSync(path.join(os.tmpdir(), 'prowl-test-'));
-const sessLog = path.join(sessDir, 'work.ndjson');
-fs.writeFileSync(sessLog, `warning: something on stderr\n${JSON.stringify({ type: 'system', subtype: 'init', cwd: '/projects', session_id: '0b6c4b55-2f4e-4c2e-9d55-8f7d7c0a1e21' })}\n`);
-const { sessionOf } = await import('./sessions.mjs');
-assert.deepEqual(sessionOf(sessLog), { id: '0b6c4b55-2f4e-4c2e-9d55-8f7d7c0a1e21', cwd: '/projects' }, 'the session id and folder, from the log\'s init event');
-assert.equal(sessionOf(path.join(sessDir, 'none.ndjson')), null);
-const tabs = [];
-const tui2 = startTui(tuiApp, {
-  sides: { ...tuiSides, builder: { ...tuiSides.builder, history: () => [{ ...tuiSides.builder.history()[0], logPath: sessLog }, { uid: 'u2', key: 'AB#9', title: 'Not started', status: 'ended', updatedAt: 1, briefDir: '/b' }] } },
-  pollNow() {}, togglePause() {}, saveConfig() {}, saveToken: () => '', quit() {}, toggleSide: () => true, log: (...a) => opened.push(a),
-}, { headless: true, env: {}, openInTerminal: async (cwd, argv) => { tabs.push([cwd, argv]); return tabs.length === 1 || 'osascript is not allowed to send keystrokes'; } });
-tuiApp.cfg.builder.enabled = true;
-tui2.key('B');
-tui2.key('2');
-tui2.key('c');
-await new Promise(r => setTimeout(r, 0));
-assert.deepEqual(tabs, [['/projects', ['claude', '--resume', '0b6c4b55-2f4e-4c2e-9d55-8f7d7c0a1e21', '--fork-session']]], 'c resumes a fork of the session, in its own folder, in a new tab');
-assert.ok(tui2.frame(80, 30).join('\n').includes("Opened AB#123's Claude session"));
-tui2.key('c');
-await new Promise(r => setTimeout(r, 0));
-assert.ok(opened.some(([, level, msg]) => level === 'warn' && msg.includes('claude --resume 0b6c4b55') && msg.includes('Accessibility access')) && tui2.frame(80, 30).join('\n').includes('the Log (5) has the command'), "where no tab opens, the Log has why, what to allow, and the command");
-tui2.key('down');
-tui2.key('c');
-assert.ok(tui2.frame(80, 30).join('\n').includes('AB#9 has no Claude session to open yet') && tabs.length === 2, 'no session yet: it says so');
-// In Cursor's or VS Code's terminal, which no other program can open a tab in: New Terminal pressed, the command typed.
-const { terminalCommand } = await import('./proc.mjs');
-const sid = '0b6c4b55-2f4e-4c2e-9d55-8f7d7c0a1e21';
-const resume = ['claude', '--resume', sid, '--fork-session'];
-const script = env => terminalCommand("/Users/me/my projects", resume, env, 'darwin')[1].filter((a, i) => i % 2).join('\n');
-const cursor = script({ TERM_PROGRAM: 'vscode', __CFBundleIdentifier: 'com.todesktop.230313mzl4w4u92' });
-assert.ok(cursor.startsWith('tell application id "com.todesktop.230313mzl4w4u92" to activate') && cursor.includes('key code 50 using {control down, shift down}')
-  && cursor.includes(`keystroke "cd '/Users/me/my projects' && claude --resume ${sid} --fork-session"`) && cursor.includes('key code 36'), `Cursor: activated, New Terminal, the command typed and run:\n${cursor}`);
-assert.ok(script({ TERM_PROGRAM: 'vscode', CURSOR_TRACE_ID: 'x' }).startsWith('tell application "Cursor" to activate'), 'Cursor, by name without its bundle id');
-assert.ok(script({ TERM_PROGRAM: 'vscode', __CFBundleIdentifier: 'com.microsoft.VSCode' }).startsWith('tell application id "com.microsoft.VSCode"'), 'VS Code');
-assert.ok(script({ TERM_PROGRAM: 'iTerm.app' }).includes('create tab with default profile'), 'iTerm2, as before');
-assert.equal(terminalCommand('/p', resume, { TERM_PROGRAM: 'vscode' }, 'linux'), null, 'off macOS, an editor terminal: the Log has the command');
-assert.deepEqual(terminalCommand('/p', resume, { TMUX: '1', TERM_PROGRAM: 'vscode' }, 'darwin'), ['tmux', ['new-window', '-c', '/p', `cd /p && claude --resume ${sid} --fork-session`]], 'tmux first');
-fs.rmSync(sessDir, { recursive: true });
 // Hoot's switch: off, no owl and the views get his rows.
 const ground = "_,_._'__._,_";
-assert.ok(tui2.frame(80, 30).join('\n').includes(ground), 'Hoot, on');
+assert.ok(tui3.frame(80, 30).join('\n').includes(ground), 'Hoot, on');
 tuiApp.cfg.hoot = false;
-assert.ok(!tui2.frame(80, 30).join('\n').includes(ground), 'Hoot, off');
+assert.ok(!tui3.frame(80, 30).join('\n').includes(ground), 'Hoot, off');
 tuiApp.cfg.hoot = true;
 
 // ---- Fix my PRs removed: the first-launch migration ----

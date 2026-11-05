@@ -3,9 +3,8 @@ import { CONFIG_PATH } from './config.mjs';
 import { CONFIG_FIELDS, JIRA } from './fields.mjs';
 import { parsePrRefs } from './github.mjs';
 import { createMascot, wrap } from './mascot.mjs';
-import { copyText, openExternal, openInTerminal } from './proc.mjs';
+import { copyText, openExternal } from './proc.mjs';
 import { awaitingHuman, isOwn } from './reviewer/reviews.mjs';
-import { sessionOf } from './sessions.mjs';
 
 const ST = {
   reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m', title: '\x1b[1;38;5;220m', yellow: '\x1b[38;5;220m',
@@ -113,8 +112,8 @@ function* keys(data) {
  * Full-screen terminal UI: a tab for each side (Reviewer and Builder), each with Running, History, Needs you, Config
  * and Log. `app` is read every frame. `actions` = { sides: { reviewer, builder }, pollNow(side), togglePause(side),
  * toggleSide(side), stop(side, item), answer(item, text), skip(item), handBack(item), follow(record), stopFollowing(record),
- * reviewPrs(refs) (a quick review), saveConfig, saveToken, log(side, level, msg), quit }. `io` = { out, stdin, headless, openInTerminal }
- * (headless: no raw mode, mouse or timers, for the self-test), copy(text), and env for c. Returns { restore, key(k), mouse(x, y, button), drag(x0, y0, x1, y1), frame() }.
+ * reviewPrs(refs) (a quick review), saveConfig, saveToken, quit }. `io` = { out, stdin, headless }
+ * (headless: no raw mode, mouse or timers, for the self-test), copy(text). Returns { restore, key(k), mouse(x, y, button), drag(x0, y0, x1, y1), frame() }.
  */
 export function startTui(app, actions, io = {}) {
   const out = io.out || process.stdout;
@@ -482,20 +481,19 @@ export function startTui(app, actions, io = {}) {
     .map(l => [[ST.grey, `${time(l.t)} `], [LEVEL[l.level], `${l.level.padEnd(5)} `], ['', l.msg]]);
 
   // Keys, as [key, short label (the bar), what it does (the full list)]. Each view's, most useful first, then the rest.
-  const SESSION = ['c', 'Claude session', "Open its Claude Code session in a new terminal tab, as a fork: nothing you type there reaches Prowl's"];
   const CONFIG_KEYS = [['enter', 'edit', 'Edit the setting, flip its switch, or open its file'], ['a', 'add board', 'Add a board to watch'], ['d', 'delete board', 'Delete the selected board']];
   const VIEW_KEYS = {
     reviewer: [
-      [['s', 'stop', "Stop the selected review; its in-progress tag comes off, so re-tag the ticket to run it again"], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser'], SESSION],
-      [['enter', 'report', "Open the review's report"], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser'], SESSION],
+      [['s', 'stop', "Stop the selected review; its in-progress tag comes off, so re-tag the ticket to run it again"], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser']],
+      [['enter', 'report', "Open the review's report"], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser']],
       [], CONFIG_KEYS, [],
     ],
     builder: [
-      [['enter', 'brief', "Open the ticket's brief folder"], ['s', 'stop', 'Stop the selected build before its next push, PR, tag or turn'], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser'], SESSION],
-      [['enter', 'brief', "Open the ticket's brief folder"], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser'], SESSION,
+      [['enter', 'brief', "Open the ticket's brief folder"], ['s', 'stop', 'Stop the selected build before its next push, PR, tag or turn'], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser']],
+      [['enter', 'brief', "Open the ticket's brief folder"], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser'],
         ['w', 'follow', "Follow the ticket's PRs through review"], ['t', 'unfollow', "Stop following the ticket's PRs"]],
       [['enter', 'answer', 'Answer the question, approve the plan (empty) or send it back with a note, or retry'], ['s', 'skip', 'Skip the question (the session uses its default), or end the work'],
-        ['t', 'hand back', 'Hand the ticket back with its start tag; Prowl leaves it until someone re-tags it'], ['o', 'open', 'Open the PR or the ticket in the browser'], SESSION],
+        ['t', 'hand back', 'Hand the ticket back with its start tag; Prowl leaves it until someone re-tags it'], ['o', 'open', 'Open the PR or the ticket in the browser']],
       CONFIG_KEYS, [],
     ],
   };
@@ -570,22 +568,6 @@ export function startTui(app, actions, io = {}) {
     const rows = [[[`${ST.bold}${acc().fg}`, ' Keys'], [ST.grey, ` · ${NAMES[ui.side]}, ${TABS[view()]}`]], rule(W), ...lines];
     ui.keys.scroll = Math.max(0, Math.min(ui.keys.scroll, rows.length - H));
     return rows.slice(ui.keys.scroll).map(r => onClick(r, () => { ui.keys = null; }));
-  }
-
-  /** c: an item's Claude Code session, resumed as a fork in a new terminal tab, so what you type there never reaches Prowl's. */
-  function openSession(what, logPath) {
-    const s = logPath && sessionOf(logPath);
-    if (!s) return flash(`${what} has no Claude session to open yet.`);
-    const cwd = s.cwd || app.cfg.workDir;
-    const argv = ['claude', '--resume', s.id, '--fork-session'];
-    flash(`Opening ${what}'s Claude session in a new tab…`);
-    (io.openInTerminal || openInTerminal)(cwd, argv, io.env).then(res => {
-      if (res === true) return flash(`Opened ${what}'s Claude session in a new tab.`);
-      const access = /not allowed|assistive|1002|-1743/i.test(res) ? ' Give your terminal app Accessibility access (System Settings > Privacy & Security > Accessibility) so Prowl can open the tab.' : '';
-      actions.log?.(ui.side, 'warn', `${what}: couldn't open a terminal tab here (${res}).${access} To open its Claude session, run: cd "${cwd}" && ${argv.join(' ')}`);
-      return flash(`Couldn't open a terminal tab here: the Log (5) has the command to run.`);
-    });
-    return undefined;
   }
 
   function rows(advance, W, H) {
@@ -706,9 +688,7 @@ export function startTui(app, actions, io = {}) {
   function needsKey(k) {
     const it = needs(ui.side)[sel()[NEEDS]];
     if (!it) return undefined;
-    const record = builder.history().find(w => w.uid === it.recordId);
-    if (k === 'o') openExternal(it.pr || record?.url || '');
-    else if (k === 'c') openSession(it.ticket, record?.logPath);
+    if (k === 'o') openExternal(it.pr || builder.history().find(w => w.uid === it.recordId)?.url || '');
     else if (k === 'enter') {
       startEdit('', v => {
         const n = Number(v);
@@ -743,7 +723,6 @@ export function startTui(app, actions, io = {}) {
 
   function reviewerKey(k, r) {
     if (k === 'o') prsOf(r).forEach(p => openExternal(p.url));
-    else if (k === 'c') openSession(r.ticket, r.logPath);
     else if (k === 'a' && r.ticketUrl) openExternal(r.ticketUrl);
     else if (k === 'enter' && view() === HISTORY && r.pr) openExternal(r.briefDir || r.pr.url);
     else if (k === 'enter' && view() === HISTORY && r.status === 'done') openExternal(r.reportPath);
@@ -755,7 +734,6 @@ export function startTui(app, actions, io = {}) {
   function builderKey(k, w) {
     const prs = w.prs?.length ? w.prs : (w.repos || []).filter(r => r.pr).map(r => r.pr);
     if (k === 'o') prs.forEach(p => openExternal(p.url));
-    else if (k === 'c') openSession(w.key, w.logPath);
     else if (k === 'a' && w.url) openExternal(w.url);
     else if (k === 'enter') openExternal(w.briefDir);
     else if (k === 's' && view() === RUNNING) {
