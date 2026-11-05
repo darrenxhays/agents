@@ -12,13 +12,23 @@ const ST = {
   grey: '\x1b[38;5;244m', tabOn: '\x1b[1;38;5;16;48;5;220m', tabOff: '\x1b[38;5;250m', cursor: '\x1b[7m',
 };
 const LEVEL = { ok: ST.green, info: ST.grey, warn: ST.yellow, error: ST.red };
-// Each side's colour: its tab, the selected view's tab, the cursor and its keys. The Reviewer amber, the Builder violet.
-const ACCENT = {
-  reviewer: { fg: '\x1b[38;5;220m', tab: '\x1b[1;38;5;16;48;5;220m' },
-  builder: { fg: '\x1b[38;5;141m', tab: '\x1b[1;38;5;16;48;5;141m' },
-};
-// The keys bar along the bottom: its background, its text, and the line between a view's keys and the rest.
-const BAR = { bg: '\x1b[48;5;236m', text: '\x1b[38;5;252m', sep: '\x1b[38;5;240m' };
+const fg = n => `\x1b[38;5;${n}m`;
+const bg = n => `\x1b[48;5;${n}m`;
+const DARK = `${ST.bold}${fg(16)}`; // dark text, on a coloured tab or keycap
+/**
+ * Each side's colour, in shades: the side's tab and its keycaps in `base`, the selected view's tab and a hovered keycap
+ * in `light`, and `ghost` for a tab under the pointer that isn't selected. The Reviewer amber, the Builder violet.
+ */
+const shades = (base, light) => ({
+  fg: fg(base), tab: `${DARK}${bg(base)}`, view: `${DARK}${bg(light)}`, ghost: `${ST.bold}${fg(light)}${bg(237)}`,
+  key: `${DARK}${bg(base)}`, keyHover: `${DARK}${bg(light)}`,
+});
+const ACCENT = { reviewer: shades(220, 222), builder: shades(141, 183) };
+// The two bars along the bottom: navigation on top, the darker, and the screen's own keys below, keycaps in the side's colour.
+const NAV = { bg: bg(234), text: fg(247), cap: `${ST.bold}${fg(253)}${bg(239)}`, capHover: `${DARK}${bg(252)}`, labelHover: `${ST.bold}${fg(231)}${bg(240)}` };
+const KEYBAR = { bg: bg(237), text: fg(253), labelHover: `${ST.bold}${fg(231)}${bg(242)}` };
+// What the pointer is over: a list or settings row, any other clickable thing (unless it says how), and a link.
+const HOVER = { row: bg(236), seg: `${ST.bold}${bg(238)}`, link: `\x1b[1;4;38;5;117m` };
 // Config's sections, each in its own colour; the Reviewer's and the Builder's in their sides' colours.
 const SECTION = { Prowl: '\x1b[38;5;117m', 'Boards and repos': '\x1b[38;5;114m', Tags: '\x1b[38;5;211m', Labels: '\x1b[38;5;211m', 'All sessions': '\x1b[38;5;80m' };
 const sectionColor = s => (s.startsWith('Reviewer') ? ACCENT.reviewer.fg : s.startsWith('Builder') ? ACCENT.builder.fg : SECTION[s] || ST.grey);
@@ -52,8 +62,8 @@ const getPath = (o, k) => k.split('.').reduce((v, p) => v?.[p], o);
 const setPath = (o, k, val) => { const ps = k.split('.'); const last = ps.pop(); ps.reduce((v, p) => (v[p] ??= {}), o)[last] = val; };
 
 /**
- * A row is a list of [style, text, url?, onClick?] segments; draw() clips it to `w` columns and pads the rest, in
- * `row.bg` when set (a bar's background). `row.hit` is what a click elsewhere on the row does.
+ * A row is a list of [style, text, url?, onClick?, hoverStyle?] segments; draw() clips it to `w` columns and pads the
+ * rest, in `row.bg` when set (a bar's background). `row.hit` is what a click elsewhere on the row does.
  */
 function draw(row, w) {
   let out = '';
@@ -76,6 +86,20 @@ function hitAt(row, x) {
     if (x < at) return onClick || (url ? () => openExternal(url) : row.hit);
   }
   return row.hit;
+}
+
+/**
+ * `row` with the pointer at column `x`: what a click there would do, lit up. A button (its segments sharing one onClick)
+ * in its hover style, a link brighter, a row with a click of its own in a soft band across the screen.
+ */
+function hovered(row, x) {
+  let at = 0;
+  const seg = row.find(s => (at += clean(s[1]).length) > x);
+  const keep = segs => Object.assign(segs, { bg: row.bg, hit: row.hit, footer: row.footer });
+  if (seg?.[3]) return keep(row.map(s => (s[3] === seg[3] ? [s[4] || `${s[0]}${HOVER.seg}`, ...s.slice(1)] : s)));
+  if (seg?.[2]) return keep(row.map(s => (s === seg ? [HOVER.link, ...s.slice(1)] : s)));
+  if (row.hit) return Object.assign(keep(row.map(s => [`${HOVER.row}${s[0]}`, ...s.slice(1)])), { bg: HOVER.row });
+  return row;
 }
 
 /** List rows around the selection, so the selected row always stays visible. */
@@ -124,6 +148,7 @@ export function startTui(app, actions, io = {}) {
     side: 'reviewer', view: { reviewer: 0, builder: 0 }, sel: { reviewer: TABS.map(() => 0), builder: TABS.map(() => 0) },
     edit: null, confirm: null, flash: '', flashUntil: 0, notes: app.notes ? { scroll: 0 } : null,
     keys: null, // the full list of keys, while open (/): { scroll }
+    hover: null, // where the pointer is: { x, y }
     frame: [], // the rows last drawn, for mouse clicks
     text: [], // …and their text, for copying a selection
     drag: null, // a mouse selection while the left button is down: { x0, y0, x1, y1, moved }
@@ -189,14 +214,18 @@ export function startTui(app, actions, io = {}) {
     const shown = SIDES.filter(visible);
     const room = Math.floor((W - 2) / shown.length);
     const segs = [['', ' ']];
-    for (const name of shown) segs.push([name === ui.side ? acc(name).tab : acc(name).fg, ` ${sideLabel(name, room)} `, undefined, () => { ui.side = name; }], ['', ' ']);
+    for (const name of shown) {
+      const style = name === ui.side ? acc(name).tab : acc(name).fg;
+      segs.push([style, ` ${sideLabel(name, room)} `, undefined, () => { ui.side = name; }, name === ui.side ? style : acc(name).ghost], ['', ' ']);
+    }
     return segs;
   }
 
   function tabBar() {
     const counts = [live(ui.side).length, history(ui.side).length, needs(ui.side).length];
     const segs = [['', ' ']];
-    TABS.forEach((t, i) => segs.push([i === view() ? acc().tab : ST.tabOff, ` ${i + 1} ${t}${counts[i] != null ? ` (${counts[i]})` : ''} `, undefined, () => { ui.view[ui.side] = i; }], ['', ' ']));
+    TABS.forEach((t, i) => segs.push([i === view() ? acc().view : ST.tabOff, ` ${i + 1} ${t}${counts[i] != null ? ` (${counts[i]})` : ''} `, undefined,
+      () => { ui.view[ui.side] = i; }, i === view() ? acc().view : acc().ghost], ['', ' ']));
     return segs;
   }
 
@@ -510,35 +539,60 @@ export function startTui(app, actions, io = {}) {
     ['Prowl', [['/', 'all keys', 'Show or hide this list'], ['esc', 'close', 'Close this list, or answer no'],
       ['q', 'quit', 'Quit both sides; running sessions keep going and reappear on the next launch'], ['ctrl-c', 'quit now', 'Quit at once, without asking']]],
   ];
-  const pressable = k => (k.length === 1 || ['enter', 'tab', 'esc'].includes(k) ? () => onKey(k) : undefined);
+  const PRESS = { '←': 'left', '→': 'right', '↑': 'up', '↓': 'down' };
+  const pressable = k => (k.length === 1 || ['enter', 'tab', 'esc', 'left', 'right', 'up', 'down'].includes(k) ? () => onKey(k) : undefined);
   // The view's own keys, while it has something selected for them to act on.
   const viewKeys = () => {
     const list = [live, history, needs][view()];
     return list && !list(ui.side).length ? [] : VIEW_KEYS[ui.side][view()];
   };
+  const EMPTY = ['nothing running', 'nothing here yet', 'nothing needs you', '', 'newest at the bottom'];
 
-  /** The keys bar: the view's keys, then the most useful of the rest that fit, and / for the full list, in their own colours. */
-  function bar(segs) {
-    return Object.assign(segs.map(([style, text, url, hit]) => [BAR.bg + (style || BAR.text), text, url, hit]), { bg: BAR.bg, footer: true });
+  /** A bar: every segment on its background, its hover style too. */
+  function bar(segs, t) {
+    return Object.assign(segs.map(([style, text, url, hit, hover]) => [t.bg + (style || t.text), text, url, hit, hover && t.bg + hover]), { bg: t.bg, footer: true });
   }
-  const chip = ([k, label]) => [[`${ST.bold}${acc().fg}`, ` ${k}`, undefined, pressable(k)], [BAR.text, ` ${label} `, undefined, pressable(k)]];
-  const chips = (list, room) => {
-    const out = [];
-    for (const c of list) { const segs = chip(c); if (width(out) + width(segs) <= room) out.push(...segs); }
-    return out;
-  };
+  /**
+   * A button: its keycaps ('← →' is two, each pressing its own key) and its label, which lights up and presses with a
+   * keycap when there's one. Clicking one does what the key does.
+   */
+  function button([keys, label], t) {
+    const [cap, capHover] = t === NAV ? [NAV.cap, NAV.capHover] : [acc().key, acc().keyHover];
+    const caps = keys.split(' ').map(k => [cap, ` ${k} `, undefined, pressable(PRESS[k] || k), capHover]);
+    const one = caps.length === 1 ? caps[0][3] : undefined;
+    return [...caps, [t.text, ` ${label} `, undefined, one, one && t.labelHover], ['', ' ']];
+  }
+  /** The buttons that fit in `room` columns, in order. */
+  const fit = (list, room, t) => list.reduce((out, b) => { const segs = button(b, t); return width(out) + width(segs) <= room ? [...out, ...segs] : out; }, []);
+  const tag = text => [[`${ST.bold}${acc().fg}`, ' ▌'], [`${ST.bold}${acc().fg}`, `${text}  `]];
+  /** The bottom bar: what's on screen, named in the side's colour, then the buttons that fit beside it. */
+  const tagged = (text, list, W) => { const lead = tag(text); return [...lead, ...fit(list, W - width(lead), KEYBAR)]; };
 
+  /**
+   * The two bars along the bottom: navigation on top, and the screen's own keys below. A message, a question or
+   * typing takes them over while it lasts.
+   */
   function footer(W) {
-    if (ui.notes) return bar([[BAR.text, ' ↑↓ scroll · any other key or a click closes the Update Notes']]);
-    if (ui.confirm) return bar([[`${ST.bold}${ST.yellow}`, ` ${ui.confirm.text} `], ...(ui.confirm.key ? [] : chip(['y', 'yes'])), ...chip(['n', ui.confirm.key ? 'stay' : 'no'])]);
-    if (ui.edit) return bar([...chip(['enter', ui.edit.prs ? 'review' : 'save']), ...chip(['esc', 'cancel']), ...chip(['←→', 'move'])]);
-    if (Date.now() < ui.flashUntil) return bar([[ST.green, ` ${ui.flash}`]]);
-    if (ui.keys) return bar(spread([...chip(['↑↓', 'scroll']), ...chip(['/', 'close']), ...chip(['esc', 'close'])], [[BAR.text, 'any other key closes this and does its job ']], W));
-    const more = chip(['/', 'all keys']);
-    const own = chips(viewKeys(), W - width(more) - 3);
-    const rest = chips([...(ui.side === 'reviewer' ? [NEW_REVIEW] : []), ...(SIDES.filter(visible).length > 1 ? [['tab', 'side']] : []),
-      ['←→', 'views'], ['r', 'poll'], ['p', 'pause'], ['e', 'on/off'], ['q', 'quit']], W - width(more) - width(own) - (own.length ? 3 : 1));
-    return bar(spread([...own, ...(own.length && rest.length ? [[BAR.sep, ' │']] : []), ...rest], more, W));
+    const nav = segs => bar(segs, NAV);
+    const keys = segs => bar(segs, KEYBAR);
+    const say = (style, text) => [[style, ` ${text}`]];
+    if (ui.notes) return [nav(say(NAV.text, 'Update Notes: ↑↓ scrolls them, and any other key or a click closes them.')), keys(tagged('Update Notes', [['↑ ↓', 'scroll'], ['esc', 'close']], W))];
+    if (ui.confirm) {
+      const answers = ui.confirm.key ? [[ui.confirm.key, 'quit'], ['n', 'stay']] : [['y', 'yes'], ['n', 'no']];
+      return [nav(say(`${ST.bold}${ST.yellow}`, ui.confirm.text)), keys(tagged('Confirm', answers, W))];
+    }
+    if (ui.edit) {
+      const about = ui.edit.prs ? 'Quick review: paste PR links or owner/repo#12, then enter.' : ui.edit.secret ? 'Paste the token, then enter.' : 'Type, then enter to save.';
+      return [nav(say(NAV.text, about)), keys(tagged('Typing', [['enter', ui.edit.prs ? 'review' : 'save'], ['esc', 'cancel'], ['← →', 'move']], W))];
+    }
+    const flashing = Date.now() < ui.flashUntil;
+    if (ui.keys) return [nav(flashing ? say(ST.green, ui.flash) : say(NAV.text, 'All keys: any other key closes this list and does its job.')), keys(tagged('Keys', [['↑ ↓', 'scroll'], ['/', 'close'], ['esc', 'close']], W))];
+    const right = fit([['/', 'all keys'], ['q', 'quit']], W, NAV);
+    const left = fit([...(SIDES.filter(visible).length > 1 ? [['tab', 'side']] : []), ['← →', 'views'], ...(ui.side === 'reviewer' ? [NEW_REVIEW] : []),
+      ['r', 'poll'], ['p', 'pause'], ['e', 'on/off'], ['↑ ↓', 'select']], W - width(right) - 2, NAV);
+    const own = viewKeys();
+    return [nav(flashing ? say(`${ST.bold}${ST.green}`, ui.flash) : spread([['', ' '], ...left], right, W)),
+      keys(own.length ? tagged(TABS[view()], own, W) : [...tag(TABS[view()]), [fg(245), EMPTY[view()] || 'no keys here']])];
   }
 
   /** The full list of keys (/): this view's first, then the side's other views, then the rest, in columns when there's room. */
@@ -567,28 +621,30 @@ export function startTui(app, actions, io = {}) {
     }));
     const rows = [[[`${ST.bold}${acc().fg}`, ' Keys'], [ST.grey, ` · ${NAMES[ui.side]}, ${TABS[view()]}`]], rule(W), ...lines];
     ui.keys.scroll = Math.max(0, Math.min(ui.keys.scroll, rows.length - H));
-    return rows.slice(ui.keys.scroll).map(r => onClick(r, () => { ui.keys = null; }));
+    return rows.slice(ui.keys.scroll);
   }
 
   function rows(advance, W, H) {
     if (!visible(ui.side)) ui.side = 'reviewer'; // the Builder was switched off with nothing left to show
     const out = [titleBar(W)];
     const said = app.speech(); // read with Hoot off too, so what he'd have said doesn't pile up
-    if (H >= 27 && app.cfg.hoot !== false && !ui.keys) out.push(...owl.render(W, 7, mood(said), said?.text || '', advance));
+    if (H >= 27 && app.cfg.hoot !== false && !ui.keys) out.push(...owl.render(W, 7, mood(said), said?.text || '', advance, allLive()));
     out.push(sideBar(W), tabBar(), rule(W));
-    const bodyH = H - out.length - 1;
+    const bodyH = H - out.length - 2;
     const body = (ui.notes ? notesView : ui.keys ? keysView : [runningView, historyView, needsView, configView, logView][view()])(W, bodyH).slice(0, bodyH);
     while (body.length < bodyH) body.push([]);
-    out.push(...body, footer(W));
+    out.push(...body, ...footer(W));
     ui.frame = out;
     ui.text = out.map(r => r.map(seg => clean(seg[1])).join('').slice(0, W));
-    if (!ui.drag?.moved) return out;
+    if (!ui.drag?.moved) return ui.hover ? out.map((r, y) => (y === ui.hover.y ? hovered(r, ui.hover.x) : r)) : out;
     const { ys, xs, ye, xe } = span(ui.drag);
     return out.map((r, y) => (y < ys || y > ye ? r : highlight(r, y === ys ? xs : 0, y === ye ? xe + 1 : W)));
   }
 
   const size = () => [Math.max(40, (out.columns || 100) - 1), Math.max(12, out.rows || 30)];
+  let painted = 0;
   function paint(advance) {
+    painted = Date.now();
     const [W, H] = size();
     out.write(`\x1b[?2026h\x1b[H${rows(advance, W, H).map(r => draw(r, W)).join('\r\n')}\x1b[?2026l`);
   }
@@ -797,16 +853,18 @@ export function startTui(app, actions, io = {}) {
 
   /** A mouse event: the wheel moves like ↑↓, and a left click does what's under it (hitAt). */
   /**
-   * A mouse event. The wheel moves like ↑↓. With the left button, a press and release in place is a click (what's
-   * under it, hitAt), and a drag selects text, highlighted, which is copied to the clipboard when the button is let go.
+   * A mouse event. The wheel moves like ↑↓, and the pointer lights up what's clickable under it (hovered). With the
+   * left button, a press and release in place is a click (what's under it, hitAt), and a drag selects text,
+   * highlighted, which is copied to the clipboard when the button is let go.
    */
   function onMouse({ mouse: b, x, y, release }) {
     if (b & 64) return release ? undefined : onKey(b & 1 ? 'down' : 'up');
-    if ((b & 3) !== 0) return undefined; // the left button only
-    if (b & 32) { // moved with the button down
-      if (ui.drag) Object.assign(ui.drag, { x1: x, y1: y, moved: ui.drag.moved || x !== ui.drag.x0 || y !== ui.drag.y0 });
+    ui.hover = { x, y };
+    if (b & 32) { // moved: with the left button down, a drag
+      if ((b & 3) === 0 && ui.drag) Object.assign(ui.drag, { x1: x, y1: y, moved: ui.drag.moved || x !== ui.drag.x0 || y !== ui.drag.y0 });
       return undefined;
     }
+    if ((b & 3) !== 0) return undefined; // the left button only
     if (!release) { ui.drag = { x0: x, y0: y, x1: x, y1: y, moved: false }; return undefined; }
     const d = ui.drag;
     ui.drag = null;
@@ -825,10 +883,10 @@ export function startTui(app, actions, io = {}) {
   function highlight(row, from, to) {
     const segs = [];
     let at = 0;
-    for (const [style, raw, url, hit] of row) {
+    for (const [style, raw, url, hit, hover] of row) {
       const text = clean(raw);
       const [a, b] = [Math.max(0, Math.min(text.length, from - at)), Math.max(0, Math.min(text.length, to - at))];
-      for (const [part, st] of [[text.slice(0, a), style], [text.slice(a, b), `${style}${ST.cursor}`], [text.slice(b), style]]) if (part) segs.push([st, part, url, hit]);
+      for (const [part, st] of [[text.slice(0, a), style], [text.slice(a, b), `${style}${ST.cursor}`], [text.slice(b), style]]) if (part) segs.push([st, part, url, hit, hover]);
       at += text.length;
     }
     return Object.assign(segs, { bg: row.bg, hit: row.hit, footer: row.footer });
@@ -846,8 +904,8 @@ export function startTui(app, actions, io = {}) {
   }
 
   function click(x, y) {
-    if (ui.edit) return undefined; // not while typing
     const row = ui.frame[y];
+    if (ui.edit && !row?.footer) return undefined; // while typing, only the bar's buttons
     if (ui.notes) { ui.notes = null; return undefined; }
     if (!row || (ui.confirm && !row.footer)) return undefined;
     return hitAt(row, x)?.();
@@ -860,19 +918,26 @@ export function startTui(app, actions, io = {}) {
       key(k) { onKey(k); },
       /** A click (button 0) or wheel turn (64 up, 65 down) at column `x`, row `y` of the last frame, from 0. */
       mouse(x, y, button = 0) { onMouse({ mouse: button, x, y, release: false }); if (button < 64) onMouse({ mouse: button, x, y, release: true }); },
+      /** The pointer moved to (x, y), no button down. */
+      hover(x, y) { onMouse({ mouse: 35, x, y, release: false }); },
       /** A drag with the left button from (x0, y0) to (x1, y1), let go there. */
       drag(x0, y0, x1, y1) { for (const [m, x, y, release] of [[0, x0, y0, false], [32, x1, y1, false], [0, x1, y1, true]]) onMouse({ mouse: m, x, y, release }); },
       /** The frame as plain text lines, at `W` by `H` columns and rows. */
-      frame(W = 80, H = 30) { return rows(false, W, H).map(r => draw(r, W).replace(/\x1b\[[0-9;?]*[A-Za-z]|\x1b\]8;;[^\x1b]*\x1b\\/g, '')); },
+      frame(W = 80, H = 30, ansi = false) { return rows(false, W, H).map(r => (ansi ? draw(r, W) : draw(r, W).replace(/\x1b\[[0-9;?]*[A-Za-z]|\x1b\]8;;[^\x1b]*\x1b\\/g, ''))); },
       ui,
     };
   }
-  // Save the tab title and set it, alternate screen, hidden cursor, and the mouse reported: clicks, drags and the wheel (SGR encoding).
-  out.write('\x1b[22;0t\x1b]0;Prowl\x07\x1b[?1049h\x1b[?25l\x1b[?1002h\x1b[?1006h');
+  // Save the tab title and set it, alternate screen, hidden cursor, and the mouse reported: clicks, drags, the wheel
+  // and the pointer moving, for hover (any-motion tracking, SGR encoding).
+  out.write('\x1b[22;0t\x1b]0;Prowl\x07\x1b[?1049h\x1b[?25l\x1b[?1003h\x1b[?1006h');
   stdin.setRawMode(true);
   stdin.setEncoding('utf8');
   stdin.resume();
-  stdin.on('data', data => { for (const k of keys(data)) input(k); paint(false); });
+  stdin.on('data', data => {
+    let moved = true; // only the pointer moving: repainted at most every 30ms, so a quick sweep can't flood the terminal
+    for (const k of keys(data)) { input(k); if (!(k.mouse & 32)) moved = false; }
+    if (!moved || Date.now() - painted > 30) paint(false);
+  });
   out.on('resize', () => paint(false));
   const timer = setInterval(() => paint(true), 100);
   paint(true);
@@ -880,7 +945,7 @@ export function startTui(app, actions, io = {}) {
   return {
     restore() {
       clearInterval(timer);
-      out.write('\x1b[?1006l\x1b[?1002l\x1b[?2026l\x1b[?25h\x1b[?1049l\x1b[23;0t'); // …and restore the tab title
+      out.write('\x1b[?1006l\x1b[?1003l\x1b[?2026l\x1b[?25h\x1b[?1049l\x1b[23;0t'); // …and restore the tab title
       try { stdin.setRawMode(false); } catch { /* not a TTY any more */ }
       stdin.pause();
     },

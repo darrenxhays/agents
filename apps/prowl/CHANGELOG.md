@@ -2,6 +2,12 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.16.0
+- Everything you can click lights up under the pointer: buttons, tabs, links, and rows in the lists and in Config.
+- The bottom is now two bars of buttons. The darker top bar is for moving around (sides, views, quick review, poll, pause, on/off, / for every key, quit), and the bottom bar is the screen you're on, with its keys as keycaps in its side's colour. Click a button to press its key. Messages, questions and typing take the bars over while they last.
+- The selected view's tab is now a lighter shade of its side's colour: pale gold on the Reviewer, lavender on the Builder.
+- Hoot keeps to the left quarter of the screen and has more to do. He snores when there's nothing on, glances about and stretches while he talks, and flies over the boards while they're checked. He paces with a review open when one session is running, juggles a ball for each when two to four are, and types away at a laptop, sweating, at five or more. He dances in confetti when something's done, and sits under a rain cloud when something went wrong.
+
 ## 2.15.3
 - The c key, which opened a review's or build's Claude Code session in a new terminal tab, is gone: it didn't work reliably across terminals. Nothing to do; the keys bar and the / list no longer show it.
 

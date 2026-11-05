@@ -278,12 +278,24 @@ assert.deepEqual(wrap('one two three four five six seven eight nine ten', 10, 2)
 assert.deepEqual(wrap('anything', 5, 3), [], 'no room: no speech box');
 
 const owl = createMascot(() => 0.42);
-for (const mood of ['idle', 'poll', 'review', 'cheer', 'sleep', 'error']) {
+for (const [mood, busy] of [['idle', 0], ['poll', 0], ['review', 1], ['review', 3], ['review', 6], ['cheer', 0], ['sleep', 0], ['error', 0]]) {
   for (let i = 0; i < 200; i++) {
-    const rows = owl.render(i % 2 ? 50 : 12, 7, mood, i % 3 ? '' : 'Done reviewing PRs for Slice 11 Documents in the client profile, marking as Reviewed');
+    const rows = owl.render(i % 2 ? 50 : 12, 7, mood, i % 3 ? '' : 'Done reviewing PRs for Slice 11 Documents in the client profile, marking as Reviewed', true, busy);
     assert.equal(rows.length, 7);
     for (const row of rows) assert.equal(row.reduce((n, [, text]) => n + text.length, 0), i % 2 ? 50 : 12, `${mood} row width`);
   }
+}
+// Hoot keeps to the left quarter, whatever he's doing, and what he does follows how much is running.
+for (const [mood, busy, doing] of [['sleep', 0, 'sleep'], ['idle', 0, 'idle'], ['poll', 0, 'poll'], ['review', 1, 'read'], ['review', 2, 'juggle'], ['review', 4, 'juggle'], ['review', 5, 'type'], ['cheer', 0, 'cheer'], ['error', 0, 'error']]) {
+  const hoot = createMascot();
+  for (let i = 0; i < 300; i++) {
+    const rows = hoot.render(120, 7, mood, '', true, busy);
+    const at = hoot.at(120);
+    assert.ok(at.x >= 0 && at.x + 7 + (doing === 'type' ? 8 : 0) <= at.zone && at.zone === 30, `${mood} ${busy}: in his quarter (x ${at.x})`);
+    const owlCols = rows.slice(2, 6).flatMap(r => { let c = 0; return r.flatMap(([, t]) => [...t].map(ch => [c++, ch])); }).filter(([, ch]) => '(,)'.includes(ch)).map(([c]) => c);
+    assert.ok(Math.max(...owlCols) < 30 + 1, `${mood}: drawn in his quarter`);
+  }
+  assert.equal(hoot.at(120).doing, doing, `${mood} with ${busy} running: ${doing}`);
 }
 
 // The session fence (kind 'work'): pushes, GitHub and tracker writes, MCP tools outside the allow list and writes
@@ -895,7 +907,7 @@ const tagRows = ['Build start tag', 'Build in-progress tag', 'Review trigger tag
 assert.ok(tagRows.every((t, i) => !i || builderConfig.indexOf(tagRows[i - 1]) < builderConfig.indexOf(t)) && !/Done tag|Reviewing tag/.test(builderConfig), 'one set of tags, in the order a ticket meets them');
 tui.key('tab');
 tui.key('4');
-const body = f => f.slice(f.indexOf('Saved to'), f.lastIndexOf('\n')); // without the keys bar, which follows the side
+const body = f => f.split('\n').slice(0, -2).join('\n').slice(f.indexOf('Saved to')); // without the two bars, which follow the side
 assert.equal(body(fits(tui.frame(80, 200), 'Config from the Reviewer')), body(builderConfig), 'the same Config on both sides');
 builderNeeds = [];
 frame = fits(tui.frame(80, 30), 'Builder off, nothing waiting');
@@ -936,20 +948,24 @@ await new Promise(r => setTimeout(r, 0));
 assert.deepEqual(asked, [[{ repo: 'octo-org/api', number: 5 }, { repo: 'octo-org/web', number: 7 }]], 'submitted as one review');
 assert.ok(fits(tui.frame(80, 30), 'n, sent').includes('Reviewing 2 PRs together as QUICK#1'));
 
-// ---- The keys bar, the full list of keys (/), the mouse, c and Hoot's switch ----
-const lastLine = f => f.trimEnd().split('\n').at(-1);
+// ---- The two bars, the full list of keys (/), the mouse and hover, and Hoot's switch ----
+// Text with each run of spaces squashed, since keycaps are padded: "[ / ][ all keys ]" reads "/ all keys".
+const flat = l => l.replace(/\s+/g, ' ').trim();
+const navLine = f => flat(f.split('\n').at(-2));
+const keyLine = f => flat(f.split('\n').at(-1));
 tui.ui.flashUntil = 0;
 tui.key('1');
-let bar = lastLine(fits(tui.frame(80, 30), 'keys bar, Reviewer Running'));
-assert.ok(bar.includes('/ all keys') && bar.includes('n quick review') && !bar.includes('s stop'), "the bar: a view's keys only once it has something for them, the rest that fit, and /");
+let frameText = fits(tui.frame(80, 30), 'bars, Reviewer Running');
+assert.ok(navLine(frameText).includes('/ all keys') && navLine(frameText).includes('n quick review') && navLine(frameText).includes('← → views'), 'the top bar: moving around, and /');
+assert.ok(keyLine(frameText).startsWith('▌Running') && keyLine(frameText).includes('nothing running') && !keyLine(frameText).includes('s stop'), "the bottom bar: the screen's keys, once it has something for them");
 tui.key('2');
-assert.ok(lastLine(tui.frame(80, 30).join('\n')).includes('enter report'), "History's keys");
+assert.ok(keyLine(tui.frame(80, 30).join('\n')).includes('enter report'), "History's keys");
 tuiApp.override = { reviewer: true, builder: true };
 builderNeeds = [{ id: 'n1', ticket: 'AB#124', kind: 'question', question: 'Keep the old cart format?', context: [], options: ['Yes', 'No'], recommended: 'Yes', createdAt: 9 }];
 tui.key('B');
 tui.key('2');
-bar = lastLine(fits(tui.frame(80, 30), 'keys bar, Builder History'));
-assert.ok(['enter brief', 'o open PRs', 'a ticket', 'w follow'].every(k => bar.includes(k)) && !bar.includes('quick review'), "the bar follows the view in sight: the Builder History's keys");
+frameText = fits(tui.frame(80, 30), 'bars, Builder History');
+assert.ok(['enter brief', 'o open PRs', 'a ticket', 'w follow'].every(k => keyLine(frameText).includes(k)) && !navLine(frameText).includes('quick review'), "the bars follow the view in sight: the Builder History's keys");
 tui.key('/');
 let keysList = fits(tui.frame(80, 60), 'all keys');
 assert.ok(keysList.includes('Builder · History · this view') && keysList.includes('Builder · Needs you') && keysList.includes('Moving around') && keysList.includes('Mouse')
@@ -973,11 +989,31 @@ assert.equal(tui.ui.sel.builder[1], 0, 'a click on a row selects it');
 tui.mouse(...at('Reviewer'));
 assert.equal(tui.ui.side, 'reviewer', "a click on a side's tab switches to it");
 lines = tui.frame(80, 30);
-tui.mouse(...at('/ all keys'));
-assert.ok(tui.ui.keys, 'a click on a key in the bar presses it');
-tui.frame(80, 30);
-tui.mouse(0, 10);
-assert.equal(tui.ui.keys, null, 'a click on the list closes it');
+tui.mouse(...at('all keys'));
+assert.ok(tui.ui.keys, "a click on a button's label presses its key");
+lines = tui.frame(80, 30);
+tui.mouse(lines.at(-1).indexOf('esc') + 1, lines.length - 1);
+assert.equal(tui.ui.keys, null, 'and on its keycap: esc closes the list');
+// Hover: what a click would do lights up. A button, keycap and label together; a row; a tab not selected; and the
+// selected view's tab in a lighter shade of its side's.
+const raw = () => tui.frame(80, 30, true);
+lines = tui.frame(80, 30);
+tui.hover(...at('all keys'));
+let lit = raw().at(-2);
+assert.ok(lit.includes('48;5;252m') && lit.includes('48;5;240m'), 'a hovered button: its keycap and its label');
+assert.ok(!raw().at(-1).includes('48;5;252m'), 'and nothing else');
+tui.hover(...at(' 3 Needs you'));
+assert.ok(raw().find(l => l.includes('Needs you')).includes('\x1b[1m\x1b[38;5;222m\x1b[48;5;237m'), 'a hovered tab, not selected: a ghost of its side\'s colour');
+assert.ok(raw().find(l => l.includes('Needs you')).includes('48;5;222m 2 History'), "the selected view: the lighter shade of the Reviewer's amber");
+tui.key('B');
+tui.key('2');
+lines = tui.frame(80, 30);
+assert.ok(raw().find(l => l.includes('Needs you')).includes('48;5;183m 2 History') && raw().find(l => l.includes('Builder')).includes('48;5;141m'), "the Builder's: violet, its view lavender");
+tui.hover(...at('AB#123'));
+assert.ok(raw().find(l => l.includes('AB#123')).startsWith('\x1b[48;5;236m'), 'a hovered row: a soft band');
+tui.hover(0, 1);
+assert.ok(!raw().some(l => l.includes('48;5;236m') && l.includes('AB#123')), 'moving off it clears it');
+tui.key('R');
 tui.key('4');
 const cfgSel = tui.ui.sel.reviewer[3];
 tui.mouse(0, 0, 65);
