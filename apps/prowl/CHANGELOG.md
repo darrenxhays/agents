@@ -2,6 +2,9 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.15.2
+- c in Cursor's or VS Code's terminal now opens a new terminal tab in the editor and runs the session there, as a fork, instead of the Claude Code extension's panel, which needed the extension. On macOS, Prowl brings the editor forward, presses New Terminal (ctrl+shift+`) and types the command, so don't type for a second while it does. The first time, macOS asks for Accessibility access for Cursor (or VS Code): allow it in System Settings > Privacy & Security > Accessibility. Without it, or with a different New Terminal shortcut, or off macOS, the Log has the command to run.
+
 ## 2.15.1
 - c in Cursor's or VS Code's terminal now opens the session inside the editor, in a Claude Code tab, instead of a Terminal window (no program can open a tab in an editor's own terminal). It needs the Claude Code extension, and it resumes the session itself rather than a copy, so wait for a running session to finish before you type in it.
 

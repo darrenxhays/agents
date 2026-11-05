@@ -153,27 +153,15 @@ export function notifyDesktop(title, text) {
   spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true }).on('error', () => {}).unref();
 }
 
-/**
- * The link that opens Claude Code session `id` in the Claude Code extension's panel, when Prowl runs in the integrated
- * terminal of Cursor or VS Code (which no other program can open a terminal tab in), or null elsewhere.
- */
-export function editorSessionLink(id, env = process.env) {
-  if (env.TERM_PROGRAM !== 'vscode') return null;
-  const app = env.__CFBundleIdentifier || '';
-  const scheme = env.CURSOR_TRACE_ID || env.CURSOR_CLI || app === 'com.todesktop.230313mzl4w4u92' ? 'cursor'
-    : app === 'com.microsoft.VSCodeInsiders' || /insider/i.test(env.TERM_PROGRAM_VERSION || '') ? 'vscode-insiders' : 'vscode';
-  return `${scheme}://anthropic.claude-code/open?session=${encodeURIComponent(id)}`;
-}
-
-const sh = s => `'${String(s).replace(/'/g, "'\\''")}'`; // a POSIX shell word
+const sh = s => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${String(s).replace(/'/g, "'\\''")}'`); // a POSIX shell word
 const applescript = s => `"${s.replace(/[\\"]/g, '\\$&')}"`;
 
 /**
- * Runs `argv` in `cwd` in a new tab of the terminal Prowl runs in: tmux (a window), iTerm2, Terminal, WezTerm or
- * Windows Terminal. Elsewhere on macOS, in a new Terminal window. Resolves true once started, or false when it
- * couldn't be (no supported terminal, or the terminal refused); the caller then shows the command to run.
+ * The [command, args] that run `argv` in `cwd` in a new tab of the terminal Prowl runs in: tmux (a window), iTerm2,
+ * Terminal, WezTerm, Windows Terminal, or the integrated terminal of Cursor or VS Code. Elsewhere on macOS, a new
+ * Terminal window; elsewhere, null.
  */
-export function openInTerminal(cwd, argv, env = process.env) {
+export function terminalCommand(cwd, argv, env = process.env, platform = process.platform) {
   const line = `cd ${sh(cwd)} && ${argv.map(sh).join(' ')}`;
   const term = env.TERM_PROGRAM;
   let cmd;
@@ -181,19 +169,42 @@ export function openInTerminal(cwd, argv, env = process.env) {
   if (env.TMUX) [cmd, args] = ['tmux', ['new-window', '-c', cwd, line]];
   else if (WIN && env.WT_SESSION) [cmd, args] = ['wt', ['-w', '0', 'nt', '-d', cwd, 'cmd', '/k', ...argv]];
   else if (term === 'WezTerm') [cmd, args] = ['wezterm', ['cli', 'spawn', '--cwd', cwd, '--', ...argv]];
-  else if (process.platform === 'darwin') {
-    const script = term === 'iTerm.app'
-      ? ['tell application "iTerm2"', 'tell current window', 'set t to (create tab with default profile)', `tell current session of t to write text ${applescript(line)}`, 'end tell', 'end tell']
-      : term === 'Apple_Terminal'
-        // A new tab is a ⌘T keystroke, which needs Accessibility access for System Events; without it, a new window.
-        ? ['tell application "Terminal" to activate', 'try', 'tell application "System Events" to keystroke "t" using command down', 'delay 0.3',
-          `tell application "Terminal" to do script ${applescript(line)} in selected tab of front window`, 'on error',
-          `tell application "Terminal" to do script ${applescript(line)}`, 'end try']
-        : [`tell application "Terminal" to do script ${applescript(line)}`, 'tell application "Terminal" to activate'];
+  else if (platform === 'darwin') {
+    let script;
+    if (term === 'iTerm.app') {
+      script = ['tell application "iTerm2"', 'tell current window', 'set t to (create tab with default profile)', `tell current session of t to write text ${applescript(line)}`, 'end tell', 'end tell'];
+    } else if (term === 'Apple_Terminal') {
+      // A new tab is a ⌘T keystroke, which needs Accessibility access for System Events; without it, a new window.
+      script = ['tell application "Terminal" to activate', 'try', 'tell application "System Events" to keystroke "t" using command down', 'delay 0.3',
+        `tell application "Terminal" to do script ${applescript(line)} in selected tab of front window`, 'on error',
+        `tell application "Terminal" to do script ${applescript(line)}`, 'end try'];
+    } else if (term === 'vscode') {
+      // Cursor and VS Code let no other program open a terminal tab, so press New Terminal (ctrl+shift+`, key code 50)
+      // and type the command into it. System Events needs Accessibility access for the editor to do this.
+      const bundle = env.__CFBundleIdentifier;
+      const app = bundle ? `application id ${applescript(bundle)}` : `application ${applescript(env.CURSOR_TRACE_ID || env.CURSOR_CLI ? 'Cursor' : 'Visual Studio Code')}`;
+      script = [`tell ${app} to activate`, 'delay 0.3', 'tell application "System Events"', 'key code 50 using {control down, shift down}', 'delay 1',
+        `keystroke ${applescript(line)}`, 'key code 36', 'end tell'];
+    } else {
+      script = [`tell application "Terminal" to do script ${applescript(line)}`, 'tell application "Terminal" to activate'];
+    }
     [cmd, args] = ['osascript', script.flatMap(l => ['-e', l])];
-  } else return Promise.resolve(false);
+  } else return null;
+  return [cmd, args];
+}
+
+/** Runs terminalCommand(): resolves true once started, or why it couldn't be, for the caller to show the command to run. */
+export function openInTerminal(cwd, argv, env = process.env) {
+  const tc = terminalCommand(cwd, argv, env);
+  if (!tc) return Promise.resolve('no supported terminal');
+  const [cmd, args] = tc;
   return new Promise(resolve => {
-    spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true }).on('error', () => resolve(false)).on('exit', code => resolve(code === 0)).unref();
+    let err = '';
+    const p = spawn(cmd, args, { detached: true, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+    p.stderr.on('data', d => (err += d));
+    p.on('error', e => resolve(e.message));
+    p.on('close', code => resolve(code === 0 || (err.trim().split('\n')[0] || `${cmd} exited with code ${code}`)));
+    p.unref();
   });
 }
 
