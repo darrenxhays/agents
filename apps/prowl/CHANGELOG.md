@@ -2,6 +2,9 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.15.1
+- c in Cursor's or VS Code's terminal now opens the session inside the editor, in a Claude Code tab, instead of a Terminal window (no program can open a tab in an editor's own terminal). It needs the Claude Code extension, and it resumes the session itself rather than a copy, so wait for a running session to finish before you type in it.
+
 ## 2.15.0
 - The keys bar along the bottom has its own colour and shows the keys for the view you're on (stop, open PRs, report, brief, follow and so on), then as many of the rest as fit. Press / for every key with what it does: the view's own first, then the side's other views, then moving around, the side's switches, typing and the mouse. ↑↓ scrolls it; / or esc closes it, and any other key closes it and does its job.
 - New key: c opens the selected review's or build's Claude Code session in a new terminal tab (Running, History and Needs you, on both sides), to look at what it did or ask it something. It opens as a fork, so nothing you type there reaches Prowl's session. Tabs open in tmux, iTerm2, Terminal, WezTerm and Windows Terminal; in Terminal a new tab needs System Events to have Accessibility access (System Settings, Privacy & Security), else it opens a new window. Anywhere else on macOS it opens a Terminal window, and otherwise the Log has the command to run.

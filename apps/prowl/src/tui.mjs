@@ -3,7 +3,7 @@ import { CONFIG_PATH } from './config.mjs';
 import { CONFIG_FIELDS, JIRA } from './fields.mjs';
 import { parsePrRefs } from './github.mjs';
 import { createMascot, wrap } from './mascot.mjs';
-import { copyText, openExternal, openInTerminal } from './proc.mjs';
+import { copyText, editorSessionLink, openExternal, openInTerminal } from './proc.mjs';
 import { awaitingHuman, isOwn } from './reviewer/reviews.mjs';
 import { sessionOf } from './sessions.mjs';
 
@@ -114,7 +114,7 @@ function* keys(data) {
  * and Log. `app` is read every frame. `actions` = { sides: { reviewer, builder }, pollNow(side), togglePause(side),
  * toggleSide(side), stop(side, item), answer(item, text), skip(item), handBack(item), follow(record), stopFollowing(record),
  * reviewPrs(refs) (a quick review), saveConfig, saveToken, log(side, level, msg), quit }. `io` = { out, stdin, headless, openInTerminal }
- * (headless: no raw mode, mouse or timers, for the self-test), copy(text). Returns { restore, key(k), mouse(x, y, button), drag(x0, y0, x1, y1), frame() }.
+ * (headless: no raw mode, mouse or timers, for the self-test), copy(text), and env and openExternal for c. Returns { restore, key(k), mouse(x, y, button), drag(x0, y0, x1, y1), frame() }.
  */
 export function startTui(app, actions, io = {}) {
   const out = io.out || process.stdout;
@@ -576,6 +576,12 @@ export function startTui(app, actions, io = {}) {
   function openSession(what, logPath) {
     const s = logPath && sessionOf(logPath);
     if (!s) return flash(`${what} has no Claude session to open yet.`);
+    // In Cursor's or VS Code's terminal: a Claude Code tab in the editor, through its extension, which resumes the session itself.
+    const link = editorSessionLink(s.id, io.env);
+    if (link) {
+      (io.openExternal || openExternal)(link);
+      return flash(`Opening ${what}'s Claude session in the Claude Code panel (needs the Claude Code extension).`);
+    }
     const cwd = s.cwd || app.cfg.workDir;
     const argv = ['claude', '--resume', s.id, '--fork-session'];
     flash(`Opening ${what}'s Claude session in a new tab…`);

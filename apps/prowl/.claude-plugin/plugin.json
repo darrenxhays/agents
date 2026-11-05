@@ -1,5 +1,5 @@
 {
   "name": "prowl",
   "description": "prowl-review and prowl-build skills, run by prowl.mjs for Azure DevOps and Jira tickets",
-  "version": "2.15.0"
+  "version": "2.15.1"
 }

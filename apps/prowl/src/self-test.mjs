@@ -1010,7 +1010,7 @@ const tabs = [];
 const tui2 = startTui(tuiApp, {
   sides: { ...tuiSides, builder: { ...tuiSides.builder, history: () => [{ ...tuiSides.builder.history()[0], logPath: sessLog }, { uid: 'u2', key: 'AB#9', title: 'Not started', status: 'ended', updatedAt: 1, briefDir: '/b' }] } },
   pollNow() {}, togglePause() {}, saveConfig() {}, saveToken: () => '', quit() {}, toggleSide: () => true, log: (...a) => opened.push(a),
-}, { headless: true, openInTerminal: async (cwd, argv) => { tabs.push([cwd, argv]); return tabs.length === 1; } });
+}, { headless: true, env: {}, openInTerminal: async (cwd, argv) => { tabs.push([cwd, argv]); return tabs.length === 1; } });
 tuiApp.cfg.builder.enabled = true;
 tui2.key('B');
 tui2.key('2');
@@ -1024,6 +1024,23 @@ assert.ok(opened.some(([, level, msg]) => level === 'warn' && msg.includes('clau
 tui2.key('down');
 tui2.key('c');
 assert.ok(tui2.frame(80, 30).join('\n').includes('AB#9 has no Claude session to open yet') && tabs.length === 2, 'no session yet: it says so');
+// In Cursor's or VS Code's terminal, where no other program can open a tab: the Claude Code extension's panel.
+const { editorSessionLink } = await import('./proc.mjs');
+const sid = '0b6c4b55-2f4e-4c2e-9d55-8f7d7c0a1e21';
+assert.equal(editorSessionLink(sid, { TERM_PROGRAM: 'vscode', __CFBundleIdentifier: 'com.todesktop.230313mzl4w4u92' }), `cursor://anthropic.claude-code/open?session=${sid}`, 'Cursor');
+assert.equal(editorSessionLink(sid, { TERM_PROGRAM: 'vscode', __CFBundleIdentifier: 'com.microsoft.VSCode' }), `vscode://anthropic.claude-code/open?session=${sid}`, 'VS Code');
+assert.equal(editorSessionLink(sid, { TERM_PROGRAM: 'vscode', TERM_PROGRAM_VERSION: '1.99.0-insider' }), `vscode-insiders://anthropic.claude-code/open?session=${sid}`, 'VS Code Insiders');
+assert.equal(editorSessionLink(sid, { TERM_PROGRAM: 'iTerm.app' }), null, 'a terminal app: its own tab, as before');
+const links = [];
+const tui4 = startTui(tuiApp, {
+  sides: { ...tuiSides, builder: { ...tuiSides.builder, history: () => [{ ...tuiSides.builder.history()[0], logPath: sessLog }] } },
+  pollNow() {}, togglePause() {}, saveConfig() {}, saveToken: () => '', quit() {}, toggleSide: () => true,
+}, { headless: true, env: { TERM_PROGRAM: 'vscode', CURSOR_TRACE_ID: 'x' }, openExternal: l => links.push(l), openInTerminal: async () => assert.fail('no terminal tab in Cursor') });
+tui4.key('B');
+tui4.key('2');
+tui4.key('c');
+assert.deepEqual(links, [`cursor://anthropic.claude-code/open?session=${sid}`], "c in Cursor's terminal opens the session in Cursor's Claude Code panel");
+assert.ok(tui4.frame(80, 30).join('\n').includes('Claude Code panel'));
 fs.rmSync(sessDir, { recursive: true });
 // Hoot's switch: off, no owl and the views get his rows.
 const ground = "_,_._'__._,_";

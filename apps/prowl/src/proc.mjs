@@ -153,6 +153,18 @@ export function notifyDesktop(title, text) {
   spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true }).on('error', () => {}).unref();
 }
 
+/**
+ * The link that opens Claude Code session `id` in the Claude Code extension's panel, when Prowl runs in the integrated
+ * terminal of Cursor or VS Code (which no other program can open a terminal tab in), or null elsewhere.
+ */
+export function editorSessionLink(id, env = process.env) {
+  if (env.TERM_PROGRAM !== 'vscode') return null;
+  const app = env.__CFBundleIdentifier || '';
+  const scheme = env.CURSOR_TRACE_ID || env.CURSOR_CLI || app === 'com.todesktop.230313mzl4w4u92' ? 'cursor'
+    : app === 'com.microsoft.VSCodeInsiders' || /insider/i.test(env.TERM_PROGRAM_VERSION || '') ? 'vscode-insiders' : 'vscode';
+  return `${scheme}://anthropic.claude-code/open?session=${encodeURIComponent(id)}`;
+}
+
 const sh = s => `'${String(s).replace(/'/g, "'\\''")}'`; // a POSIX shell word
 const applescript = s => `"${s.replace(/[\\"]/g, '\\$&')}"`;
 
