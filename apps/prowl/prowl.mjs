@@ -249,6 +249,7 @@ tui = startTui(app, {
     TRACKERS.jira.forgetToken();
     return '';
   },
+  log: (name, level, msg) => log(name, level, msg),
   quit: () => quit(0),
 });
 for (const sig of ['SIGTERM', 'SIGHUP']) process.on(sig, () => quit(0));

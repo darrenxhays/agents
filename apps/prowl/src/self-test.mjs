@@ -888,14 +888,14 @@ assert.ok(/Builder · off · ⚑ 1/.test(frame), 'the Needs-you count on its tab
 tui.key('4');
 const builderConfig = fits(tui.frame(80, 200), 'Config from the Builder');
 const order = ['PROWL', 'BOARDS AND REPOS', 'TAGS', 'ALL SESSIONS', 'REVIEWER · FILES', 'REVIEWER · SESSIONS', 'REVIEWER · VERDICTS AND ROUNDS', 'BUILDER · FILES', 'BUILDER · SESSIONS', 'BUILDER · REPOS AND BRANCHES', 'BUILDER · FOLLOW-UP'];
-const headings = builderConfig.split('\n').map(l => l.trimEnd()).map(l => order.indexOf(l.slice(1))).filter(i => i >= 0);
+const headings = builderConfig.split('\n').map(l => /^ ▍ (.+?) ─*$/.exec(l.trimEnd())?.[1]).map(h => order.indexOf(h)).filter(i => i >= 0);
 assert.deepEqual(headings, order.map((h, i) => i), 'every setting of the app, in its sections');
 assert.ok(builderConfig.includes('Max parallel builds') && builderConfig.includes('Max parallel reviews'), "the Builder's settings show while it is off");
 const tagRows = ['Build start tag', 'Build in-progress tag', 'Review trigger tag', 'Review in-progress tag', 'Review done tag'];
 assert.ok(tagRows.every((t, i) => !i || builderConfig.indexOf(tagRows[i - 1]) < builderConfig.indexOf(t)) && !/Done tag|Reviewing tag/.test(builderConfig), 'one set of tags, in the order a ticket meets them');
 tui.key('tab');
 tui.key('4');
-const body = f => f.slice(f.indexOf('Saved to'));
+const body = f => f.slice(f.indexOf('Saved to'), f.lastIndexOf('\n')); // without the keys bar, which follows the side
 assert.equal(body(fits(tui.frame(80, 200), 'Config from the Reviewer')), body(builderConfig), 'the same Config on both sides');
 builderNeeds = [];
 frame = fits(tui.frame(80, 30), 'Builder off, nothing waiting');
@@ -935,6 +935,102 @@ tui.key('enter');
 await new Promise(r => setTimeout(r, 0));
 assert.deepEqual(asked, [[{ repo: 'octo-org/api', number: 5 }, { repo: 'octo-org/web', number: 7 }]], 'submitted as one review');
 assert.ok(fits(tui.frame(80, 30), 'n, sent').includes('Reviewing 2 PRs together as QUICK#1'));
+
+// ---- The keys bar, the full list of keys (/), the mouse, c and Hoot's switch ----
+const lastLine = f => f.trimEnd().split('\n').at(-1);
+tui.ui.flashUntil = 0;
+tui.key('1');
+let bar = lastLine(fits(tui.frame(80, 30), 'keys bar, Reviewer Running'));
+assert.ok(bar.includes('/ all keys') && bar.includes('n quick review') && !bar.includes('s stop'), "the bar: a view's keys only once it has something for them, the rest that fit, and /");
+tui.key('2');
+assert.ok(lastLine(tui.frame(80, 30).join('\n')).includes('enter report'), "History's keys");
+tuiApp.override = { reviewer: true, builder: true };
+builderNeeds = [{ id: 'n1', ticket: 'AB#124', kind: 'question', question: 'Keep the old cart format?', context: [], options: ['Yes', 'No'], recommended: 'Yes', createdAt: 9 }];
+tui.key('B');
+tui.key('2');
+bar = lastLine(fits(tui.frame(80, 30), 'keys bar, Builder History'));
+assert.ok(['enter brief', 'o open PRs', 'c Claude session', 'w follow'].every(k => bar.includes(k)) && !bar.includes('quick review'), "the bar follows the view in sight: the Builder History's keys");
+tui.key('/');
+let keysList = fits(tui.frame(80, 60), 'all keys');
+assert.ok(keysList.includes('Builder · History · this view') && keysList.includes('Builder · Needs you') && keysList.includes('Moving around') && keysList.includes('Mouse')
+  && keysList.includes('Stop following the ticket') && !/Hoot|\(o,o\)/.test(keysList), 'the full list: this view first, the side\'s other views, the rest, with Hoot out of the way');
+assert.ok(tui.frame(140, 40).some(l => l.length <= 140 && ['Moving around', 'The side in view', 'Typing', 'Mouse', 'Prowl'].some(h => l.indexOf(` ${h}`) > 60)), 'in two columns when wide');
+tui.key('3');
+assert.ok(!tui.ui.keys && fits(tui.frame(80, 30), 'a key closes the list').includes('Keep the old cart format?'), 'any other key closes the list and does its job');
+tui.key('/');
+tui.key('esc');
+assert.equal(tui.ui.keys, null, 'esc closes it');
+// The mouse: a view's tab, a row, the same row again, a side's tab, a key in the bar, the wheel.
+tui.key('1');
+let lines = tui.frame(80, 30);
+const at = (text, from = 0) => { const y = lines.findIndex((l, i) => i >= from && l.includes(text)); return [lines[y].indexOf(text), y]; };
+tui.mouse(...at(' 2 History'));
+lines = tui.frame(80, 30);
+assert.ok(lines.join('\n').includes('READY TO MERGE'), "a click on a view's tab opens it");
+const opened = [];
+tui.ui.sel.builder[1] = 5;
+tui.mouse(...at('AB#123'));
+assert.equal(tui.ui.sel.builder[1], 0, 'a click on a row selects it');
+tui.mouse(...at('Reviewer'));
+assert.equal(tui.ui.side, 'reviewer', "a click on a side's tab switches to it");
+lines = tui.frame(80, 30);
+tui.mouse(...at('/ all keys'));
+assert.ok(tui.ui.keys, 'a click on a key in the bar presses it');
+tui.frame(80, 30);
+tui.mouse(0, 10);
+assert.equal(tui.ui.keys, null, 'a click on the list closes it');
+tui.key('4');
+const cfgSel = tui.ui.sel.reviewer[3];
+tui.mouse(0, 0, 65);
+assert.equal(tui.ui.sel.reviewer[3], cfgSel + 1, 'the wheel moves the selection');
+// A drag selects text, highlighted while the button is down, and copies it when let go, as in Claude Code.
+const copied = [];
+const tui3 = startTui(tuiApp, { sides: tuiSides, pollNow() {}, togglePause() {}, saveConfig() {}, saveToken: () => '', quit() {}, toggleSide: () => true },
+  { headless: true, copy: t => copied.push(t) });
+tui3.key('B');
+tui3.key('2');
+lines = tui3.frame(80, 30);
+const [kx, ky] = at('AB#123');
+const [px, py] = at('pull/7');
+tui3.drag(kx, ky, px + 5, py);
+assert.equal(copied.length, 1, 'let go: copied');
+assert.ok(copied[0].startsWith('AB#123') && copied[0].endsWith('pull/7') && copied[0].includes('\n'), `the selection, across rows: ${JSON.stringify(copied[0])}`);
+assert.ok(!copied[0].split('\n').some(l => l !== l.trimEnd()), 'without trailing spaces');
+assert.ok(tui3.frame(80, 30).join('\n').includes('Copied'), 'it says so');
+tui3.drag(5, 0, 5, 0);
+assert.equal(copied.length, 1, 'a press and release in place is a click, not a copy');
+// c: the selected item's session, forked into a new tab; with no session yet, it says so.
+const sessDir = fs.mkdtempSync(path.join(os.tmpdir(), 'prowl-test-'));
+const sessLog = path.join(sessDir, 'work.ndjson');
+fs.writeFileSync(sessLog, `warning: something on stderr\n${JSON.stringify({ type: 'system', subtype: 'init', cwd: '/projects', session_id: '0b6c4b55-2f4e-4c2e-9d55-8f7d7c0a1e21' })}\n`);
+const { sessionOf } = await import('./sessions.mjs');
+assert.deepEqual(sessionOf(sessLog), { id: '0b6c4b55-2f4e-4c2e-9d55-8f7d7c0a1e21', cwd: '/projects' }, 'the session id and folder, from the log\'s init event');
+assert.equal(sessionOf(path.join(sessDir, 'none.ndjson')), null);
+const tabs = [];
+const tui2 = startTui(tuiApp, {
+  sides: { ...tuiSides, builder: { ...tuiSides.builder, history: () => [{ ...tuiSides.builder.history()[0], logPath: sessLog }, { uid: 'u2', key: 'AB#9', title: 'Not started', status: 'ended', updatedAt: 1, briefDir: '/b' }] } },
+  pollNow() {}, togglePause() {}, saveConfig() {}, saveToken: () => '', quit() {}, toggleSide: () => true, log: (...a) => opened.push(a),
+}, { headless: true, openInTerminal: async (cwd, argv) => { tabs.push([cwd, argv]); return tabs.length === 1; } });
+tuiApp.cfg.builder.enabled = true;
+tui2.key('B');
+tui2.key('2');
+tui2.key('c');
+await new Promise(r => setTimeout(r, 0));
+assert.deepEqual(tabs, [['/projects', ['claude', '--resume', '0b6c4b55-2f4e-4c2e-9d55-8f7d7c0a1e21', '--fork-session']]], 'c resumes a fork of the session, in its own folder, in a new tab');
+assert.ok(tui2.frame(80, 30).join('\n').includes("Opened AB#123's Claude session"));
+tui2.key('c');
+await new Promise(r => setTimeout(r, 0));
+assert.ok(opened.some(([, level, msg]) => level === 'warn' && msg.includes('claude --resume 0b6c4b55')) && tui2.frame(80, 30).join('\n').includes('the Log (5) has the command'), "where no tab opens, the Log has the command");
+tui2.key('down');
+tui2.key('c');
+assert.ok(tui2.frame(80, 30).join('\n').includes('AB#9 has no Claude session to open yet') && tabs.length === 2, 'no session yet: it says so');
+fs.rmSync(sessDir, { recursive: true });
+// Hoot's switch: off, no owl and the views get his rows.
+const ground = "_,_._'__._,_";
+assert.ok(tui2.frame(80, 30).join('\n').includes(ground), 'Hoot, on');
+tuiApp.cfg.hoot = false;
+assert.ok(!tui2.frame(80, 30).join('\n').includes(ground), 'Hoot, off');
+tuiApp.cfg.hoot = true;
 
 // ---- Fix my PRs removed: the first-launch migration ----
 const { migrateFixes, needsMigration } = await import('./migrate.mjs');

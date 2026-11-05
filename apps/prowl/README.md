@@ -74,9 +74,9 @@ Prowl has two sides, each with its own tab: the **Reviewer** and the **Builder**
 
 **Failures**, including a session that ends without writing its report, are retried once automatically (the trigger tag is put back), except a review stopped by a spend, turn or time cap, so a runaway review isn't paid for twice. A review that ends without posting its review also fails. Each review the session posts ends with a hidden marker line Prowl gives it; once the session ends, every PR still open must have a review from you carrying that marker. GitHub also files each reply on a thread as an empty review, so replies alone don't count, and a review whose own post was blocked (by an auto-mode permission check, say) no longer passes as done. That failure names the PRs and the session log, and isn't retried automatically, since a retry would most likely be blocked again. A PR merged or closed mid-review, or one Prowl couldn't look up, doesn't count as missing, and a review without the marker still counts, with a warning in the Log. After a second failure Prowl waits for someone to re-tag. **Stopping** a review removes **In Review**; re-tag the ticket to run it again.
 
-**Quick reviews**: `n` on the Reviewer's tab, or `prowl --review <pr> [<pr>...]` from the command line, asks for PRs to review without a ticket: PR links (`https://github.com/owner/repo/pull/12`) or `owner/repo#12`, separated by spaces or commas. It's a full review, the same as a ticket's: the PRs are reviewed together as one set, with the same settings, and History lists the review as `QUICK#1`, `QUICK#2`, …. Only open PRs are taken, and the review counts toward `maxConcurrentReviews`. No tag is read or written, and a failed quick review isn't retried: press `n` again. Instead of the *Review started* comment, which links to the ticket, each PR gets the *Quick review started* comment from `output.md`, which links the PRs reviewed together.
+**Quick reviews**: `n`, from any view, or `prowl --review <pr> [<pr>...]` from the command line, asks for PRs to review without a ticket: PR links (`https://github.com/owner/repo/pull/12`) or `owner/repo#12`, separated by spaces or commas. It's a full review, the same as a ticket's: the PRs are reviewed together as one set, with the same settings, and History lists the review as `QUICK#1`, `QUICK#2`, …. Only open PRs are taken, and the review counts toward `maxConcurrentReviews`. No tag is read or written, and a failed quick review isn't retried: press `n` again. Instead of the *Review started* comment, which links to the ticket, each PR gets the *Quick review started* comment from `output.md`, which links the PRs reviewed together.
 
-**Hoot** sleeps until there's news. He wakes up to say when he's checking the boards, when he picks up a ticket and starts its reviews, when each PR's review is posted, when a ticket is done, and when something goes wrong (with what went wrong).
+**Hoot** sleeps until there's news. He wakes up to say when he's checking the boards, when he picks up a ticket and starts its reviews, when each PR's review is posted, when a ticket is done, and when something goes wrong (with what went wrong). He needs a window at least 27 rows tall; turn him off with **Hoot** in Config (`hoot`) to give the views his rows.
 
 **Azure DevOps tag colours** are a board setting: Board → gear icon → Cards → Tag colors → add `In Review` (yellow) and `Reviewed`.
 
@@ -172,7 +172,9 @@ On Azure DevOps a ticket's key is `AB#123` (for `--work` and `--follow`, `123` w
 | `←` `→`, `1`–`5` | Running · History · Needs you · Config · Log, within the side in view |
 | `↑` `↓` | Select |
 | `e` | Turn the side in view on or off |
-| `n` | Review PRs together without a ticket: a quick review (Reviewer) |
+| `n` | A quick review: PRs reviewed together without a ticket. Works from any view, and switches to the Reviewer |
+| `c` | Open the selected review's or build's Claude Code session in a new terminal tab (Running, History, Needs you). It opens as a fork (`claude --resume <id> --fork-session`), so nothing you type there reaches Prowl's session. New tabs open in tmux, iTerm2, Terminal (a new window unless System Events has Accessibility access), WezTerm and Windows Terminal; elsewhere on macOS in a new Terminal window, and otherwise the Log has the command to run |
+| `/` | Show or hide every key, with what it does: the view's own first, then the side's other views, then the rest. Any other key closes the list and does its job |
 | `s` | Stop the selected review or build (Running) · skip the selected item, or end its work (Needs you) |
 | `enter` | Open the report (Reviewer History) or the brief folder (Builder) · answer, approve or retry (Needs you) · edit a setting, open a config file or flip a side's switch (Config) |
 | `w` | Follow the selected ticket's PRs (Builder History) |
@@ -183,11 +185,13 @@ On Azure DevOps a ticket's key is `AB#123` (for `--work` and `--follow`, `123` w
 | `p` | Pause the side in view (running sessions carry on) |
 | `q` | Quit, both sides. Running sessions keep going and reappear on the next launch |
 
-Each tab's label shows its switch, the sessions running (`▶`) and the items in Needs you (`⚑`).
+The bar along the bottom shows the keys for the view in sight, then as many of the rest as fit; `/` lists them all. Each tab's label shows its switch, the sessions running (`▶`) and the items in Needs you (`⚑`). The Reviewer is amber and the Builder violet: its tab, the selected view and its keys.
+
+**Mouse**: click a side's tab or a view's tab to open it, a row to select it, and the selected row again to do what `enter` does. A link opens, and a key in the bottom bar presses it. The wheel moves the selection, or scrolls. **Drag** across text to select it: it's highlighted, and copied to the clipboard when you let go, as in Claude Code (through `pbcopy` on macOS, `wl-copy` or `xclip` on Linux, and the terminal's own clipboard, OSC 52, which also works over SSH where the terminal allows it). Your terminal's own selection still works with a modifier held: Option in iTerm2, Shift in most other terminals.
 
 ## Config
 
-Settings live in `~/.prowl/config.json`, with a comment above each one saying what it does, its options, and an example for the lists. Prowl rewrites the file, comments included, whenever a setting changes in Config, so comments you add yourself aren't kept. Config (`4`) is the same on both tabs and holds every setting of the app, in sections: **Prowl** (the settings file, both switches, polling, dry run, updates, logs), **Boards and repos**, **Tags** (in the order a ticket meets them: build start, build in-progress, review trigger, review in-progress, review done), **All sessions**, then the Reviewer's (**Files**, **Sessions**, **Verdicts and rounds**) and the Builder's (**Files**, **Sessions**, **Repos and branches**, **Follow-up**). The Builder's settings show while it's off, so you can set it up before you turn it on. Every setting keeps its key in `config.json`, and changes apply from the next poll.
+Settings live in `~/.prowl/config.json`, with a comment above each one saying what it does, its options, and an example for the lists. Prowl rewrites the file, comments included, whenever a setting changes in Config, so comments you add yourself aren't kept. Config (`4`) is the same on both tabs and holds every setting of the app, in sections: **Prowl** (the settings file, both switches, polling, dry run, updates, logs, Hoot), **Boards and repos**, **Tags** (in the order a ticket meets them: build start, build in-progress, review trigger, review in-progress, review done), **All sessions**, then the Reviewer's (**Files**, **Sessions**, **Verdicts and rounds**) and the Builder's (**Files**, **Sessions**, **Repos and branches**, **Follow-up**). Each section has its own colour, the Reviewer's in amber and the Builder's in violet. The Builder's settings show while it's off, so you can set it up before you turn it on. Every setting keeps its key in `config.json`, and changes apply from the next poll.
 
 ### Shared
 
@@ -208,6 +212,7 @@ Settings live in `~/.prowl/config.json`, with a comment above each one saying wh
 | `logRetentionDays` | `0` | **Keep logs (days)**: on launch and each poll, review logs in `logs/` older than this are deleted (never a running review's), and `poller.log` past 5 MB is renamed `poller.log.1`, replacing the older one. Reports are always kept. `0` = keep everything |
 | `dryRun` | `false` | Log what would be reviewed or built, without touching tags or starting sessions |
 | `autoUpdate` | `true` | Install a newer Prowl release before launching |
+| `hoot` | `true` | **Hoot**: the owl along the top of the screen, saying what Prowl is doing. `false`: no owl, and the views get his rows |
 
 ### Reviewer
 

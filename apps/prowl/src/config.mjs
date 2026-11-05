@@ -65,6 +65,7 @@ const DEFAULTS = {
   },
   dryRun: false,
   autoUpdate: true,
+  hoot: true,
 };
 
 // The comment above each setting in config.json, by dotted key: what it does, its options, and an example for lists.
@@ -137,6 +138,7 @@ const NOTES = {
   'builder.waitForChecksMinutes': 'After a round\'s push, how long to wait for the required checks. 0 = don\'t wait.',
   dryRun: 'true: log what would be reviewed or built, without changing tags or starting sessions.',
   autoUpdate: 'true: install a newer Prowl release before launching.',
+  hoot: 'true: Hoot the owl walks along the top of the screen and says what Prowl is doing. false: no owl, and the views get his rows.',
 };
 
 const isObj = v => v && typeof v === 'object' && !Array.isArray(v);

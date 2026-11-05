@@ -24,6 +24,7 @@ export const CONFIG_FIELDS = [
   { key: 'dryRun', label: 'Dry run', type: 'bool', help: 'Log what would be reviewed or built, without changing tags or starting sessions.' },
   { key: 'autoUpdate', label: 'Auto-update', type: 'bool', help: 'Install a newer Prowl release before launching. It waits while sessions from an earlier launch are still running.' },
   { key: 'logRetentionDays', label: 'Keep logs (days)', type: 'int', min: 0, max: 3650, help: 'Session logs older than this are deleted, and poller.log rolls over to poller.log.1 past 5 MB. Reports are always kept. 0 = keep everything.' },
+  { key: 'hoot', label: 'Hoot', type: 'bool', help: 'on: Hoot the owl walks along the top of the screen (in a window 27 rows or taller) and says what Prowl is doing. off: no owl, and the views get his rows.' },
 
   { heading: 'Boards and repos' },
   { key: 'taskBoard', label: 'Task board', type: 'enum', values: ['ado', 'jira'], names: { ado: 'Azure DevOps', jira: 'Jira' }, help: 'Where tickets are watched, for both sides: Azure DevOps or Jira Cloud. enter switches. Each keeps its own boards.' },

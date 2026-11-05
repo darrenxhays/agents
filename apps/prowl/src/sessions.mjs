@@ -46,6 +46,27 @@ export const sessionEnv = (cfg, env = process.env) => ({
 export const capHit = (result, { maxBudgetUsd, maxTurns } = {}) =>
   ({ error_max_budget_usd: `spend cap $${maxBudgetUsd}`, error_max_turns: `turn cap ${maxTurns}` }[result?.subtype] || null);
 
+/**
+ * The Claude Code session that wrote the log at `logPath`, from its init event: { id, cwd }, or null when there is
+ * none yet (the session hasn't started) or the log is gone.
+ */
+export function sessionOf(logPath) {
+  let text;
+  try {
+    const fd = fs.openSync(logPath, 'r');
+    try {
+      const buf = Buffer.alloc(512 * 1024); // the init event comes first, after any early stderr
+      text = buf.toString('utf8', 0, fs.readSync(fd, buf, 0, buf.length, 0));
+    } finally { fs.closeSync(fd); }
+  } catch { return null; }
+  for (const line of text.split('\n')) {
+    let e;
+    try { e = JSON.parse(line); } catch { continue; }
+    if (e?.type === 'system' && e.subtype === 'init' && /^[0-9a-f-]{36}$/i.test(e.session_id || '')) return { id: e.session_id, cwd: e.cwd };
+  }
+  return null;
+}
+
 /** Forgets what readActivity() read, before a new session writes to a new log. */
 export const resetActivity = run => { for (const k of ['_activity', '_offset', '_partial', '_decoder', '_result', '_ours']) delete run[k]; };
 

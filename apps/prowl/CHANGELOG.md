@@ -2,6 +2,16 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.15.0
+- The keys bar along the bottom has its own colour and shows the keys for the view you're on (stop, open PRs, report, brief, follow and so on), then as many of the rest as fit. Press / for every key with what it does: the view's own first, then the side's other views, then moving around, the side's switches, typing and the mouse. ↑↓ scrolls it; / or esc closes it, and any other key closes it and does its job.
+- New key: c opens the selected review's or build's Claude Code session in a new terminal tab (Running, History and Needs you, on both sides), to look at what it did or ask it something. It opens as a fork, so nothing you type there reaches Prowl's session. Tabs open in tmux, iTerm2, Terminal, WezTerm and Windows Terminal; in Terminal a new tab needs System Events to have Accessibility access (System Settings, Privacy & Security), else it opens a new window. Anywhere else on macOS it opens a Terminal window, and otherwise the Log has the command to run.
+- Prowl works with the mouse: click a side's tab or a view's tab to open it, a row to select it, and the selected row again to do what enter does. Links open, keys in the bottom bar press, and the wheel moves the selection or scrolls.
+- Drag across text to select it, and it's copied to the clipboard when you let go, as in Claude Code. Your terminal's own selection still works with a modifier held: Option in iTerm2, Shift in most other terminals.
+- n starts a quick review from any view, on either tab: it switches to the Reviewer's Running view to ask for the PRs.
+- The Builder has its own colour, violet, for its tab, the selected view, its cursor and its keys; the Reviewer stays amber.
+- Config's sections each have their own colour, with a heading rule and a bar down the left of their rows: the Reviewer's in amber, the Builder's in violet.
+- New setting: Hoot (Config, Prowl; hoot in config.json), on by default. Off, the owl is gone and the views get his rows.
+
 ## 2.14.0
 - The Builder's skill is now prowl-build, and its rules file is build.md (Config, Build rules). Prowl renamed your work.md to build.md, edits and all.
 - The Build command setting (builder.command) is gone, and Prowl removed it from your config.json: the Builder always runs its own skill, so Prowl can rely on how it works. To change how it builds, edit or replace build.md.

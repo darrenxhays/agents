@@ -152,3 +152,50 @@ export function notifyDesktop(title, text) {
   }
   spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true }).on('error', () => {}).unref();
 }
+
+const sh = s => `'${String(s).replace(/'/g, "'\\''")}'`; // a POSIX shell word
+const applescript = s => `"${s.replace(/[\\"]/g, '\\$&')}"`;
+
+/**
+ * Runs `argv` in `cwd` in a new tab of the terminal Prowl runs in: tmux (a window), iTerm2, Terminal, WezTerm or
+ * Windows Terminal. Elsewhere on macOS, in a new Terminal window. Resolves true once started, or false when it
+ * couldn't be (no supported terminal, or the terminal refused); the caller then shows the command to run.
+ */
+export function openInTerminal(cwd, argv, env = process.env) {
+  const line = `cd ${sh(cwd)} && ${argv.map(sh).join(' ')}`;
+  const term = env.TERM_PROGRAM;
+  let cmd;
+  let args;
+  if (env.TMUX) [cmd, args] = ['tmux', ['new-window', '-c', cwd, line]];
+  else if (WIN && env.WT_SESSION) [cmd, args] = ['wt', ['-w', '0', 'nt', '-d', cwd, 'cmd', '/k', ...argv]];
+  else if (term === 'WezTerm') [cmd, args] = ['wezterm', ['cli', 'spawn', '--cwd', cwd, '--', ...argv]];
+  else if (process.platform === 'darwin') {
+    const script = term === 'iTerm.app'
+      ? ['tell application "iTerm2"', 'tell current window', 'set t to (create tab with default profile)', `tell current session of t to write text ${applescript(line)}`, 'end tell', 'end tell']
+      : term === 'Apple_Terminal'
+        // A new tab is a ⌘T keystroke, which needs Accessibility access for System Events; without it, a new window.
+        ? ['tell application "Terminal" to activate', 'try', 'tell application "System Events" to keystroke "t" using command down', 'delay 0.3',
+          `tell application "Terminal" to do script ${applescript(line)} in selected tab of front window`, 'on error',
+          `tell application "Terminal" to do script ${applescript(line)}`, 'end try']
+        : [`tell application "Terminal" to do script ${applescript(line)}`, 'tell application "Terminal" to activate'];
+    [cmd, args] = ['osascript', script.flatMap(l => ['-e', l])];
+  } else return Promise.resolve(false);
+  return new Promise(resolve => {
+    spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true }).on('error', () => resolve(false)).on('exit', code => resolve(code === 0)).unref();
+  });
+}
+
+/**
+ * Puts `text` on the system clipboard, best effort: pbcopy on macOS, wl-copy or xclip on Linux. Elsewhere (and over
+ * SSH) the TUI's OSC 52 sequence does it, in terminals that allow it.
+ */
+export function copyText(text) {
+  const [cmd, args] = process.platform === 'darwin' ? ['pbcopy', []]
+    : process.env.WAYLAND_DISPLAY ? ['wl-copy', []]
+      : process.env.DISPLAY && !WIN ? ['xclip', ['-selection', 'clipboard']] : [];
+  if (!cmd) return;
+  const p = spawn(cmd, args, { stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true });
+  p.on('error', () => {});
+  p.stdin.on('error', () => {});
+  p.stdin.end(text);
+}
