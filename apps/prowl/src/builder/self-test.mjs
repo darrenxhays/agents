@@ -167,8 +167,15 @@ function githubFake(bares) {
 /** A scripted session: `script(w, prompt)` does the turn's work and returns { result, cost, subtype }. */
 function fakeSession(script) {
   const turns = [];
+  const asks = [];
   return {
     turns,
+    asks,
+    /** Your question to the session (?): it replies at once, with what it was asked. */
+    discuss(cfg, appDir, w, prompt, budget) {
+      asks.push({ prompt, budget, sessionId: w.sessionId });
+      return { logPath: path.join(w.briefDir, 'no-ask.ndjson'), startedAt: Date.now(), pid: null, _result: { type: 'result', subtype: 'success', result: `Re: ${prompt.split('\n')[0]}`, total_cost_usd: 0.25 } };
+    },
     start(cfg, appDir, w, prompt, budget) {
       turns.push({ key: w.key, prompt, budget, resumed: Boolean(w.sessionStarted), sessionId: w.sessionId });
       Object.assign(w, { startedAt: Date.now(), logPath: path.join(w.briefDir, 'no-log.ndjson'), sessionStarted: true, pid: null });
@@ -375,6 +382,9 @@ async function pure(assert) {
   assert.ok(workArgs({ ...scfg, builder: { ...scfg.builder, model: 'build-model', mcpAllow: ['mcp__docs__*'] } }, '/app', { ...w, sessionStarted: true }, '/s', 0).join(' ').includes('--model build-model --effort high'));
   assert.ok(!workArgs({ ...scfg, builder: { ...scfg.builder, mcpAllow: ['mcp__docs__*'] } }, '/app', w, '/s', 0).includes('--strict-mcp-config'), 'some MCP tools allowed: the servers load');
   assert.ok(workArgs(scfg, '/app', { ...w, sessionStarted: true }, '/s', 0).includes('--resume'));
+  const asking = workArgs(scfg, '/app', { ...w, sessionStarted: true }, '/s', 0, true);
+  assert.deepEqual(asking.slice(asking.indexOf('--disallowedTools') + 1, asking.indexOf('--disallowedTools') + 4), ['Edit', 'Write', 'NotebookEdit'], 'asking its session: no editing tools, on top of the fence');
+  assert.ok(!workArgs(scfg, '/app', w, '/s', 0).includes('Edit'), 'a turn keeps them');
   const env = workEnv(scfg, w, { PATH: '/bin', JIRA_API_TOKEN: 'secret', AZURE_DEVOPS_EXT_PAT: 'secret' });
   assert.equal(env.PROWL_SESSION, 'work');
   assert.equal(env.PROWL_WORK_ROOTS, ['/wt/web', '/wt/api', '/w/AB123'].join(path.delimiter));
@@ -492,6 +502,21 @@ async function builds(assert) {
   w = h.b.history().find(r => r.uid === q.recordId);
   assert.equal(w.status, 'needs-you');
   assert.ok(h.server.tags(w.ref.id).includes('In Development'), 'the ticket keeps In Development');
+  // Before answering, you can ask its session about it: a turn of the same session, its reply under the question.
+  const builds = h.session.turns.length;
+  const spentBefore = w.costUsd;
+  assert.equal(h.b.discuss(q, 'Why not keep them for guests too?'), '', 'asked');
+  assert.equal(h.b.discuss(q, 'And?'), 'Wait for the reply to your last question.', 'one question out at a time');
+  const ask = h.session.asks[0];
+  assert.ok(ask.prompt.startsWith('asks: Why not keep them for guests too?\nabout: Keep carts for guests?') && /Change nothing/.test(ask.prompt), 'the asks message, which says what to do itself');
+  assert.equal(ask.sessionId, w.sessionId, 'the same session, so it remembers the talk');
+  h.b.tick();
+  assert.deepEqual(q.thread.map(m => [m.from, m.text]), [['you', 'Why not keep them for guests too?'], ['session', 'Re: asks: Why not keep them for guests too?']], 'its reply under the question');
+  assert.deepEqual([w.status, h.session.turns.length, h.b.needs()[0]], ['needs-you', builds, q], 'nothing else moves: still waiting for your answer');
+  assert.deepEqual([w.turns.at(-1).kind, w.costUsd - spentBefore], ['ask', 0.25], 'its cost counts toward the caps');
+  assert.equal(h.b.discuss(q, 'Anything else?'), '', 'and again, as often as you like');
+  h.b.tick();
+  assert.equal(q.thread.length, 4);
   h.b.answer(q, 'No, signed-in shoppers only');
   await h.b.drain();
   assert.ok(h.session.turns.some(t => t.prompt === 'answers:\nQ1: No, signed-in shoppers only'), 'answers: resumes the session');

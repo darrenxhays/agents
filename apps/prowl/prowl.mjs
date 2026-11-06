@@ -231,6 +231,7 @@ tui = startTui(app, {
   },
   stop: (name, item) => byName[name].stop(item),
   answer: (item, text) => builder.answer(item, text),
+  discuss: (item, question) => builder.discuss(item, question),
   skip: item => builder.skip(item),
   handBack: item => builder.handBack(item).catch(e => log('builder', 'error', `${item.ticket}: couldn't hand it back (${e.message})`)),
   follow: w => builder.enqueue(w.key, 'follow'),

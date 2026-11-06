@@ -106,6 +106,7 @@ Prowl resumes this session (`claude --resume`) with one of:
 - `checks failed:` (the commands, then their output): Prowl's checks or the PR's required CI failed on your commits. Fix that first, commit again, and end as before.
 - `result.json invalid: <why>`: write `result.json` again, in full, following the contract.
 - `continue: <note>`: the user wants you to go on, with their note.
+- `asks: <question>` and `about: <what you raised>`: the user is still deciding how to answer something you raised, and asks you this first. Reply to them in plain text, briefly and concretely, reading the code or the brief if that helps. Change nothing: no edits, no commits, no `result.json`; your stage isn't over. Their answer comes later as one of the messages above, and they may ask again before it.
 
 ## Hard rules
 

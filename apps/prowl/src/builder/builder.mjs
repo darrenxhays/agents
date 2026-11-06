@@ -17,7 +17,7 @@ import { fill, outputTemplate } from '../templates.mjs';
 import * as brief from './brief.mjs';
 import { ensureClone, ghClone, prepareRepo, remoteBranches, worktreeRoot } from './repos.mjs';
 import * as rules from './rules.mjs';
-import { startTurn } from './session.mjs';
+import { startDiscussion, startTurn } from './session.mjs';
 
 export const WORK_PATH = path.join(HOME, 'work.json');
 export const WORK_DIR = path.join(HOME, 'work');
@@ -41,7 +41,7 @@ class NeedsYou extends Error {
 }
 class Stopped extends Error {}
 
-const DEFAULT_SESSION = { start: startTurn, alive, kill: w => killTree(w.pid) };
+const DEFAULT_SESSION = { start: startTurn, discuss: startDiscussion, alive, kill: w => killTree(w.pid) };
 
 /**
  * The Builder side. `deps`: { log(level, msg, key), forget(key), hoot(text, mood), appDir, trackers, and for the
@@ -78,7 +78,7 @@ export function createBuilder(app, deps) {
   side.running = () => records().filter(r => r.status === 'active');
   side.history = () => [...records()].sort((x, y) => (y.updatedAt || 0) - (x.updatedAt || 0));
   side.needs = () => side.state.needs;
-  side.alive = () => records().some(r => r.step === 'session' && session.alive(r));
+  side.alive = () => records().some(r => (r.step === 'session' && session.alive(r)) || (r.discussion && session.alive(r.discussion)));
   const itemsOf = w => side.state.needs.filter(n => n.recordId === w.uid);
 
   function newRecord(ticket, source) {
@@ -382,24 +382,33 @@ export function createBuilder(app, deps) {
     log('info', `${w.key}: read the ticket; ${repos.length ? `checked out ${repos.map(r => r.repo).join(', ')}` : 'no repo found yet'}`);
   }
 
-  /** Starts the next turn of `w`'s session, unless a cap holds it. */
-  async function turn(w) {
-    checkStop(w);
+  /**
+   * What `w`'s next turn may spend: what's left of the tightest cap, the session's, the ticket's and the day's
+   * ({ budget }, 0 = no cap); or why it may not run ({ why }), and whether that's only for now ({ why, wait }).
+   */
+  function room(w) {
     const c = b();
     const spent = rules.ticketSpend(records(), w.key);
     const today = rules.daySpend(records());
-    if (rules.spendLevel(spent, c.ticketBudgetUsd) === 'over') throw new NeedsYou('cap', `Spend cap per ticket reached ($${c.ticketBudgetUsd}): no more sessions for ${w.key}.`, { retry: 'turn' });
-    if (rules.spendLevel(today, c.dailyBudgetUsd) === 'over') throw new NeedsYou('cap', `Spend cap per day reached ($${c.dailyBudgetUsd}): no more sessions today.`, { retry: 'turn' });
-    if (c.maxBudgetUsd > 0 && c.maxBudgetUsd - (w.sessionCostUsd || 0) <= 0) throw new NeedsYou('cap', `The session for ${w.key} reached its spend cap ($${c.maxBudgetUsd}).`, { retry: 'turn' });
+    if (rules.spendLevel(spent, c.ticketBudgetUsd) === 'over') return { why: `Spend cap per ticket reached ($${c.ticketBudgetUsd}): no more sessions for ${w.key}.` };
+    if (rules.spendLevel(today, c.dailyBudgetUsd) === 'over') return { why: `Spend cap per day reached ($${c.dailyBudgetUsd}): no more sessions today.` };
+    if (c.maxBudgetUsd > 0 && c.maxBudgetUsd - (w.sessionCostUsd || 0) <= 0) return { why: `The session for ${w.key} reached its spend cap ($${c.maxBudgetUsd}).` };
     // Turns still running may yet spend what they were given: the day's cap holds that back, and this turn waits for it.
     const running = records().filter(r => r !== w && r.status === 'active' && ['session', 'settle'].includes(r.step)).reduce((n, r) => n + (r.turnBudgetUsd || 0), 0);
-    if (c.dailyBudgetUsd > 0 && running > 0 && today + running >= c.dailyBudgetUsd) {
-      w._retryAt = Date.now() + 60_000;
-      return log('info', `${w.key}: waiting: the turns running now may spend the rest of today's cap ($${c.dailyBudgetUsd})`, `work:${w.uid}`);
-    }
-    // The turn may spend what's left of the tightest cap: the session's, the ticket's and the day's.
+    if (c.dailyBudgetUsd > 0 && running > 0 && today + running >= c.dailyBudgetUsd) return { wait: true, why: `the turns running now may spend the rest of today's cap ($${c.dailyBudgetUsd})` };
     const left = [[c.maxBudgetUsd, w.sessionCostUsd || 0], [c.ticketBudgetUsd, spent], [c.dailyBudgetUsd, today + running]].filter(([cap]) => cap > 0).map(([cap, used]) => cap - used);
-    const budget = left.length ? Math.min(...left) : 0; // 0: no cap
+    return { budget: left.length ? Math.min(...left) : 0 };
+  }
+
+  /** Starts the next turn of `w`'s session, unless a cap holds it. */
+  async function turn(w) {
+    checkStop(w);
+    const { why, wait, budget } = room(w);
+    if (wait) {
+      w._retryAt = Date.now() + 60_000;
+      return log('info', `${w.key}: waiting: ${why}`, `work:${w.uid}`);
+    }
+    if (why) throw new NeedsYou('cap', why, { retry: 'turn' });
     w.turnBudgetUsd = budget;
     session.start(cfg(), appDir, w, w.prompt, budget);
     w.turns.push({ startedAt: w.startedAt, kind: w.turnKind, logPath: w.logPath, costUsd: 0 });
@@ -919,6 +928,7 @@ export function createBuilder(app, deps) {
   /** Stops `w` where it is: removes In Development (unless `untag` is false) and its worktrees, and records the cost. */
   async function stopNow(w, why = 'stopped by you', untag = true) {
     if (w.step === 'session' && session.alive(w)) session.kill(w);
+    if (w.discussion) { session.kill(w.discussion); delete w.discussion; }
     side.state.needs = side.state.needs.filter(n => n.recordId !== w.uid);
     Object.assign(w, { status: 'stopped', step: null, stopRequested: false, endedAt: Date.now(), note: why });
     touch(w);
@@ -964,6 +974,51 @@ export function createBuilder(app, deps) {
     else save();
     return undefined;
   };
+
+  /**
+   * ? in Needs you: asks the session that raised `item` about it first, as often as you like before answering. A turn
+   * of the same session without editing tools, held to the same caps; its reply joins the item's thread, and the
+   * session remembers the talk when your answer comes. Returns why it can't be asked now, or ''.
+   */
+  side.discuss = (item, question) => {
+    const w = records().find(r => r.uid === item.recordId);
+    if (!w || !side.state.needs.includes(item)) return 'That has been dealt with already.';
+    if (!w.sessionStarted || !w.sessionId) return 'No session has run for this yet, so there is no one to ask.';
+    if (w.discussion) return 'Wait for the reply to your last question.';
+    if (w.step === 'session' || w._busy) return 'Its session is running: ask once it stops.';
+    const { why } = room(w);
+    if (why) return `It can't be asked now: ${why}`;
+    item.thread = [...(item.thread || []), { from: 'you', text: question, at: Date.now() }];
+    try {
+      w.discussion = Object.assign(session.discuss(cfg(), appDir, w, brief.resume.asks(item.question, question), room(w).budget), { itemId: item.id });
+    } catch (e) {
+      item.thread.pop();
+      return `Couldn't ask it: ${e.message}`;
+    }
+    touch(w);
+    log('info', `${w.key}: asked its session: ${question}`);
+    return '';
+  };
+
+  /** Once a discussion turn has ended: its reply into the item's thread, and its cost onto the ticket's. */
+  function hearBack(w) {
+    const d = w.discussion;
+    readActivity(d);
+    if (!d._result && session.alive(d)) return;
+    readActivity(d);
+    const r = d._result;
+    const cost = r?.total_cost_usd || 0;
+    w.turns.push({ startedAt: d.startedAt, endedAt: Date.now(), kind: 'ask', logPath: d.logPath, costUsd: cost });
+    w.costUsd = (w.costUsd || 0) + cost;
+    w.sessionCostUsd = (w.sessionCostUsd || 0) + cost;
+    const reply = String(r?.result || '').trim() || (r ? `(no reply: the session ended with ${r.subtype || 'an error'})` : '(no reply: the session ended without one; its log has more)');
+    const item = side.state.needs.find(n => n.id === d.itemId);
+    if (item) item.thread = [...(item.thread || []), { from: 'session', text: reply, at: Date.now() }];
+    delete w.discussion;
+    touch(w);
+    log('ok', `${w.key}: its session replied`);
+    hoot(`${w.key}'s session answered your question`);
+  }
 
   /** s in Needs you: skips a question (the session uses its default), or ends the work and removes the tag. */
   side.skip = item => {
@@ -1036,6 +1091,7 @@ export function createBuilder(app, deps) {
   /** Once a second, on or off: tails sessions, settles ended turns, runs due steps. Claims and turns wait while off or paused. */
   side.tick = function tick() {
     for (const w of records()) {
+      if (w.discussion) { hearBack(w); continue; } // nothing else of a ticket moves while you're asking its session something
       if (w._busy || Date.now() < (w._retryAt || 0) || !w.step) continue;
       if (w.step === 'session') {
         readActivity(w);

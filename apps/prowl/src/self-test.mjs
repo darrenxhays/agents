@@ -1015,13 +1015,21 @@ tui.hover(...at('all keys'));
 let lit = raw().find(l => l.includes('all keys'));
 assert.ok(lit.includes('48;5;252m') && lit.includes('48;5;240m'), 'a hovered button: its keycap and its label');
 assert.ok(raw().filter(l => l.includes('48;5;252m')).length === 1, 'and nothing else');
-tui.hover(...at(' 3 Needs you'));
-assert.ok(raw().find(l => l.includes('Needs you')).includes('\x1b[1m\x1b[38;5;222m\x1b[48;5;237m'), 'a hovered tab, not selected: a ghost of its side\'s colour');
-assert.ok(raw().find(l => l.includes('Needs you')).includes('48;5;222m 2 History'), "the selected view: the lighter shade of the Reviewer's amber");
+tui.hover(...at(' 4 Config'));
+assert.ok(raw().find(l => l.includes('4 Config')).includes('\x1b[1m\x1b[38;5;222m\x1b[48;5;237m'), 'a hovered tab, not selected: a ghost of its side\'s colour');
+assert.ok(raw().find(l => l.includes('4 Config')).includes('48;5;222m 2 History'), "the selected view: the lighter shade of the Reviewer's amber");
+// The Reviewer never waits on you: no Needs you tab, and 3, ← and → pass it by. The other numbers keep their meaning.
+assert.ok(!lines.find(l => l.includes('4 Config')).includes('Needs you') && lines.find(l => l.includes('4 Config')).includes('5 Log'), "the Reviewer's tabs: no Needs you");
+tui.key('3');
+assert.equal(tui.ui.view.reviewer, 1, '3 does nothing on the Reviewer');
+tui.key('right');
+assert.equal(tui.ui.view.reviewer, 3, '→ from History goes to Config');
+tui.key('left');
+assert.equal(tui.ui.view.reviewer, 1, '← from Config back to History');
 tui.key('B');
 tui.key('2');
 lines = tui.frame(80, 30);
-assert.ok(raw().find(l => l.includes('Needs you')).includes('48;5;183m 2 History') && raw().find(l => l.includes('Builder')).includes('48;5;141m'), "the Builder's: violet, its view lavender");
+assert.ok(raw().find(l => l.includes('4 Config')).includes('48;5;183m 2 History') && raw().find(l => l.includes('4 Config')).includes('3 Needs you') && raw().find(l => l.includes('Builder')).includes('48;5;141m'), "the Builder's: violet, its view lavender, and its Needs you");
 tui.hover(...at('AB#123'));
 assert.ok(raw().find(l => l.includes('AB#123')).startsWith('\x1b[48;5;236m'), 'a hovered row: a soft band');
 tui.hover(0, 1);
@@ -1080,6 +1088,31 @@ assert.deepEqual([tui3.ui.side, tui3.ui.view.builder], ['builder', 2], 'a click 
 tui3.key('R');
 builderNeeds = [];
 assert.ok(tui3.frame(150, 30).join('\n').includes('✓ All clear'), 'nothing waiting: all clear');
+// ? in Needs you: ask its session first. The talk shows under the question, and a reply on its way says what it's doing.
+const record = { uid: 'u9', key: 'AB#125', title: 'Cart format', status: 'needs-you', prs: [], updatedAt: 9, briefDir: '/b' };
+builderNeeds = [{ id: 'n9', recordId: 'u9', ticket: 'AB#125', kind: 'question', question: 'Keep the old cart format?', context: [], options: ['Yes', 'No'], recommended: 'Yes', createdAt: 9,
+  thread: [{ from: 'you', text: 'What breaks if we drop it?' }, { from: 'session', text: 'Carts saved before March would be lost.' }] }];
+const discussed = [];
+const tui5 = startTui(tuiApp, {
+  sides: { ...tuiSides, builder: { ...tuiSides.builder, history: () => [record] } }, pollNow() {}, togglePause() {}, saveConfig() {}, saveToken: () => '', quit() {}, toggleSide: () => true,
+  discuss: (it, q) => { discussed.push([it.id, q]); return q === 'busy' ? 'Wait for the reply to your last question.' : ''; },
+}, { headless: true });
+tui5.key('B');
+tui5.key('3');
+let talk = tui5.frame(80, 30).join('\n');
+assert.ok(/You +What breaks if we drop it\?/.test(talk) && /Session +Carts saved before March would be lost\./.test(talk), 'the talk under the question');
+assert.ok(keyLine(talk).includes('? ask'), 'and ? in its bar');
+record.discussion = { itemId: 'n9', _activity: [{ text: 'Read src/cart.js' }] };
+assert.ok(tui5.frame(80, 30).join('\n').includes('its session is thinking: Read src/cart.js'), 'a reply on its way');
+tui5.key('?');
+for (const k of 'busy') tui5.key(k);
+tui5.key('enter');
+assert.ok(tui5.ui.edit && tui5.frame(80, 30).join('\n').includes('Wait for the reply to your last question.'), "why it can't be asked yet, in place");
+for (let i = 0; i < 4; i++) tui5.key('backspace');
+for (const k of 'Why March?') tui5.key(k);
+tui5.key('enter');
+assert.deepEqual([discussed.at(-1), tui5.ui.edit], [['n9', 'Why March?'], null], 'asked');
+builderNeeds = [];
 // Hoot's switch: off, no owl and the views get his rows.
 const ground = "_,_._'__._,_";
 assert.ok(tui3.frame(80, 30).join('\n').includes(ground), 'Hoot, on');

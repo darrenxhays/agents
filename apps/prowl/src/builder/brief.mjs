@@ -151,4 +151,6 @@ export const resume = {
   checksFailed: failures => ['checks failed:', ...failures.flatMap(f => [`${f.repo}: ${f.command}`, '', String(f.output || '').trim(), ''])].join('\n').trimEnd(),
   invalid: why => `result.json invalid: ${why}. Write it again, in full, following the result contract.`,
   continue: note => `continue: ${note || 'go on from where you stopped.'}`,
+  // Says what to do itself, for sessions that started before the skill knew this message.
+  asks: (about, question) => `asks: ${question}\nabout: ${about}\n\nThe user asks this before answering what you raised. Reply to them in plain text. Change nothing: no edits, no commits, no result.json. Their answer comes later.`,
 };

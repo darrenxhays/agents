@@ -151,7 +151,7 @@ function* keys(data) {
 /**
  * Full-screen terminal UI: a tab for each side (Reviewer and Builder), each with Running, History, Needs you, Config
  * and Log. `app` is read every frame. `actions` = { sides: { reviewer, builder }, pollNow(side), togglePause(side),
- * toggleSide(side), stop(side, item), answer(item, text), skip(item), handBack(item), follow(record), stopFollowing(record),
+ * toggleSide(side), stop(side, item), answer(item, text), discuss(item, question) (why it can't be asked, or ''), skip(item), handBack(item), follow(record), stopFollowing(record),
  * reviewPrs(refs) (a quick review), saveConfig, saveToken, quit }. `io` = { out, stdin, headless }
  * (headless: no raw mode, mouse or timers, for the self-test), copy(text). Returns { restore, key(k), mouse(x, y, button), drag(x0, y0, x1, y1), frame() }.
  */
@@ -180,6 +180,8 @@ export function startTui(app, actions, io = {}) {
   const sel = () => ui.sel[ui.side];
   const clampSel = (tab, n) => (sel()[tab] = Math.max(0, Math.min(sel()[tab], n - 1)));
   const isOn = name => app.sideOn(name);
+  // The Reviewer never waits on you, so it has no Needs you view; the numbers keep their meaning (Config is 4 on both).
+  const hasView = i => !(ui.side === 'reviewer' && i === NEEDS);
   // The Builder's tab shows once it is on, and while it still has sessions running or items waiting on you.
   const visible = name => name === 'reviewer' || isOn(name) || live(name).length > 0 || needs(name).length > 0;
   const reviewer = sides.reviewer;
@@ -240,7 +242,7 @@ export function startTui(app, actions, io = {}) {
   function tabBar() {
     const counts = [live(ui.side).length, history(ui.side).length, needs(ui.side).length];
     const segs = [['', ' ']];
-    TABS.forEach((t, i) => segs.push([i === view() ? acc().view : ST.tabOff, ` ${i + 1} ${t}${counts[i] != null ? ` (${counts[i]})` : ''} `, undefined,
+    TABS.forEach((t, i) => hasView(i) && segs.push([i === view() ? acc().view : ST.tabOff, ` ${i + 1} ${t}${counts[i] != null ? ` (${counts[i]})` : ''} `, undefined,
       () => { ui.view[ui.side] = i; }, i === view() ? acc().view : acc().ghost], ['', ' ']));
     return segs;
   }
@@ -450,15 +452,14 @@ export function startTui(app, actions, io = {}) {
   function needsView(W, H) {
     const items = needs(ui.side);
     if (!items.length) {
-      return [[], [[ST.grey, ui.side === 'reviewer'
-        ? '  The Reviewer never waits on you: a ticket it can\'t review stays tagged for a person, and History says why.'
-        : isOn('builder') ? '  Nothing needs you. The Builder\'s questions, plans waiting for approval and stops show up here.'
-          : '  The Builder is off (e turns it on). Its questions and stops show up here.']]];
+      return [[], [[ST.grey, isOn('builder') ? '  Nothing needs you. The Builder\'s questions, plans waiting for approval and stops show up here.'
+        : '  The Builder is off (e turns it on). Its questions and stops show up here.']]];
     }
     const at = clampSel(NEEDS, items.length);
     const it = items[at];
     const lab = t => [ST.grey, `  ${t.padEnd(9)}`];
-    const detail = [
+    const asking = builder.history().find(w => w.uid === it.recordId)?.discussion;
+    const fixed = [
       [lab('Ticket'), [ST.bold, it.ticket], ...(it.pr ? [['', '  '], [ST.link, it.pr, it.pr]] : [])],
       ...wrap(clean(it.question), W - 12, 4).map((l, i) => [lab(i ? '' : ['question', 'plan', 'repos', 'blocked'].includes(it.kind) ? 'Question' : 'Stopped'), ['', l]]),
       ...it.context.map(c => [lab(''), [ST.grey, trunc(c, W - 12)]]),
@@ -466,7 +467,15 @@ export function startTui(app, actions, io = {}) {
       ...(it.blocked ? [[lab('Blocked'), [ST.grey, trunc(it.blocked, W - 12)]]] : []),
       ...(it.searched ? [[lab('Searched'), [ST.grey, trunc(it.searched, W - 12)]]] : []),
     ];
-    if (ui.edit) detail.push([], [lab(it.kind === 'plan' ? 'Note' : 'Answer'), ...editSegs()]);
+    // What you've asked its session about it (?), and its replies: the latest that fit, above the answer.
+    const said = (it.thread || []).flatMap(m => [[], ...wrap(clean(m.text), W - 12, 12).map((l, i) => [
+      i ? lab('') : m.from === 'you' ? [`${ST.bold}${acc().fg}`, '  You      '] : [`${ST.bold}${ST.cyan}`, '  Session  '], ['', l]])]);
+    if (asking?.itemId === it.id) said.push([], [lab(''), [ST.cyan, `${spin()} its session is thinking`], [ST.grey, asking._activity?.length ? `: ${trunc(asking._activity.at(-1).text, W - 40)}` : '…']]);
+    const typing = ui.edit ? [[], [lab(ui.edit.ask ? 'Ask' : it.kind === 'plan' ? 'Note' : 'Answer'), ...editSegs()],
+      ...(ui.edit.error ? [[lab(''), [ST.red, trunc(ui.edit.error, W - 12)]]] : [])] : [];
+    const room = Math.max(2, H - 3 - fixed.length - typing.length);
+    const thread = said.length > room ? [[lab(''), [ST.grey, `↑ ${said.length - room + 1} earlier lines`]], ...said.slice(-(room - 1))] : said;
+    const detail = [...fixed, ...thread, ...typing];
     const rows = windowed(items, at, Math.max(1, H - detail.length - 1)).map(({ item: x, i }) => {
       const head = [cursor(i === at), [ST.grey, `${stamp(x.createdAt)}  `], [ST.bold, x.ticket.padEnd(11)], [['question', 'plan', 'repos'].includes(x.kind) ? ST.yellow : ST.red, x.kind.padEnd(10)]];
       return onClick([...head, ['', trunc(x.question, W - width(head))]], pick(NEEDS, i));
@@ -537,7 +546,8 @@ export function startTui(app, actions, io = {}) {
       [['enter', 'brief', "Open the ticket's brief folder"], ['s', 'stop', 'Stop the selected build before its next push, PR, tag or turn'], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser']],
       [['enter', 'brief', "Open the ticket's brief folder"], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser'],
         ['w', 'follow', "Follow the ticket's PRs through review"], ['t', 'unfollow', "Stop following the ticket's PRs"]],
-      [['enter', 'answer', 'Answer the question, approve the plan (empty) or send it back with a note, or retry'], ['s', 'skip', 'Skip the question (the session uses its default), or end the work'],
+      [['enter', 'answer', 'Answer the question, approve the plan (empty) or send it back with a note, or retry'],
+        ['?', 'ask', 'Ask its session about it first, as often as you like: a reply shows under the question, and the session remembers the talk when you answer'], ['s', 'skip', 'Skip the question (the session uses its default), or end the work'],
         ['t', 'hand back', 'Hand the ticket back with its start tag; Prowl leaves it until someone re-tags it'], ['o', 'open', 'Open the PR or the ticket in the browser']],
       CONFIG_KEYS, [],
     ],
@@ -617,8 +627,9 @@ export function startTui(app, actions, io = {}) {
       const answers = ui.confirm.key ? [[ui.confirm.key, 'quit'], ['n', 'stay']] : [['y', 'yes'], ['n', 'no']];
       [nav, own] = [[say(`${ST.bold}${ST.yellow}`, ui.confirm.text)], keys('Confirm', answers)];
     } else if (ui.edit) {
-      const about = ui.edit.prs ? 'Quick review: paste PR links or owner/repo#12, then enter.' : ui.edit.secret ? 'Paste the token, then enter.' : 'Type, then enter to save.';
-      [nav, own] = [[say(NAV.text, about)], keys('Typing', [['enter', ui.edit.prs ? 'review' : 'save'], ['esc', 'cancel'], ['← →', 'move']])];
+      const about = ui.edit.prs ? 'Quick review: paste PR links or owner/repo#12, then enter.' : ui.edit.secret ? 'Paste the token, then enter.'
+        : ui.edit.ask ? 'Ask its session: type your question, then enter. Nothing changes until you answer.' : 'Type, then enter to save.';
+      [nav, own] = [[say(NAV.text, about)], keys('Typing', [['enter', ui.edit.prs ? 'review' : ui.edit.ask ? 'ask' : 'save'], ['esc', 'cancel'], ['← →', 'move']])];
     } else if (ui.keys) [nav, own] = [[say(NAV.text, 'All keys: any other key closes this list and does its job.')], keys('Keys', [['↑ ↓', 'scroll'], ['/', 'close'], ['esc', 'close']])];
     else {
       const list = viewKeys();
@@ -738,6 +749,7 @@ export function startTui(app, actions, io = {}) {
 
   function rows(advance, W, H) {
     if (!visible(ui.side)) ui.side = 'reviewer'; // the Builder was switched off with nothing left to show
+    if (!hasView(view())) ui.view[ui.side] = RUNNING;
     const out = [titleBar(W)];
     const said = app.speech(); // read with Hoot off too, so what he'd have said doesn't pile up
     if (H >= 27 && app.cfg.hoot !== false && !ui.keys) out.push(...strip(W, advance, said));
@@ -873,6 +885,15 @@ export function startTui(app, actions, io = {}) {
       if (!ui.confirm) { actions.skip(it); flash('Skipped: the session uses its default.'); }
     } else if (k === 't') {
       ui.confirm = { text: `Hand ${it.ticket} back with '${app.cfg.builder.tags.start}'? Prowl leaves it until someone re-tags it.`, yes: () => actions.handBack(it) };
+    } else if (k === '?') {
+      startEdit('', v => {
+        if (!v) return 'Type your question for its session, or esc';
+        const why = actions.discuss(it, v);
+        if (why) return why;
+        flash("Asked: its reply shows under the question. Ask again, or enter to answer, when you're ready.");
+        return '';
+      });
+      ui.edit.ask = true;
     }
     return undefined;
   }
@@ -942,9 +963,12 @@ export function startTui(app, actions, io = {}) {
       else if (k === 'B') flash('The Builder is off: turn it on in Config (4).');
       return undefined;
     }
-    if (k.length === 1 && k >= '1' && k <= String(TABS.length)) { ui.view[ui.side] = Number(k) - 1; return undefined; }
-    if (k === 'right') { ui.view[ui.side] = (view() + 1) % TABS.length; return undefined; }
-    if (k === 'left') { ui.view[ui.side] = (view() + TABS.length - 1) % TABS.length; return undefined; }
+    if (k.length === 1 && k >= '1' && k <= String(TABS.length)) { if (hasView(Number(k) - 1)) ui.view[ui.side] = Number(k) - 1; return undefined; }
+    if (k === 'right' || k === 'left') {
+      const by = k === 'right' ? 1 : TABS.length - 1;
+      do ui.view[ui.side] = (view() + by) % TABS.length; while (!hasView(view()));
+      return undefined;
+    }
     if (k === 'up') { sel()[view()] = Math.max(0, sel()[view()] - 1); return undefined; }
     if (k === 'down') { sel()[view()]++; return undefined; }
     if (k === 'q') {

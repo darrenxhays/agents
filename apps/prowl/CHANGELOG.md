@@ -2,6 +2,10 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.18.0
+- Needs you: press ? to ask the session that raised a question about it before you answer: why it's asking, what each option would mean, anything you need to decide. Each question is a turn of that same session, without editing tools and under the same spend caps; its reply shows under the question, and you can keep asking as long as you like. When you answer, the session remembers the whole talk. It works on what's already waiting in Needs you too.
+- The Reviewer no longer has a Needs you tab, since it never waits on you. Its other numbers stay the same (Config is still 4), and ← → pass over the gap.
+
 ## 2.17.0
 - The bottom bars no longer leave keys out on a narrow window: each one stacks into a grid instead, in as few rows as fit, with the same number of buttons on each row and the columns lined up. Only on a window too short for that do the least-used navigation buttons come off, so the bars never take more than a third of the screen.
 - Hoot stays on his spot now. He flaps, hovers and bounces where he stands instead of moving across the screen, and his ground ends at the edge of his patch.
