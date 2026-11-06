@@ -1088,30 +1088,75 @@ assert.deepEqual([tui3.ui.side, tui3.ui.view.builder], ['builder', 2], 'a click 
 tui3.key('R');
 builderNeeds = [];
 assert.ok(tui3.frame(150, 30).join('\n').includes('✓ All clear'), 'nothing waiting: all clear');
-// ? in Needs you: ask its session first. The talk shows under the question, and a reply on its way says what it's doing.
-const record = { uid: 'u9', key: 'AB#125', title: 'Cart format', status: 'needs-you', prs: [], updatedAt: 9, briefDir: '/b' };
-builderNeeds = [{ id: 'n9', recordId: 'u9', ticket: 'AB#125', kind: 'question', question: 'Keep the old cart format?', context: [], options: ['Yes', 'No'], recommended: 'Yes', createdAt: 9,
-  thread: [{ from: 'you', text: 'What breaks if we drop it?' }, { from: 'session', text: 'Carts saved before March would be lost.' }] }];
+// Needs you: each item is a form. The recommended option is picked; Other and Ask about this are typed in; Submit
+// (enter) sends one of the three, never two together. A question its session marks "multiple" takes several picks.
+const record = { uid: 'u9', key: 'AB#125', title: 'Names', status: 'needs-you', prs: [], updatedAt: 9, briefDir: '/b', sessionStarted: true };
+const nameQ = { id: 'n9', recordId: 'u9', ticket: 'AB#125', kind: 'question', question: "How should the user's name be displayed?", context: [], createdAt: 9,
+  options: ['first-name last-name', 'last-name, first-name', 'first-initial last-name'], recommended: 'first-name last-name',
+  thread: [{ from: 'you', text: 'Where is it shown?' }, { from: 'session', text: 'The account menu and the order history.' }] };
+builderNeeds = [nameQ];
+const answered = [];
 const discussed = [];
 const tui5 = startTui(tuiApp, {
   sides: { ...tuiSides, builder: { ...tuiSides.builder, history: () => [record] } }, pollNow() {}, togglePause() {}, saveConfig() {}, saveToken: () => '', quit() {}, toggleSide: () => true,
+  answer: (it, text) => { answered.push([it.id, text]); builderNeeds = builderNeeds.filter(x => x !== it); },
   discuss: (it, q) => { discussed.push([it.id, q]); return q === 'busy' ? 'Wait for the reply to your last question.' : ''; },
 }, { headless: true });
 tui5.key('B');
 tui5.key('3');
-let talk = tui5.frame(80, 30).join('\n');
-assert.ok(/You +What breaks if we drop it\?/.test(talk) && /Session +Carts saved before March would be lost\./.test(talk), 'the talk under the question');
-assert.ok(keyLine(talk).includes('? ask'), 'and ? in its bar');
-record.discussion = { itemId: 'n9', _activity: [{ text: 'Read src/cart.js' }] };
-assert.ok(tui5.frame(80, 30).join('\n').includes('its session is thinking: Read src/cart.js'), 'a reply on its way');
-tui5.key('?');
+const formText = () => tui5.frame(90, 34).join('\n');
+let form = formText();
+assert.ok(/\(•\) 1\. first-name last-name {2}Recommended/.test(form) && /\( \) 2\. last-name, first-name/.test(form) && /\( \) Other: type your own answer/.test(form)
+  && /\? {2}Ask about this: type a question/.test(form) && form.includes(' Submit '), `the form, the recommended option picked:\n${form}`);
+assert.ok(/You +Where is it shown\?/.test(form) && /Session +The account menu/.test(form), 'the talk so far, above it');
+assert.ok(['space pick', 'enter submit', '[ ] item'].every(k => flat(form.split('\n').slice(-tui5.ui.bars[1]).join(' ')).includes(k)), 'its keys');
+// Ask about this: typing there clears the pick; Submit sends the question alone, and the form stays for the answer.
+tui5.key('down'); tui5.key('down'); tui5.key('down'); tui5.key('down'); // to Ask about this
+assert.equal(tui5.ui.edit?.field, 'ask', 'on a row you type in, keys type');
 for (const k of 'busy') tui5.key(k);
+assert.ok(!/\(•\)/.test(formText().split('Ask about this')[0].split('Session')[1]), 'typing a question clears the pick');
 tui5.key('enter');
-assert.ok(tui5.ui.edit && tui5.frame(80, 30).join('\n').includes('Wait for the reply to your last question.'), "why it can't be asked yet, in place");
+assert.ok(formText().includes('Wait for the reply to your last question.') && !answered.length, "why it can't be asked yet, in the form; nothing answered");
 for (let i = 0; i < 4; i++) tui5.key('backspace');
-for (const k of 'Why March?') tui5.key(k);
+for (const k of 'Why not initials?') tui5.key(k);
 tui5.key('enter');
-assert.deepEqual([discussed.at(-1), tui5.ui.edit], [['n9', 'Why March?'], null], 'asked');
+assert.deepEqual([discussed.at(-1), answered.length], [['n9', 'Why not initials?'], 0], 'the question alone, never with an option');
+assert.ok(/\? {2}Ask about this: /.test(formText()) && tui5.ui.edit?.field === 'ask' && tui5.ui.edit.value === '', 'asked: ready for another');
+// Picking an option clears a question being typed; esc leaves the row for the top.
+for (const k of 'half') tui5.key(k);
+tui5.key('esc');
+assert.equal(tui5.ui.edit, null, 'esc: back to the options');
+tui5.key('down');
+tui5.key(' ');
+form = formText();
+assert.ok(/\(•\) 2\. last-name, first-name/.test(form) && !/\(•\) 1\./.test(form) && form.includes('Ask about this: type a question'), 'one pick at a time, and the question cleared');
+tui5.key('enter');
+assert.deepEqual(answered.at(-1), ['n9', 'last-name, first-name'], 'enter submits the pick');
+// Your own answer, by mouse: click Other, type, click Submit.
+const plan = { id: 'p1', recordId: 'u9', ticket: 'AB#125', kind: 'plan', question: 'Approve the plan for AB#125?', context: ['/b/plan.md'], options: [], recommended: '', createdAt: 9 };
+const browsers = { id: 'm1', recordId: 'u9', ticket: 'AB#125', kind: 'question', question: 'Which browsers must it support?', context: [], options: ['Chrome', 'Safari', 'Firefox'], recommended: ['Chrome', 'Safari'], multiple: true, createdAt: 9 };
+builderNeeds = [plan, browsers];
+let shown = tui5.frame(90, 34);
+assert.ok(shown.some(l => /\(•\) Approve the plan {2}Recommended/.test(l)) && shown.some(l => /Send it back with a note: /.test(l)), "a plan's form");
+const lineOf = text => { const y = shown.findIndex(l => l.includes(text)); return [shown[y].indexOf(text), y]; };
+tui5.mouse(...lineOf('Send it back with a note'));
+assert.equal(tui5.ui.edit?.field, 'other', 'a click on a row you type in: typing there');
+for (const k of 'Split the migration') tui5.key(k);
+shown = tui5.frame(90, 34);
+assert.ok(shown.some(l => /\( \) Approve the plan/.test(l)), 'your own words clear the pick');
+tui5.mouse(...lineOf('Submit'));
+assert.deepEqual(answered.at(-1), ['p1', 'Split the migration'], 'Submit, clicked');
+// Several picks, where its session allows: checkboxes, the recommended ones ticked, answered together.
+shown = tui5.frame(90, 34);
+assert.ok(shown.some(l => l.includes('Pick any that apply.')) && shown.some(l => /\[x\] 1\. Chrome/.test(l)) && shown.some(l => /\[x\] 2\. Safari/.test(l)) && shown.some(l => /\[ \] 3\. Firefox/.test(l)), 'checkboxes');
+tui5.mouse(...lineOf('3. Firefox'));
+tui5.mouse(...lineOf('1. Chrome'));
+tui5.key('enter');
+assert.deepEqual(answered.at(-1), ['m1', 'Safari; Firefox'], 'the ticked ones, together');
+builderNeeds = [{ ...browsers, id: 'm2', recommended: '' }];
+tui5.frame(90, 34);
+tui5.key('enter');
+assert.ok(formText().includes('Pick an option, write your own answer, or ask about it first.') && answered.at(-1)[0] === 'm1', 'nothing chosen: it says so');
 builderNeeds = [];
 // Hoot's switch: off, no owl and the views get his rows.
 const ground = "_,_._'__._,_";

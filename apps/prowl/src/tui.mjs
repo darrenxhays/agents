@@ -448,37 +448,136 @@ export function startTui(app, actions, io = {}) {
     return String(getPath(c, f.key));
   }
 
-  /** What only you can answer or decide: the Builder's questions, plans and stops. The Reviewer's stays empty. */
+  // ---- Needs you: each item is a form. Pick an option (several, where its session allows), answer in your own
+  // words, or ask its session about it, then Submit (enter). Only one of the three goes at a time. ----
+  const forms = new Map(); // item id → { cursor, picks, other, ask, error }
+  const FIRST = { plan: 'Approve the plan', blocked: 'Go on as it thinks best', repos: 'Do without it' };
+  const OWN = { plan: 'Send it back with a note', question: 'Other', blocked: 'Other', repos: 'Something else' };
+  const HINT = { other: 'type your own answer', ask: 'type a question for its session' };
+
+  /** The rows of `it`'s form: its choices, then the rows you type in, then Submit. */
+  function formRows(it) {
+    const recs = [it.recommended].flat().filter(Boolean);
+    const choices = it.options.length ? it.options.map(o => ({ label: o, answer: o, rec: recs.includes(o) }))
+      : [{ label: FIRST[it.kind] || (it.kind !== 'question' ? 'Retry' : recs.length ? `Use its default: ${recs.join('; ')}` : 'Let the session decide'), answer: '', rec: true }];
+    const own = it.options.length || it.kind !== 'question' ? OWN[it.kind] || 'Retry with a note' : 'Your answer';
+    const asked = builder.history().find(w => w.uid === it.recordId)?.sessionStarted;
+    return [...choices.map((c, i) => ({ type: 'choice', i, ...c })), { type: 'text', field: 'other', label: own },
+      ...(asked ? [{ type: 'text', field: 'ask', label: 'Ask about this' }] : []), { type: 'submit' }];
+  }
+
+  /** `it`'s form, made the first time with the recommended choice picked and the cursor on it. */
+  function formOf(it) {
+    if (!forms.has(it.id)) {
+      const rec = formRows(it).filter(r => r.type === 'choice' && r.rec).slice(0, it.multiple ? Infinity : 1);
+      forms.set(it.id, { cursor: rec[0]?.i ?? 0, picks: new Set(rec.map(r => r.i)), other: '', ask: '', error: '' });
+    }
+    return forms.get(it.id);
+  }
+  const currentItem = () => (view() === NEEDS ? needs(ui.side)[Math.min(sel()[NEEDS], needs(ui.side).length - 1)] : undefined);
+
+  /** Picks choice `i` (or unticks it, where several may be picked); your own answer and your question clear. */
+  function pickChoice(it, f, i) {
+    Object.assign(f, { other: '', ask: '', error: '' });
+    if (!it.multiple) f.picks = new Set([i]);
+    else if (f.picks.has(i)) f.picks.delete(i);
+    else f.picks.add(i);
+  }
+  /** Text typed in `field`: once there's some, the picks and the other text row clear. */
+  function setText(f, field, value) {
+    Object.assign(f, { [field]: value, error: '' });
+    if (value.trim()) { f.picks.clear(); f[field === 'ask' ? 'other' : 'ask'] = ''; }
+  }
+
+  /** Typing follows the form's cursor: on a row you type in, keys type; anywhere else they're keys. */
+  function focusForm(it) {
+    const f = formOf(it);
+    const row = formRows(it)[f.cursor];
+    if (row?.type !== 'text') { if (ui.edit?.form) ui.edit = null; return; }
+    if (ui.edit?.form && ui.edit.field === row.field && ui.edit.item === it.id) return;
+    ui.edit = { value: f[row.field], cursor: f[row.field].length, error: '', form: true, field: row.field, item: it.id, commit: () => submitForm(it) };
+  }
+  function formMove(dir) {
+    const it = currentItem();
+    if (!it) return;
+    const f = formOf(it);
+    f.cursor = dir === 'top' ? 0 : Math.max(0, Math.min(formRows(it).length - 1, f.cursor + (dir === 'up' ? -1 : 1)));
+    f.error = '';
+    focusForm(it);
+  }
+
+  /** Submit: your question to its session, or else your own answer, or else what you picked. Returns why not, or ''. */
+  function submitForm(it) {
+    const f = formOf(it);
+    if (f.ask.trim()) {
+      const why = actions.discuss(it, f.ask.trim());
+      if (why) return (f.error = why);
+      setText(f, 'ask', '');
+      flash("Asked: its reply shows under the question. Ask again, or answer when you're ready.");
+      return '';
+    }
+    const picked = formRows(it).filter(r => r.type === 'choice' && f.picks.has(r.i));
+    if (!f.other.trim() && !picked.length) return (f.error = 'Pick an option, write your own answer, or ask about it first.');
+    const text = f.other.trim() || picked.map(r => r.answer).join('; ');
+    actions.answer(it, text);
+    forms.delete(it.id);
+    if (ui.edit?.form) ui.edit = null;
+    flash(it.kind === 'plan' ? (text ? 'Sent back with your note.' : 'Plan approved: the session builds it now.')
+      : ['question', 'repos', 'blocked'].includes(it.kind) ? 'Answered: the session picks up from here.' : 'Retrying.');
+    return '';
+  }
+
+  /** What only you can answer or decide: the Builder's questions, plans and stops, each a form. */
   function needsView(W, H) {
     const items = needs(ui.side);
     if (!items.length) {
       return [[], [[ST.grey, isOn('builder') ? '  Nothing needs you. The Builder\'s questions, plans waiting for approval and stops show up here.'
         : '  The Builder is off (e turns it on). Its questions and stops show up here.']]];
     }
+    for (const id of forms.keys()) if (!items.some(x => x.id === id)) forms.delete(id); // answered or gone
     const at = clampSel(NEEDS, items.length);
     const it = items[at];
+    const f = formOf(it);
+    const form = formRows(it);
+    if (form[f.cursor]?.type === 'text' && !(ui.edit?.form && ui.edit.item === it.id)) f.cursor = 0; // back from elsewhere: not mid-typing
     const lab = t => [ST.grey, `  ${t.padEnd(9)}`];
     const asking = builder.history().find(w => w.uid === it.recordId)?.discussion;
     const fixed = [
       [lab('Ticket'), [ST.bold, it.ticket], ...(it.pr ? [['', '  '], [ST.link, it.pr, it.pr]] : [])],
-      ...wrap(clean(it.question), W - 12, 4).map((l, i) => [lab(i ? '' : ['question', 'plan', 'repos', 'blocked'].includes(it.kind) ? 'Question' : 'Stopped'), ['', l]]),
+      ...wrap(clean(it.question), W - 12, 4).map((l, i) => [lab(i ? '' : ['question', 'plan', 'repos', 'blocked'].includes(it.kind) ? 'Question' : 'Stopped'), [ST.bold, l]]),
       ...it.context.map(c => [lab(''), [ST.grey, trunc(c, W - 12)]]),
-      ...it.options.map((o, i) => [lab(i ? '' : 'Options'), [ST.yellow, `${i + 1}. `], ['', trunc(o, W - 30)], [ST.green, o === it.recommended ? '  (recommended)' : '']]),
       ...(it.blocked ? [[lab('Blocked'), [ST.grey, trunc(it.blocked, W - 12)]]] : []),
       ...(it.searched ? [[lab('Searched'), [ST.grey, trunc(it.searched, W - 12)]]] : []),
     ];
-    // What you've asked its session about it (?), and its replies: the latest that fit, above the answer.
+    // The form: a radio button for each choice (a checkbox where several may be picked), the rows you type in, Submit.
+    const box = on => (it.multiple ? (on ? '[x]' : '[ ]') : (on ? '(•)' : '( )'));
+    const formLines = form.map((r, idx) => {
+      const lead = f.cursor === idx ? [`${ST.bold}${acc().fg}`, '  ❯ '] : ['', '    '];
+      if (r.type === 'submit') {
+        return [lead, [f.cursor === idx ? acc().keyHover : acc().key, ' Submit ', undefined, () => { f.cursor = idx; submitForm(it); }, acc().keyHover], [ST.grey, '  enter']];
+      }
+      if (r.type === 'choice') {
+        const on = f.picks.has(r.i);
+        return onClick([lead, [on ? `${ST.bold}${acc().fg}` : ST.grey, box(on)], [ST.grey, it.options.length ? ` ${r.i + 1}. ` : ' '],
+          [on ? ST.bold : '', trunc(r.label, W - 26)], ...(r.rec ? [[ST.green, '  Recommended']] : [])], () => { f.cursor = idx; pickChoice(it, f, r.i); focusForm(it); });
+      }
+      const typing = ui.edit?.form && ui.edit.item === it.id && ui.edit.field === r.field;
+      const filled = f[r.field].trim();
+      const head = [lead, [filled ? `${ST.bold}${acc().fg}` : ST.grey, r.field === 'ask' ? ' ? ' : box(Boolean(filled))], ['', ` ${r.label}: `]];
+      const room = W - width(head) - 2;
+      return onClick([...head, ...(typing ? editSegs(room) : filled ? [['', trunc(f[r.field], room)]] : [[ST.grey, HINT[r.field]]])], () => { f.cursor = idx; f.error = ''; focusForm(it); });
+    });
+    const form2 = [[], ...(it.multiple ? [[lab(''), [ST.grey, 'Pick any that apply.']]] : []), ...formLines, ...(f.error ? [[['', '    '], [ST.red, trunc(f.error, W - 6)]]] : [])];
+    // What you've asked its session about it, and its replies: the latest that fit, above the form.
     const said = (it.thread || []).flatMap(m => [[], ...wrap(clean(m.text), W - 12, 12).map((l, i) => [
       i ? lab('') : m.from === 'you' ? [`${ST.bold}${acc().fg}`, '  You      '] : [`${ST.bold}${ST.cyan}`, '  Session  '], ['', l]])]);
     if (asking?.itemId === it.id) said.push([], [lab(''), [ST.cyan, `${spin()} its session is thinking`], [ST.grey, asking._activity?.length ? `: ${trunc(asking._activity.at(-1).text, W - 40)}` : '…']]);
-    const typing = ui.edit ? [[], [lab(ui.edit.ask ? 'Ask' : it.kind === 'plan' ? 'Note' : 'Answer'), ...editSegs()],
-      ...(ui.edit.error ? [[lab(''), [ST.red, trunc(ui.edit.error, W - 12)]]] : [])] : [];
-    const room = Math.max(2, H - 3 - fixed.length - typing.length);
+    const room = Math.max(2, H - 3 - fixed.length - form2.length);
     const thread = said.length > room ? [[lab(''), [ST.grey, `↑ ${said.length - room + 1} earlier lines`]], ...said.slice(-(room - 1))] : said;
-    const detail = [...fixed, ...thread, ...typing];
+    const detail = [...fixed, ...thread, ...form2];
     const rows = windowed(items, at, Math.max(1, H - detail.length - 1)).map(({ item: x, i }) => {
       const head = [cursor(i === at), [ST.grey, `${stamp(x.createdAt)}  `], [ST.bold, x.ticket.padEnd(11)], [['question', 'plan', 'repos'].includes(x.kind) ? ST.yellow : ST.red, x.kind.padEnd(10)]];
-      return onClick([...head, ['', trunc(x.question, W - width(head))]], pick(NEEDS, i));
+      return onClick([...head, ['', trunc(x.question, W - width(head))]], () => { sel()[NEEDS] = i; });
     });
     return [...rows, rule(W), ...detail];
   }
@@ -546,8 +645,9 @@ export function startTui(app, actions, io = {}) {
       [['enter', 'brief', "Open the ticket's brief folder"], ['s', 'stop', 'Stop the selected build before its next push, PR, tag or turn'], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser']],
       [['enter', 'brief', "Open the ticket's brief folder"], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser'],
         ['w', 'follow', "Follow the ticket's PRs through review"], ['t', 'unfollow', "Stop following the ticket's PRs"]],
-      [['enter', 'answer', 'Answer the question, approve the plan (empty) or send it back with a note, or retry'],
-        ['?', 'ask', 'Ask its session about it first, as often as you like: a reply shows under the question, and the session remembers the talk when you answer'], ['s', 'skip', 'Skip the question (the session uses its default), or end the work'],
+      [['space', 'pick', 'Pick the option under the cursor (or untick it, where several may be picked)'],
+        ['enter', 'submit', 'Submit what you picked, your own answer, or your question for its session: one at a time'],
+        ['[ ]', 'item', 'The previous or next item in Needs you'], ['s', 'skip', 'Skip the question (the session uses its default), or end the work'],
         ['t', 'hand back', 'Hand the ticket back with its start tag; Prowl leaves it until someone re-tags it'], ['o', 'open', 'Open the PR or the ticket in the browser']],
       CONFIG_KEYS, [],
     ],
@@ -565,7 +665,7 @@ export function startTui(app, actions, io = {}) {
     ['Prowl', [['/', 'all keys', 'Show or hide this list'], ['esc', 'close', 'Close this list, or answer no'],
       ['q', 'quit', 'Quit both sides; running sessions keep going and reappear on the next launch'], ['ctrl-c', 'quit now', 'Quit at once, without asking']]],
   ];
-  const PRESS = { '←': 'left', '→': 'right', '↑': 'up', '↓': 'down' };
+  const PRESS = { '←': 'left', '→': 'right', '↑': 'up', '↓': 'down', space: ' ' };
   const pressable = k => (k.length === 1 || ['enter', 'tab', 'esc', 'left', 'right', 'up', 'down'].includes(k) ? () => onKey(k) : undefined);
   // The view's own keys, while it has something selected for them to act on.
   const viewKeys = () => {
@@ -628,8 +728,10 @@ export function startTui(app, actions, io = {}) {
       [nav, own] = [[say(`${ST.bold}${ST.yellow}`, ui.confirm.text)], keys('Confirm', answers)];
     } else if (ui.edit) {
       const about = ui.edit.prs ? 'Quick review: paste PR links or owner/repo#12, then enter.' : ui.edit.secret ? 'Paste the token, then enter.'
-        : ui.edit.ask ? 'Ask its session: type your question, then enter. Nothing changes until you answer.' : 'Type, then enter to save.';
-      [nav, own] = [[say(NAV.text, about)], keys('Typing', [['enter', ui.edit.prs ? 'review' : ui.edit.ask ? 'ask' : 'save'], ['esc', 'cancel'], ['← →', 'move']])];
+        : ui.edit.form ? (ui.edit.field === 'ask' ? 'Ask about this: your question goes to its session, which replies under the question.' : 'Your own answer: type it, then enter to submit.')
+          : 'Type, then enter to save.';
+      [nav, own] = [[say(NAV.text, about)], keys('Typing', ui.edit.form ? [['enter', 'submit'], ['↑ ↓', 'move'], ['esc', 'back'], ['← →', 'cursor']]
+        : [['enter', ui.edit.prs ? 'review' : 'save'], ['esc', 'cancel'], ['← →', 'move']])];
     } else if (ui.keys) [nav, own] = [[say(NAV.text, 'All keys: any other key closes this list and does its job.')], keys('Keys', [['↑ ↓', 'scroll'], ['/', 'close'], ['esc', 'close']])];
     else {
       const list = viewKeys();
@@ -750,6 +852,7 @@ export function startTui(app, actions, io = {}) {
   function rows(advance, W, H) {
     if (!visible(ui.side)) ui.side = 'reviewer'; // the Builder was switched off with nothing left to show
     if (!hasView(view())) ui.view[ui.side] = RUNNING;
+    if (ui.edit?.form && currentItem()?.id !== ui.edit.item) ui.edit = null; // left Needs you, or the item went
     const out = [titleBar(W)];
     const said = app.speech(); // read with Hoot off too, so what he'd have said doesn't pile up
     if (H >= 27 && app.cfg.hoot !== false && !ui.keys) out.push(...strip(W, advance, said));
@@ -867,33 +970,22 @@ export function startTui(app, actions, io = {}) {
   }
 
   function needsKey(k) {
-    const it = needs(ui.side)[sel()[NEEDS]];
+    const it = currentItem();
     if (!it) return undefined;
-    if (k === 'o') openExternal(it.pr || builder.history().find(w => w.uid === it.recordId)?.url || '');
-    else if (k === 'enter') {
-      startEdit('', v => {
-        const n = Number(v);
-        const text = Number.isInteger(n) && it.options[n - 1] ? it.options[n - 1] : v;
-        actions.answer(it, text);
-        flash(it.kind === 'plan' ? (text ? 'Sent back with your note.' : 'Plan approved: the session builds it now.')
-          : ['question', 'repos', 'blocked'].includes(it.kind) ? 'Answered: the session picks up from here.' : 'Retrying.');
-        return '';
-      });
-    } else if (k === 's') {
+    const f = formOf(it);
+    const row = formRows(it)[f.cursor];
+    if (k === ' ') { if (row?.type === 'choice') pickChoice(it, f, row.i); else if (row?.type === 'submit') submitForm(it); }
+    else if (k === 'enter') submitForm(it);
+    else if (k === '[' || k === ']') {
+      sel()[NEEDS] = Math.max(0, Math.min(needs(ui.side).length - 1, sel()[NEEDS] + (k === ']' ? 1 : -1)));
+      focusForm(currentItem());
+    } else if (k === 'o') openExternal(it.pr || builder.history().find(w => w.uid === it.recordId)?.url || '');
+    else if (k === 's') {
       ui.confirm = ['question', 'repos'].includes(it.kind) ? null
         : { text: `End the work on ${it.ticket} and take its '${app.cfg.builder.tags.inProgress}' tag off?`, yes: () => { actions.skip(it); flash('Ended.'); } };
       if (!ui.confirm) { actions.skip(it); flash('Skipped: the session uses its default.'); }
     } else if (k === 't') {
       ui.confirm = { text: `Hand ${it.ticket} back with '${app.cfg.builder.tags.start}'? Prowl leaves it until someone re-tags it.`, yes: () => actions.handBack(it) };
-    } else if (k === '?') {
-      startEdit('', v => {
-        if (!v) return 'Type your question for its session, or esc';
-        const why = actions.discuss(it, v);
-        if (why) return why;
-        flash("Asked: its reply shows under the question. Ask again, or enter to answer, when you're ready.");
-        return '';
-      });
-      ui.edit.ask = true;
     }
     return undefined;
   }
@@ -951,6 +1043,16 @@ export function startTui(app, actions, io = {}) {
       if ([yes, 'n', 'esc'].includes(k)) { ui.confirm = null; if (k === yes) c.yes(); }
       return undefined;
     }
+    if (ui.edit?.form) {
+      // Typing in one of a Needs-you form's rows: ↑↓ move on, esc goes back to the top, enter submits.
+      const e = ui.edit;
+      if (k === 'up' || k === 'down' || k === 'esc') return formMove(k === 'esc' ? 'top' : k);
+      editKey(k);
+      const it = currentItem();
+      if (it && k !== 'enter') setText(formOf(it), e.field, e.value);
+      if (it) focusForm(it);
+      return undefined;
+    }
     if (ui.edit) return editKey(k);
     if (ui.keys) {
       if (k === 'up' || k === 'down') { ui.keys.scroll += k === 'up' ? -1 : 1; return undefined; }
@@ -969,6 +1071,7 @@ export function startTui(app, actions, io = {}) {
       do ui.view[ui.side] = (view() + by) % TABS.length; while (!hasView(view()));
       return undefined;
     }
+    if ((k === 'up' || k === 'down') && currentItem()) return formMove(k); // Needs you: through the form
     if (k === 'up') { sel()[view()] = Math.max(0, sel()[view()] - 1); return undefined; }
     if (k === 'down') { sel()[view()]++; return undefined; }
     if (k === 'q') {
@@ -1042,7 +1145,7 @@ export function startTui(app, actions, io = {}) {
 
   function click(x, y) {
     const row = ui.frame[y];
-    if (ui.edit && !row?.footer) return undefined; // while typing, only the bar's buttons
+    if (ui.edit && !ui.edit.form && !row?.footer) return undefined; // while typing, only the bar's buttons (a form's rows too)
     if (ui.notes) { ui.notes = null; return undefined; }
     if (!row || (ui.confirm && !row.footer)) return undefined;
     return hitAt(row, x)?.();

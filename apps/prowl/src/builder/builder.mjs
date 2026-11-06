@@ -458,13 +458,13 @@ export function createBuilder(app, deps) {
     if (r.status === 'needs-repos') { w.requested = r.repos; return next(w, 'repos'); }
     if (r.status === 'question') {
       const q = r.question;
-      return raise(w, 'question', q.question, { qid: q.id, options: q.options || [], recommended: q.default || '', context: q.context || [] });
+      return raise(w, 'question', q.question, { qid: q.id, options: q.options || [], recommended: q.default || '', multiple: q.multiple, context: q.context || [] });
     }
     if (r.status === 'blocked') return raise(w, 'blocked', `The session is blocked: ${r.reason}`, { qid: 'blocked' });
     if (r.status === 'needs-approval') {
       w.changes = r.changes || [];
       const open = r.openQuestions || [];
-      for (const q of open) raise(w, 'question', q.question, { qid: q.id, options: q.options || [], recommended: q.default || '', blocked: 'the plan waits for your answer' });
+      for (const q of open) raise(w, 'question', q.question, { qid: q.id, options: q.options || [], recommended: q.default || '', multiple: q.multiple, blocked: 'the plan waits for your answer' });
       if (open.length) return undefined;
       if (b().approvePlans === 'ask') return raise(w, 'plan', `Approve the plan for ${w.key}? enter with nothing typed approves it; a typed note sends it back.`, { context: [w.plan] });
       return next(w, 'approve');
@@ -805,7 +805,7 @@ export function createBuilder(app, deps) {
     const questions = r.questions || [];
     if (questions.length) {
       questions.forEach((q, i) => raise(w, 'question', q.text, {
-        qid: `Q${i + 1}`, context: String(q.context || '').split('\n').filter(Boolean), options: q.options || [], recommended: q.recommended || '', searched: q.searched,
+        qid: `Q${i + 1}`, context: String(q.context || '').split('\n').filter(Boolean), options: q.options || [], recommended: q.recommended || '', multiple: q.multiple, searched: q.searched,
         blocked: `feedback round ${w.rounds} waits for your answer`,
       }));
       return undefined;

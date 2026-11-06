@@ -132,9 +132,10 @@ export function validateBuild(r, briefDir) {
 }
 
 /** A Needs-you item. `kind`: question, plan, repos, blocked, cap, checks, guard, conflict or failed. */
-export const needItem = (kind, { key, question, qid = '', repo = '', pr = '', context = [], options = [], recommended = '', searched = '', blocked = '' }, now = Date.now()) => ({
+// `multiple`: the session's question lets you pick several of its options; `recommended` may then be a list.
+export const needItem = (kind, { key, question, qid = '', repo = '', pr = '', context = [], options = [], recommended = '', multiple = false, searched = '', blocked = '' }, now = Date.now()) => ({
   id: `${key}:${now.toString(36)}:${Math.random().toString(36).slice(2, 6)}`,
-  ticket: key, kind, question, qid, repo, pr, context: [context].flat().filter(Boolean).slice(0, 3), options, recommended, searched, blocked, createdAt: now,
+  ticket: key, kind, question, qid, repo, pr, context: [context].flat().filter(Boolean).slice(0, 3), options, recommended, multiple: Boolean(multiple) && options.length > 1, searched, blocked, createdAt: now,
 });
 
 /** Every Builder session on ticket `key`, in USD. */

@@ -134,7 +134,7 @@ With `builder.followUp` on (the default):
 
 - **Stop**: `s` on a running ticket stops it and removes In Development. A step in progress stops before its next push, PR, tag or turn, and the cost is recorded.
 - **Caps**: per session (`builder.maxBudgetUsd`), per ticket (`builder.ticketBudgetUsd`, counting every run on the ticket), per day (`builder.dailyBudgetUsd`), turns and time per turn. Each turn may spend only what's left of the tightest spend cap. Any cap goes to Needs you and isn't retried. A crash or an unusable `result.json` is asked for once more, then goes to Needs you.
-- **Needs you** (tab `3`, the Builder's only: the Reviewer never waits on you): the ticket keeps In Development. `?` asks the session that raised it about it first, as often as you like: each question is a turn of that same session, without editing tools and under the same spend caps, and the talk shows under the question, so you can get what you need before answering, and the session remembers it when you do. It works on anything a session raised, including what was waiting before you updated. `enter` answers, approves or retries (type the answer, or an option's number); `s` skips a question (the session uses its default), or ends the work and removes the tag; `t` hands the ticket back by putting the start tag back on. The Builder doesn't reclaim a ticket handed back until someone removes the tag and adds it again; other edits don't count.
+- **Needs you** (tab `3`, the Builder's only: the Reviewer never waits on you): the ticket keeps In Development. Each item is a form. A question lists its options, the recommended one picked (checkboxes where the session marks the question `multiple`, so you can pick several), then **Other** to answer in your own words, and **Ask about this** to ask the session that raised it first. A plan offers Approve the plan or Send it back with a note, and a stop offers Retry or Retry with a note. Click what you want, or use `↑` `↓` and `space`, then **Submit** (or `enter`). Only one kind goes at a time: picking an option clears what you typed, and typing clears the picks. A question to the session is a turn of that same session, without editing tools and under the same spend caps; its reply shows above the form, you can ask as often as you like, and the session remembers the talk when you answer. Asking works on anything a session raised, including what was waiting before you updated. `[` `]` step through the items; `s` skips a question (the session uses its default), or ends the work and removes the tag; `t` hands the ticket back by putting the start tag back on. The Builder doesn't reclaim a ticket handed back until someone removes the tag and adds it again; other edits don't count.
 - **Off or paused**, the Builder claims and starts nothing: a turn that's due waits, and running sessions re-attach after a restart.
 
 ### The result contract
@@ -175,10 +175,11 @@ On Azure DevOps a ticket's key is `AB#123` (for `--work` and `--follow`, `123` w
 | `n` | A quick review: PRs reviewed together without a ticket. Works from any view, and switches to the Reviewer |
 | `/` | Show or hide every key, with what it does: the view's own first, then the side's other views, then the rest. Any other key closes the list and does its job |
 | `s` | Stop the selected review or build (Running) · skip the selected item, or end its work (Needs you) |
-| `enter` | Open the report (Reviewer History) or the brief folder (Builder) · answer, approve or retry (Needs you) · edit a setting, open a config file or flip a side's switch (Config) |
+| `enter` | Open the report (Reviewer History) or the brief folder (Builder) · submit the form: your pick, your own answer, or your question (Needs you) · edit a setting, open a config file or flip a side's switch (Config) |
 | `w` | Follow the selected ticket's PRs (Builder History) |
 | `t` | Stop following the selected ticket (Builder History) · hand the ticket back with its start tag (Needs you) |
-| `?` | Ask the session that raised the selected item about it before you answer, as often as you like (Needs you) |
+| `space` | Pick the option under the cursor, or untick it where several may be picked (Needs you) |
+| `[` `]` | The previous or next item (Needs you) |
 | `o` / `a` | Open the PRs / the ticket in the browser |
 | `a` / `d` | Add / delete a board (Config) |
 | `r` | Poll the side in view now |

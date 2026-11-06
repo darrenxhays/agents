@@ -300,6 +300,8 @@ export async function run(assert) {
 // ---- Pure rules: repos, bases, branches, the result contract, caps, follow-up ----
 
 async function pure(assert) {
+  assert.equal(rules.needItem('question', { key: 'AB#1', question: 'Which browsers?', options: ['Chrome', 'Safari'], multiple: true }).multiple, true, 'a question may take several picks');
+  assert.equal(rules.needItem('question', { key: 'AB#1', question: 'Which one?', options: ['Only'], multiple: true }).multiple, false, 'not with a single option');
   assert.equal(rules.branchName('prowl/{id}-{slug}', 'AB#123', 'Save the cart between visits!'), 'prowl/123-save-the-cart-between-visits', "an Azure DevOps work item's number");
   assert.equal(rules.branchName('prowl/{id}-{slug}', 'PROJ-123', 'Save the cart', 2), 'prowl/PROJ-123-save-the-cart-2', 'a Jira key as typed; a rebuild gets -2');
   assert.ok(rules.slug('A very long title that goes on and on well past forty characters').length <= 40);

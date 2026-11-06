@@ -67,8 +67,8 @@ Build mode:
   "investigation": "investigation.md",
   "plan": "plan.md",
   "changes": [{ "repo": "owner/name", "base": "<only if not the worktree's>" }],
-  "openQuestions": [{ "id": "Q1", "question": "...", "options": ["..."], "default": "..." }],
-  "question": { "id": "...", "question": "...", "options": ["..."], "default": "..." },
+  "openQuestions": [{ "id": "Q1", "question": "...", "options": ["..."], "default": "...", "multiple": false }],
+  "question": { "id": "...", "question": "...", "options": ["..."], "default": "...", "multiple": false },
   "commits": [{ "repo": "owner/name", "sha": "..." }],
   "prs": [{ "repo": "owner/name", "title": "...", "body": "..." }],
   "checks": [{ "repo": "owner/name", "command": "...", "result": "pass | fail | pre-existing" }],
@@ -78,6 +78,7 @@ Build mode:
 ```
 
 - `needs-repos` lists `repos`. `needs-approval` names `plan` (a file in the brief folder), `changes` (every repo the plan changes) and `openQuestions` (empty when there are none). `question` fills `question`. `blocked` fills `reason`.
+- A question whose options can be combined (several may apply at once) adds `"multiple": true`: the user may pick several, and the answer lists them separated by `; `. Its `default` may then be a list. Leave it out when exactly one option is the answer. The user may also answer in their own words instead of an option.
 - `done` lists every commit, and a PR title and body for each repo with commits. Put the ticket key in each title.
 
 Feedback mode:
@@ -87,7 +88,7 @@ Feedback mode:
   "status": "fixed | partial | blocked",
   "summary": "<a few lines>",
   "items": [{ "pr": "owner/name#n", "thread": "<thread ID, or empty>", "finding": "<F-id, or empty>", "action": "fix | dispute | ask | park", "note": "..." }],
-  "questions": [{ "text": "...", "context": "<up to three lines>", "options": ["..."], "recommended": "...", "searched": "..." }],
+  "questions": [{ "text": "...", "context": "<up to three lines>", "options": ["..."], "recommended": "...", "multiple": false, "searched": "..." }],
   "commits": [{ "pr": "owner/name#n", "sha": "..." }],
   "checks": [{ "pr": "owner/name#n", "command": "...", "result": "pass | fail | pre-existing" }]
 }

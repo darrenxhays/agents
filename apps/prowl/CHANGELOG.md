@@ -2,6 +2,12 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.19.0
+- Needs you is now a form you can click. A question lists its options with the recommended one picked, then Other (your own words) and Ask about this (a question for the session that raised it), then Submit. Click what you want, or use ↑↓ and space, then Submit or enter. Only one kind goes at a time: picking an option clears what you typed, and typing clears the picks. Plans offer Approve the plan or Send it back with a note; stops offer Retry or Retry with a note. [ and ] step through the items.
+- ? is gone: Ask about this does the same, and its reply still shows above the form.
+- A session can now mark a question whose options may be combined (multiple, in prowl-build's result contract), and those show checkboxes so you can pick several; your answer lists them. Questions already waiting in Needs you are pick-one.
+- Typing an option's number as the answer is gone: pick the option instead.
+
 ## 2.18.0
 - Needs you: press ? to ask the session that raised a question about it before you answer: why it's asking, what each option would mean, anything you need to decide. Each question is a turn of that same session, without editing tools and under the same spend caps; its reply shows under the question, and you can keep asking as long as you like. When you answer, the session remembers the whole talk. It works on what's already waiting in Needs you too.
 - The Reviewer no longer has a Needs you tab, since it never waits on you. Its other numbers stay the same (Config is still 4), and ← → pass over the gap.
