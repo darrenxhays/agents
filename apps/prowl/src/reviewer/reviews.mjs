@@ -225,7 +225,7 @@ export function buildPrompt({ ticket, title, ticketUrl, prs, contextPrs = [], le
   const steps = parkHumanOnly ? [...PRIOR_STEPS, PARK_STEP] : PRIOR_STEPS;
   if (prior && reReviewScope === 'delta' && prior.reviewedHeads) lines.push('', ...deltaBrief(prior, priorReport, prs, heads, steps));
   else if (prior) lines.push('', ...reReviewBrief(prior, priorReport, steps));
-  lines.push('', ...reportSpec(ticket, reviewNo, reportPath, Boolean(prior)));
+  lines.push('', ...reportSpec(ticket, reviewNo, reportPath));
   return `${lines.join('\n')}\n`;
 }
 
@@ -242,12 +242,10 @@ const ticketSection = text => [
 
 const finished = prior => new Date(prior.endedAt).toISOString().slice(0, 16).replace('T', ' ');
 
-// What every re-review does with the previous review's findings.
+// What every re-review does with the previous review's findings. The skill takes the prior findings from the PRs'
+// open Prowl threads on every review, whichever machine posted them; the previous report adds to them.
 const PRIOR_STEPS = [
-  'Add every finding from the previous report to the ledger as a prior finding. Re-verify each one against the current head of its PR and classify it as Fixed (cite the commit), Still open, or No longer applicable (code removed, PR merged or closed). These go through verifiers like any other finding.',
-  'Do not post duplicates of prior findings. Reply on the existing comment thread instead, with the *Verified fixed* reply from the output config and then resolve the thread (`gh api graphql`, resolveReviewThread), or with its *Still open* reply. The Step 8 re-run guard treats still-open prior findings as already posted.',
-  'Post new inline comments only for findings that are new since the previous review.',
-  "Each PR's verdict counts still-open prior findings as well as new ones, and its review body's summary and details file list them too.",
+  "Use the previous report as context for the skill's prior findings (`prior-findings.md`, Prowl's open threads on the PRs): match each of its findings to its thread by link, for the full problem and fix. Add each one with no open thread (posted only in a review body, or its thread since resolved) to the ledger as a prior finding too, re-verified and replied on like the others.",
 ];
 // Prowl's Park human-only findings setting.
 const PARK_STEP = "Park a prior finding that only a person can resolve outside the code (creating a CI pipeline, changing tracker or permissions config, a product decision): it has been raised, and no code change can fix it. Classify it Parked, not Still open: post no new comment or reply on it, list it under *Parked* in its PR's details file and in the report's *Still open from the previous review* section marked Parked (so the next re-review keeps it parked), and leave it out of the verdict and the front matter's counts.";
@@ -309,7 +307,7 @@ export function findingsOnly(report) {
   return kept.length ? `${head && `${head}\n`}${kept.join('\n').trim()}\n` : report;
 }
 
-const reportSpec = (id, n, file, again) => [
+const reportSpec = (id, n, file) => [
   '## Report file (required, final step)',
   '',
   `After posting, write the review report to this exact path: ${file}`,
@@ -325,8 +323,8 @@ const reportSpec = (id, n, file, again) => [
   'medium: <n>',
   'low: <n>',
   'nit: <n>',
-  `fixed: <prior findings verified fixed${again ? '' : '; 0 on a first review'}>`,
-  `stillOpen: <prior findings still open${again ? '' : '; 0 on a first review'}>`,
+  'fixed: <prior findings verified fixed: earlier Prowl findings, from any reviewer\'s Prowl>',
+  'stillOpen: <prior findings still open>',
   'approved: <each PR this review approved, as <PR URL>@<head sha reviewed>, space-separated on this one line: the PRs whose review event was APPROVE, or would have been with approvals off or in comment mode (the user\'s own PRs). Leave it blank if none>',
   '---',
   '',
@@ -334,12 +332,8 @@ const reportSpec = (id, n, file, again) => [
   '1. Summary: the goal of the work, the batch verdict and the merge order, in a few sentences.',
   '2. Pull requests: a table of PR (link), title, author, verdict and posted review (link).',
   '3. Issues found: per PR, every verified finding with severity, title, file:line, a link to its posted comment (or to the review when it is in the review body; for a point someone else raised first, a link to their comment and to the reply, if any), the problem, the failure scenario and the suggested fix.',
-  again
-    ? '4. What was fixed: every prior finding verified fixed, with the fixing commit and a link to its comment thread.'
-    : '4. What was fixed: write "First review, nothing to compare yet."',
-  again
-    ? '5. Still open from the previous review: each one with a link to its comment thread.'
-    : '5. Still open from the previous review: write "First review."',
+  '4. What was fixed: every prior finding verified fixed, with the fixing commit and a link to its comment thread, or "No earlier findings."',
+  '5. Still open from the previous review: each prior finding still open, with a link to its comment thread, or "No earlier findings."',
   '6. Not posted: refuted, disputed and unverifiable findings, one line each with the reason.',
   '',
   'Every link must be a full https:// URL.',

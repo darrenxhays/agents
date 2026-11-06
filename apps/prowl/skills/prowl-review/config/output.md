@@ -50,7 +50,7 @@ One review per PR. Its body is the review banner, then this. Keep it short: the 
 `````markdown
 **Summary:** <one sentence: what this PR does and the state it's in>
 
-<one line per finding on this PR, most severe first, as "- **[<SEVERITY>]** <title> · <where>". <where> is `file:line` (followed by "with <counterpart PR link>" for a cross-PR finding), or "already raised: <link to the earlier comment, or to the reply>" for one someone else raised first, or "still open: <link to its thread>" for one from the previous review. Write "No issues found." when there are none>
+<one line per finding on this PR, most severe first, as "- **[<SEVERITY>]** <title> · <where>". <where> is `file:line` (followed by "with <counterpart PR link>" for a cross-PR finding), or "already raised: <link to the earlier comment, or to the reply>" for one someone else raised first, or "still open: <link to its thread>" for an earlier Prowl finding, from any reviewer's Prowl. Write "No issues found." when there are none>
 
 <details>
 <summary>📄 <details file name>: the full review, for whoever fixes these (copy it into your coding agent)</summary>
@@ -109,7 +109,7 @@ Fix the findings below in order, most severe first. Each one quotes the code at 
 
 ## Still open from the previous review
 
-<re-reviews only: each prior finding still open, in the same form as above, with a link to its comment thread>
+<each earlier Prowl finding still open, from any reviewer's Prowl, in the same form as above, with a link to its comment thread; or "None.">
 
 ## Parked
 
@@ -164,7 +164,7 @@ On an earlier thread (someone else's, resolved or outdated) whose problem is sti
 
 ## Re-review replies
 
-On a re-review, on each thread from the previous review. **Verified fixed** (the thread is then resolved):
+On each open thread from an earlier Prowl review, whoever's Prowl posted it. **Verified fixed** (the thread is then resolved):
 
 ```text
 <comment prefix> Verified fixed in <sha>

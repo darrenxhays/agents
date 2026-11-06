@@ -21,8 +21,8 @@ high: <n>
 medium: <n>
 low: <n>
 nit: <n>
-fixed: <prior findings verified fixed; 0 on a first review>
-stillOpen: <prior findings still open; 0 on a first review>
+fixed: <prior findings verified fixed: earlier Prowl findings, from any reviewer's Prowl>
+stillOpen: <prior findings still open>
 approved: <each PR this review approved, as <PR URL>@<head sha reviewed>, space-separated on this one line: the PRs whose review event was APPROVE, or would have been with approvals off or in comment mode (the user's own PRs). Leave it blank if none>
 ---
 
@@ -30,8 +30,8 @@ Then these sections:
 1. Summary: the goal of the work, the batch verdict and the merge order, in a few sentences.
 2. Pull requests: a table of PR (link), title, author, verdict and posted review (link).
 3. Issues found: per PR, every verified finding with severity, title, file:line, a link to its posted comment (or to the review when it is in the review body; for a point someone else raised first, a link to their comment and to the reply, if any), the problem, the failure scenario and the suggested fix.
-4. What was fixed: write "First review, nothing to compare yet."
-5. Still open from the previous review: write "First review."
+4. What was fixed: every prior finding verified fixed, with the fixing commit and a link to its comment thread, or "No earlier findings."
+5. Still open from the previous review: each prior finding still open, with a link to its comment thread, or "No earlier findings."
 6. Not posted: refuted, disputed and unverifiable findings, one line each with the reason.
 
 Every link must be a full https:// URL.

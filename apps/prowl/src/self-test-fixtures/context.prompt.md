@@ -16,10 +16,7 @@ Prowl approved these PRs in an earlier review and they have no new commits since
 
 The previous review (review 1, finished 2025-10-09 08:53 UTC) produced the report below. The ticket has been tagged for review again, so the authors believe they have addressed it. On top of the normal prowl-review steps:
 
-1. Add every finding from the previous report to the ledger as a prior finding. Re-verify each one against the current head of its PR and classify it as Fixed (cite the commit), Still open, or No longer applicable (code removed, PR merged or closed). These go through verifiers like any other finding.
-2. Do not post duplicates of prior findings. Reply on the existing comment thread instead, with the *Verified fixed* reply from the output config and then resolve the thread (`gh api graphql`, resolveReviewThread), or with its *Still open* reply. The Step 8 re-run guard treats still-open prior findings as already posted.
-3. Post new inline comments only for findings that are new since the previous review.
-4. Each PR's verdict counts still-open prior findings as well as new ones, and its review body's summary and details file list them too.
+1. Use the previous report as context for the skill's prior findings (`prior-findings.md`, Prowl's open threads on the PRs): match each of its findings to its thread by link, for the full problem and fix. Add each one with no open thread (posted only in a review body, or its thread since resolved) to the ledger as a prior finding too, re-verified and replied on like the others.
 
 <previous-report>
 ---
@@ -83,7 +80,7 @@ high: <n>
 medium: <n>
 low: <n>
 nit: <n>
-fixed: <prior findings verified fixed>
+fixed: <prior findings verified fixed: earlier Prowl findings, from any reviewer's Prowl>
 stillOpen: <prior findings still open>
 approved: <each PR this review approved, as <PR URL>@<head sha reviewed>, space-separated on this one line: the PRs whose review event was APPROVE, or would have been with approvals off or in comment mode (the user's own PRs). Leave it blank if none>
 ---
@@ -92,8 +89,8 @@ Then these sections:
 1. Summary: the goal of the work, the batch verdict and the merge order, in a few sentences.
 2. Pull requests: a table of PR (link), title, author, verdict and posted review (link).
 3. Issues found: per PR, every verified finding with severity, title, file:line, a link to its posted comment (or to the review when it is in the review body; for a point someone else raised first, a link to their comment and to the reply, if any), the problem, the failure scenario and the suggested fix.
-4. What was fixed: every prior finding verified fixed, with the fixing commit and a link to its comment thread.
-5. Still open from the previous review: each one with a link to its comment thread.
+4. What was fixed: every prior finding verified fixed, with the fixing commit and a link to its comment thread, or "No earlier findings."
+5. Still open from the previous review: each prior finding still open, with a link to its comment thread, or "No earlier findings."
 6. Not posted: refuted, disputed and unverifiable findings, one line each with the reason.
 
 Every link must be a full https:// URL.

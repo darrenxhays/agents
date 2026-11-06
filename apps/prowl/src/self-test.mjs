@@ -87,7 +87,8 @@ assert.ok(ctx.includes('## Already approved: context only\n\n') && ctx.includes(
 assert.ok(first.includes('approved: <each PR'));
 assert.ok(again.includes('This is a re-review') && again.includes('F-01 [HIGH] old finding') && again.includes('What was fixed: every prior finding'));
 
-// With every setting at its default, the prompt is byte for byte what 2.7.0 sent (fixtures captured from 2.7.0).
+// With every setting at its default, the prompt is byte for byte the golden copy (captured from 2.7.0; in 2.20.0 the
+// prior findings moved to the skill, taken from the PRs' open Prowl threads on every review).
 const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), 'self-test-fixtures');
 const fixture = name => fs.readFileSync(path.join(FIX, name), 'utf8');
 const promptCases = JSON.parse(fixture('prompt-cases.json'));
@@ -119,7 +120,7 @@ assert.ok(roundCapped({ maxReviewRounds: 3 }, { reviewNo: 3 }) && roundCapped({ 
 // Park human-only findings: the brief's extra step, only when on (and only on a re-review).
 const parks = c => buildPrompt({ ...c, parkHumanOnly: true }).includes('Classify it Parked');
 assert.ok(parks(promptCases.reReview) && parks({ ...promptCases.reReview, prior: priorRun, reReviewScope: 'delta' }) && !parks(promptCases.first));
-assert.ok(buildPrompt({ ...promptCases.reReview, parkHumanOnly: true }).includes('\n5. Park a prior finding'), 'numbered after the four prior-finding steps');
+assert.ok(buildPrompt({ ...promptCases.reReview, parkHumanOnly: true }).includes('\n2. Park a prior finding'), 'numbered after the prior-finding step');
 assert.ok(!buildPrompt(promptCases.reReview).includes('Parked'), 'off by default');
 
 // Memory: by default the session's environment is 2.7.0's; off sets Claude Code's switch for auto-memory.
@@ -1158,11 +1159,16 @@ tui5.frame(90, 34);
 tui5.key('enter');
 assert.ok(formText().includes('Pick an option, write your own answer, or ask about it first.') && answered.at(-1)[0] === 'm1', 'nothing chosen: it says so');
 builderNeeds = [];
-// Hoot's switch: off, no owl and the views get his rows.
+// Hoot's switch: off, no owl, and the cards take the full width.
 const ground = "_,_._'__._,_";
 assert.ok(tui3.frame(80, 30).join('\n').includes(ground), 'Hoot, on');
 tuiApp.cfg.hoot = false;
 assert.ok(!tui3.frame(80, 30).join('\n').includes(ground), 'Hoot, off');
+for (const W of [80, 150]) {
+  const top = tui3.frame(W, 30).find(l => l.includes('╭─ Boards'));
+  assert.ok(top && top.includes('╭─ Needs you') && top.startsWith('╭─ Boards') && top.endsWith('╮') && top.length === W, `Hoot off, ${W} columns: both cards, edge to edge`);
+}
+assert.ok(!tui3.frame(80, 26).join('\n').includes('╭─ Boards'), 'Hoot off, a short window: no cards, as with Hoot on');
 tuiApp.cfg.hoot = true;
 
 // ---- Fix my PRs removed: the first-launch migration ----

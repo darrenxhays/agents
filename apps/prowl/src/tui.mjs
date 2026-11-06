@@ -407,7 +407,7 @@ export function startTui(app, actions, io = {}) {
           .map(([l, k, style]) => [Number(s[k]) > 0 ? style : ST.dim, `${l}${s[k] ?? '?'} `]);
       const head = [
         cursor(i === at), [ST.grey, `${stamp(r.endedAt)}  `], [ST.bold, r.ticket.padEnd(11)], [vs, vt.padEnd(18)], ...counts,
-        [ST.grey, `${r.reviewNo > 1 ? `· fixed ${s.fixed ?? '?'} · re-review #${r.reviewNo}` : ''}  `],
+        [ST.grey, `${r.reviewNo > 1 || Number(s.fixed) > 0 ? `· fixed ${s.fixed ?? '?'} ` : ''}${r.reviewNo > 1 ? `· re-review #${r.reviewNo}` : ''}  `],
         ...(waiting(r).length ? [[ST.yellow, `⚑ ${plural(waiting(r).length, 'PR')} to approve  `]] : []),
         ...(reviewer.state.capped?.[r.ticket] && reviewer.finished().find(x => x.ticket === r.ticket) === r ? [[ST.yellow, '⚑ round cap reached  ']] : []),
       ];
@@ -820,6 +820,15 @@ export function startTui(app, actions, io = {}) {
     return hoot.map((r, i) => [...r, gap, ...shown.flatMap(c => [['', ' '], ...c[i]])]);
   }
 
+  /** The cards alone, with Hoot off: as many as fit at 30 columns or more, sharing the full width `W`. */
+  function cardsRow(W) {
+    const cards = [boardsCard, needsCard];
+    const n = Math.max(1, Math.min(cards.length, Math.floor((W + 1) / (STRIP.cardMin + 1))));
+    const cw = Math.floor((W - (n - 1)) / n);
+    const shown = cards.slice(0, n).map((c, k) => c(k < n - 1 ? cw : W - (n - 1) * (cw + 1)));
+    return shown[0].map((_, i) => shown.flatMap((c, k) => [...(k ? [['', ' ']] : []), ...c[i]]));
+  }
+
   /** The full list of keys (/): this view's first, then the side's other views, then the rest, in columns when there's room. */
   function keysView(W, H) {
     const head = (text, style, note = '') => [[style, ` ${text}`], [ST.grey, note]];
@@ -855,7 +864,7 @@ export function startTui(app, actions, io = {}) {
     if (ui.edit?.form && currentItem()?.id !== ui.edit.item) ui.edit = null; // left Needs you, or the item went
     const out = [titleBar(W)];
     const said = app.speech(); // read with Hoot off too, so what he'd have said doesn't pile up
-    if (H >= 27 && app.cfg.hoot !== false && !ui.keys) out.push(...strip(W, advance, said));
+    if (H >= 27 && !ui.keys) out.push(...(app.cfg.hoot !== false ? strip(W, advance, said) : cardsRow(W)));
     out.push(sideBar(W), tabBar(), rule(W));
     const bars = footer(W, H);
     const bodyH = H - out.length - bars.length;

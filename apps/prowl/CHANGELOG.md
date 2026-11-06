@@ -2,6 +2,14 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.21.0
+- With Hoot off, the Boards and Needs you cards still show: they share the full width of the strip Hoot had, at the top of a window 27 rows or taller.
+
+## 2.20.0
+- Prowl now closes out any Prowl thread on a PR, whoever's Prowl posted it. Every review, first or re-review, reads the PR's open threads that carry Prowl's marker from GitHub and re-checks each one: fixed ones get *Verified fixed* and are resolved, and still-open ones get a *Still open* reply and count toward the verdict. Before, a review only re-checked findings from your own Prowl's last review on this machine, so a teammate's Prowl threads stayed open after they were fixed. Your last report, when there is one, is still used for the detail.
+- A first review's report and History row now show what it verified fixed, when it closed earlier Prowl threads.
+- The default `output.md` changed: the details file lists still-open earlier Prowl findings on every review, not only re-reviews, and the re-review replies go on any earlier Prowl thread. If you've edited your copy in `~/.prowl/config/`, Prowl follows the new behaviour anyway; update its wording if you want it to match.
+
 ## 2.19.0
 - Needs you is now a form you can click. A question lists its options with the recommended one picked, then Other (your own words) and Ask about this (a question for the session that raised it), then Submit. Click what you want, or use ↑↓ and space, then Submit or enter. Only one kind goes at a time: picking an option clears what you typed, and typing clears the picks. Plans offer Approve the plan or Send it back with a note; stops offer Retry or Retry with a note. [ and ] step through the items.
 - ? is gone: Ask about this does the same, and its reply still shows above the form.
