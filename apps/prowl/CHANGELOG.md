@@ -2,6 +2,17 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.22.0
+- Quick reviews take tickets as well as PRs: paste `AB#123` or `PROJ-123` (or their links) and Prowl reviews the ticket's open, ready PRs, under the ticket's key, so its earlier reviews count. Pasting on the Reviewer opens the quick review box. Other text in the paste is still an error.
+- A quick review without exactly one ticket is named for you by a short model call (new setting **Quick names**, `quickName`: `auto`, `ask` or `number`). `prowl --review` and `prowl --build` take `--as <ticket or name>`.
+- Quick reviews now label their PRs on GitHub (new setting **Quick reviews: GitHub labels**, `quickLabels`, on): In Review while reviewing, Reviewed when done. The review then waits, shown in Running with ◷, and re-reviews once the PRs it didn't approve are labelled Ready for Review. With every PR approved, it re-reviews when a PR is labelled Ready for Review and has new commits. `s` stops a wait and leaves the labels. A failed quick review is retried once. Turn the setting off to get the old one-shot quick review.
+- A paste of only tickets on a board now pops up an offer first: tag the ticket instead (adding its board to your boards if Prowl doesn't poll it yet), or go ahead with the quick review or build.
+- The Builder picks up work at any stage. When it claims a ticket, it looks for your open PRs (drafts too), your pushed branches with no PR (named with the ticket's number, or linked on the ticket), and what those PRs need: feedback, failing required checks, conflicts. Something to fix gets a fix round first, which merges the base in for a conflict (never a rebase). Then a finish session completes what's left on your branches, and Prowl hands off: a PR opened for a branch that had none, and drafts marked ready unless **Open PRs as drafts** is on. Before, a ticket with your PRs was just tagged Ready for Review. New settings under **Builder · Pick-up** turn each part off.
+- Quick builds: `n` on the Builder (or a paste there), or `prowl --build "<paste>"`, builds a ticket, some PRs, or just what you describe, after a y/n. It starts at once, whether the Builder is on or not, and outside Max parallel builds. Without a ticket, its cycle runs on the PRs' GitHub labels (In Development, Ready for Review), and its branches are named from **Quick build branch names** (`builder.quickBranchTemplate`, `prowl/{slug}`).
+- Max lines per push and Protected paths count only a session's own changes when it merges the base in.
+- Config is easier to scan: every category of settings is its own card, and the big sections are split up (for example, Builder · Sessions, Caps, Repos, Branches, Pushes and PRs, Pick-up).
+- New file: `~/.prowl/labels.json`, the GitHub label writes waiting to be made.
+
 ## 2.21.0
 - With Hoot off, the Boards and Needs you cards still show: they share the full width of the strip Hoot had, at the top of a window 27 rows or taller.
 

@@ -698,7 +698,7 @@ assert.deepEqual([seen.retags, seen.side.state.releases.length], [['Ready for Re
   const states = { 1: 'open', 2: 'open', 3: 'merged' };
   const logs = [];
   const retags = [];
-  const app = { cfg: { ...loadConfig(), githubOwner: 'octo-org', workDir: rvTmp }, me: '', on: true, sideOn() { return this.on; }, tracker: () => ({}), boards: () => [], dryRun: () => false };
+  const app = { cfg: { ...loadConfig(), githubOwner: 'octo-org', workDir: rvTmp, quickName: 'number', quickLabels: false }, me: '', on: true, sideOn() { return this.on; }, tracker: () => ({}), boards: () => [], dryRun: () => false };
   const gh = { me: async () => 'octocat', prByRef: async ({ number }) => prOf(number, { state: states[number] }), headSha: async pr => `sha${pr.number}`, cloneMissing: async () => [],
     reviewedSince: async () => true, isOpen: async () => true, postComment: async (pr, file) => comments.push([pr.number, JSON.parse(fs.readFileSync(file, 'utf8')).body]) };
   const comments = [];
@@ -710,22 +710,22 @@ assert.deepEqual([seen.retags, seen.side.state.releases.length], [['Ready for Re
     return { id: 'QUICK5-r1', tracker: null, ticket: o.ticket.key, title: o.ticket.title, prs: o.prs, reviewNo: 1, status: 'running', quick: o.quick, startedAt: Date.now(), marker: postMarker('QUICK5-r1'),
       reportPath: path.join(rvTmp, 'quick.md'), logPath: path.join(rvTmp, 'quick.ndjson') };
   };
-  const run = await side.reviewPrs([{ repo: 'octo-org/r1', number: 1 }, { repo: 'octo-org/r2', number: 2 }]);
+  const run = await side.quickReview('octo-org/r1#1 octo-org/r2#2');
   assert.deepEqual([run.ticket, opts.prs.map(p => p.number), opts.quick, opts.heads[prOf(2).url]], ['QUICK#5', [1, 2], true, 'sha2'], 'both PRs, as one set, numbered after the last quick review');
   assert.equal(opts.ticket.title, 'Quick review: r1#1, r2#2');
   const links = `[r1#1](${prOf(1).url}), [r2#2](${prOf(2).url})`;
   assert.deepEqual(comments.map(([n, body]) => [n, body.includes(`is reviewing ${links}.`), body.endsWith('<!-- prowl-review QUICK5-r1 started -->')]), [[1, true, true], [2, true, true]],
     'Quick review started on each PR, linking the PRs reviewed together');
-  await assert.rejects(side.reviewPrs([{ repo: 'octo-org/r3', number: 3 }]), /r3#3 is merged/, 'only open PRs');
+  await assert.rejects(side.quickReview('octo-org/r3#3'), /r3#3 is merged/, 'only open PRs');
   app.cfg.maxConcurrentReviews = 1;
-  await assert.rejects(side.reviewPrs([{ repo: 'octo-org/r1', number: 1 }]), /Max parallel reviews/, 'it waits for a free slot like any review');
+  await assert.rejects(side.quickReview('octo-org/r1#1'), /Max parallel reviews/, 'it waits for a free slot like any review');
   {
     // Asked for twice while the first is still cloning: the first holds the slot and its number.
     side.state.runs = side.state.runs.filter(r => r !== run);
     let release;
     gh.cloneMissing = () => new Promise(r => { release = r; });
-    const first = side.reviewPrs([{ repo: 'octo-org/r1', number: 1 }]);
-    await assert.rejects(side.reviewPrs([{ repo: 'octo-org/r2', number: 2 }]), /Max parallel reviews/, 'a quick review being prepared holds its slot');
+    const first = side.quickReview('octo-org/r1#1');
+    await assert.rejects(side.quickReview('octo-org/r2#2'), /Max parallel reviews/, 'a quick review being prepared holds its slot');
     await new Promise(r => setTimeout(r, 0));
     app.on = false; // switched off while it clones
     release([]);
@@ -733,8 +733,8 @@ assert.deepEqual([seen.retags, seen.side.state.releases.length], [['Ready for Re
     app.on = true;
     gh.cloneMissing = async () => [];
     app.cfg.maxConcurrentReviews = 2;
-    const [a, b] = await Promise.all([side.reviewPrs([{ repo: 'octo-org/r1', number: 1 }]), side.reviewPrs([{ repo: 'octo-org/r2', number: 2 }])]);
-    assert.deepEqual([a.ticket, b.ticket], ['QUICK#8', 'QUICK#9'], 'two at once get their own numbers (a start that was turned down used one too)');
+    const [a, b] = await Promise.all([side.quickReview('octo-org/r1#1'), side.quickReview('octo-org/r2#2')]);
+    assert.deepEqual([a.ticket, b.ticket], ['QUICK#7', 'QUICK#8'], 'two at once get their own numbers (a start turned down once named used one too; a merged PR, before naming, none)');
     side.state.runs = side.state.runs.filter(r => r !== a && r !== b);
     side.state.runs.push(run);
     app.cfg.maxConcurrentReviews = 1;
@@ -748,17 +748,17 @@ assert.deepEqual([seen.retags, seen.side.state.releases.length], [['Ready for Re
     app.tracker = () => ({ name: 'Azure DevOps', boardLabel: () => 'Shop / Web', findTickets: async () => ({ tickets: [{ key: 'AB#9', title: 't' }], variants: ['Ready for Review'] }) });
     const polling = side.poll();
     await new Promise(r => setTimeout(r, 0));
-    await assert.rejects(side.reviewPrs([{ repo: 'octo-org/r1', number: 1 }]), /Max parallel reviews/, "a ticket's review being prepared holds its slot");
+    await assert.rejects(side.quickReview('octo-org/r1#1'), /Max parallel reviews/, "a ticket's review being prepared holds its slot");
     release([]);
     await polling;
     // Once started, a review holds one slot, not two, while its Review started comments are posted.
     app.cfg.maxConcurrentReviews = 2;
     let posting = true;
     gh.postComment = () => (posting ? new Promise(() => {}) : Promise.resolve()); // the first review's comment hangs
-    const announcing = side.reviewPrs([{ repo: 'octo-org/r1', number: 1 }]);
+    const announcing = side.quickReview('octo-org/r1#1');
     await new Promise(r => setTimeout(r, 10));
     posting = false;
-    const second = await side.reviewPrs([{ repo: 'octo-org/r2', number: 2 }]).catch(e => e);
+    const second = await side.quickReview('octo-org/r2#2').catch(e => e);
     assert.ok(!(second instanceof Error), `a started review counts once (${second.message || ''})`);
     const started = side.state.runs.find(r => r.prs?.[0]?.number === 1 && r.quick && r !== run);
     announcing.catch(() => {}); // left hanging on purpose
@@ -777,7 +777,7 @@ assert.deepEqual([seen.retags, seen.side.state.releases.length], [['Ready for Re
     side.state.runs = side.state.runs.filter(r => r !== flagged);
   }
   app.on = false;
-  await assert.rejects(side.reviewPrs([{ repo: 'octo-org/r1', number: 1 }]), /Reviewer is off/);
+  await assert.rejects(side.quickReview('octo-org/r1#1'), /Reviewer is off/);
   run._result = { subtype: 'error_during_execution', is_error: true, result: 'boom' };
   await side.finish(run);
   assert.deepEqual([run.status, run.pendingTag, retags, side.state.failures], ['failed', null, [], {}], 'a failed quick review: no tag written, no retry');
@@ -893,7 +893,10 @@ const toggled = [];
 const asked = [];
 const tui = startTui(tuiApp, {
   sides: tuiSides, pollNow() {}, togglePause() {}, saveConfig() {}, saveToken: () => '', quit() {},
-  reviewPrs: async refs => { asked.push(refs); return { ticket: 'QUICK#1', prs: refs }; },
+  quickReview: async (text, opts) => { asked.push([text, opts]); return { ticket: 'QUICK#1', prs: [prOf(5), prOf(7)] }; },
+  quickBuild: async (text, opts) => { asked.push(['build', text, opts]); return { key: 'BUILD#1' }; },
+  answerOffer: async (offer, choice) => { asked.push(['offer', offer.side, choice]); return choice === 'tag' ? ['AB#9'] : null; },
+  stopWait: wt => asked.push(['stopWait', wt.key]),
   toggleSide: n => { const now = !tuiApp.sideOn(n); tuiApp.cfg[n].enabled = now; delete tuiApp.override[n]; toggled.push([n, now]); return now; },
 }, { headless: true });
 const fits = (frame, what) => { for (const l of frame) assert.ok(l.length <= 80, `${what}: ${JSON.stringify(l)} is ${l.length} columns`); return frame.join('\n'); };
@@ -911,9 +914,13 @@ assert.ok(/Builder · off · ⚑ 1/.test(frame), 'the Needs-you count on its tab
 tui.key('4');
 const builderConfig = fits(tui.frame(80, 200), 'Config from the Builder');
 const builderBars = [...tui.ui.bars];
-const order = ['PROWL', 'BOARDS AND REPOS', 'TAGS', 'ALL SESSIONS', 'REVIEWER · FILES', 'REVIEWER · SESSIONS', 'REVIEWER · VERDICTS AND ROUNDS', 'BUILDER · FILES', 'BUILDER · SESSIONS', 'BUILDER · REPOS AND BRANCHES', 'BUILDER · FOLLOW-UP'];
-const headings = builderConfig.split('\n').map(l => /^ ▍ (.+?) ─*$/.exec(l.trimEnd())?.[1]).map(h => order.indexOf(h)).filter(i => i >= 0);
-assert.deepEqual(headings, order.map((h, i) => i), 'every setting of the app, in its sections');
+const order = ['Prowl', 'Upkeep and display', 'Boards', 'GitHub and projects', 'Build tags', 'Review tags', 'All sessions', 'Quick reviews and builds', 'Reviewer · Files', 'Reviewer · Sessions', 'Reviewer · Caps',
+  'Reviewer · Verdicts and rounds', 'Builder · Files', 'Builder · Sessions', 'Builder · Caps', 'Builder · Repos', 'Builder · Branches', 'Builder · Pushes and PRs', 'Builder · Pick-up', 'Builder · Follow-up'];
+const cardLines = builderConfig.split('\n');
+const headings = cardLines.map(l => /^ {2}╭─ (.+?) ─*╮$/.exec(l.trimEnd())?.[1]).filter(Boolean);
+assert.deepEqual(headings, order, 'every setting of the app, each category in its own card');
+assert.equal(cardLines.filter(l => /^ {2}╰─*╯$/.test(l.trimEnd())).length, order.length, 'each card closed');
+assert.ok(cardLines.filter(l => /^ {2}│ .*│$/.test(l.trimEnd())).every(l => l.trimEnd().length === 79), 'each row inside its card, its right edge lined up');
 assert.ok(builderConfig.includes('Max parallel builds') && builderConfig.includes('Max parallel reviews'), "the Builder's settings show while it is off");
 const tagRows = ['Build start tag', 'Build in-progress tag', 'Review trigger tag', 'Review in-progress tag', 'Review done tag'];
 assert.ok(tagRows.every((t, i) => !i || builderConfig.indexOf(tagRows[i - 1]) < builderConfig.indexOf(t)) && !/Done tag|Reviewing tag/.test(builderConfig), 'one set of tags, in the order a ticket meets them');
@@ -948,7 +955,7 @@ tuiApp.override = { reviewer: true };
 tui.key('R');
 tui.key('n');
 frame = fits(tui.frame(80, 30), 'n');
-assert.ok(frame.includes('Quick review: PRs reviewed together, without a ticket') && frame.includes('Running'), 'n asks for the PRs, on the Running view');
+assert.ok(frame.includes('Quick review: PRs reviewed together') && frame.includes('Running'), 'n asks for the PRs, on the Running view');
 for (const k of 'nope') tui.key(k);
 tui.key('enter');
 assert.ok(fits(tui.frame(80, 30), 'n, bad').includes("nope isn't a PR"), 'a word that is not a PR is named');
@@ -958,8 +965,79 @@ fits(tui.frame(80, 30), 'n, long input');
 for (let i = 0; i < 59; i++) tui.key('backspace');
 tui.key('enter');
 await new Promise(r => setTimeout(r, 0));
-assert.deepEqual(asked, [[{ repo: 'octo-org/api', number: 5 }, { repo: 'octo-org/web', number: 7 }]], 'submitted as one review');
+assert.deepEqual(asked, [['https://github.com/octo-org/api/pull/5 octo-org/web#7', { name: '' }]], 'submitted as one review');
 assert.ok(fits(tui.frame(80, 30), 'n, sent').includes('Reviewing 2 PRs together as QUICK#1'));
+{
+  // A paste opens the side's quick box, filled in; a paste of only tickets on a board gets an offer, which pops up.
+  asked.length = 0;
+  tui.ui.flashUntil = 0;
+  tui.paste('octo-org/api#5\nAB#9');
+  assert.ok(tui.ui.edit?.prs && tui.ui.edit.value === 'octo-org/api#5 AB#9', 'a paste on the Reviewer: the quick review box, on one line');
+  tui.key('esc');
+  tuiApp.offers.push({ side: 'reviewer', tickets: [{ key: 'AB#9', title: 'Thing' }], polled: false, boards: ['Shop / Web'], text: 'AB#9' });
+  frame = fits(tui.frame(80, 30), 'offer');
+  assert.ok(frame.includes('1  Add Shop / Web to the boards and tag it') && frame.includes('2  Review it now as a quick review') && frame.includes('3  Cancel'), 'the offer, with its choices');
+  assert.ok(frame.includes("on Shop / Web, which the Reviewer doesn't poll yet"), 'saying where the ticket is');
+  tui.key('1');
+  await new Promise(r => setTimeout(r, 0));
+  assert.deepEqual([asked, tuiApp.offers.length], [[['offer', 'reviewer', 'add']], 0], 'a number takes its choice, and the offer goes');
+  tuiApp.offers.push({ side: 'builder', tickets: [{ key: 'AB#9', title: 'Thing' }], polled: true, boards: [], text: 'AB#9' }, { side: 'reviewer', tickets: [{ key: 'AB#8', title: 'Other' }], polled: true, boards: [], text: 'AB#8' });
+  tui.key('n');
+  assert.ok(!tui.ui.edit, 'while an offer shows, keys go to it');
+  frame = fits(tui.frame(80, 30), 'builder offer');
+  assert.ok(frame.includes("1  Tag it 'Ready to Start'") && frame.includes('2  Build it now as a quick build'), "the Builder's offer: its own tag");
+  tui.key('down');
+  tui.key('enter');
+  await new Promise(r => setTimeout(r, 0));
+  assert.deepEqual(asked.at(-1), ['offer', 'builder', 'build'], '↑↓ and enter');
+  tui.key('esc');
+  assert.deepEqual([tuiApp.offers.length, asked.length], [0, 2], 'esc cancels the next one');
+  // n on the Builder: a quick build, after a one-line y/n.
+  tuiApp.override = { reviewer: true, builder: true };
+  tui.key('B');
+  tui.key('1');
+  tui.key('n');
+  frame = fits(tui.frame(80, 40), 'quick build');
+  assert.ok(tui.ui.edit?.build && frame.includes('Quick build') && frame.replace(/\s+/g, ' ').includes('whether the Builder is on or not'), 'n on the Builder: the quick build box');
+  for (const k of 'Add a dark mode') tui.key(k);
+  tui.key('enter');
+  frame = fits(tui.frame(80, 30), 'confirm');
+  assert.ok(frame.includes('Quick build "Add a dark mode", without a ticket?'), 'a one-line y/n first');
+  tui.key('y');
+  await new Promise(r => setTimeout(r, 0));
+  assert.deepEqual(asked.at(-1), ['build', 'Add a dark mode', { name: '' }], 'then built');
+  tui.paste('AB#123\nkeep it small');
+  assert.ok(tui.ui.edit?.build && tui.ui.edit.value === 'AB#123\nkeep it small' && fits(tui.frame(80, 30), 'multi-line').includes('AB#123↵keep it small'), 'a paste on the Builder keeps its lines');
+  tui.key('enter');
+  assert.ok(fits(tui.frame(80, 30), 'ticket confirm').includes("Quick build AB#123, with your instructions, claiming it 'In Development'?"), 'what it will do, in one line');
+  tui.key('n');
+  // Quick names set to ask: a second box asks for the name.
+  tuiApp.cfg.quickName = 'ask';
+  tui.key('n');
+  for (const k of 'Tidy logs') tui.key(k);
+  tui.key('enter');
+  tui.key('y');
+  assert.ok(tui.ui.edit?.naming === 'build' && fits(tui.frame(80, 30), 'name').includes('Name this quick build'), 'ask: the name box');
+  for (const k of 'Logging') tui.key(k);
+  tui.key('enter');
+  await new Promise(r => setTimeout(r, 0));
+  assert.deepEqual(asked.at(-1), ['build', 'Tidy logs', { name: 'Logging' }], 'built with the name typed');
+  tuiApp.cfg.quickName = 'auto';
+  // A quick review waiting on its PRs, in Running: s stops the wait.
+  tui.key('R');
+  tui.key('1');
+  tuiSides.reviewer.waits = () => [quickWait];
+  const quickWait = { key: 'QUICK#3', title: 'Cart work', since: Date.now(), waitingOn: [prOf(5).url], letGo: {}, notes: ["octo-org/r6#6 is labelled 'In Review', but it is approved and only context: it doesn't hold the wait"] };
+  frame = fits(tui.frame(80, 30), 'waits');
+  assert.ok(/◷ QUICK#3 +Cart work +waiting on 1 PR/.test(frame), 'Running lists a waiting review: its mark, the count, labelled');
+  assert.ok(frame.includes("Re-reviewed once r5#5 is labelled 'Ready for Review'") && frame.includes('approved and only context'), 'its Activity: the PRs waited on, and why one doesn\'t hold it');
+  tui.key('s');
+  assert.ok(fits(tui.frame(80, 30), 'stop wait').includes("Stop waiting on QUICK#3's PRs? Their labels stay as they are."));
+  tui.key('y');
+  assert.deepEqual(asked.at(-1), ['stopWait', 'QUICK#3'], 's stops the wait');
+  tuiSides.reviewer.waits = () => [];
+  tuiApp.override = { reviewer: true };
+}
 
 // ---- The two bars, the full list of keys (/), the mouse and hover, and Hoot's switch ----
 // Text with each run of spaces squashed, since keycaps are padded: "[ / ][ all keys ]" reads "/ all keys".
@@ -981,7 +1059,7 @@ tui.key('2');
 frameText = fits(tui.frame(80, 30), 'bars, Builder History');
 assert.ok(['enter brief', 'o open PRs', 'a ticket', 'w follow'].every(k => keyLine(frameText).includes(k)) && !navLine(frameText).includes('quick review'), "the bars follow the view in sight: the Builder History's keys");
 tui.key('/');
-let keysList = fits(tui.frame(80, 60), 'all keys');
+let keysList = fits(tui.frame(80, 80), 'all keys');
 assert.ok(keysList.includes('Builder · History · this view') && keysList.includes('Builder · Needs you') && keysList.includes('Moving around') && keysList.includes('Mouse')
   && keysList.includes('Stop following the ticket') && !/Hoot|\(o,o\)/.test(keysList), 'the full list: this view first, the side\'s other views, the rest, with Hoot out of the way');
 assert.ok(tui.frame(140, 40).some(l => l.length <= 140 && ['Moving around', 'The side in view', 'Typing', 'Mouse', 'Prowl'].some(h => l.indexOf(` ${h}`) > 60)), 'in two columns when wide');
@@ -1223,6 +1301,7 @@ fs.writeFileSync(path.join(migHome, 'seen.json'), JSON.stringify({ defaults: { '
 assert.ok((await migrateFixes({ workDir: migHome }, { runs: [] }, deps(true, []))).some(n => /edited fix\.md/.test(n.text)) && fs.existsSync(path.join(migHome, 'config', 'fix.md')));
 fs.rmSync(migHome, { recursive: true });
 
+await (await import('./quick-self-test.mjs')).run(assert, { appDir });
 await (await import('./builder/self-test.mjs')).run(assert);
 
 console.log(`self-test passed: ${count} asserts`);

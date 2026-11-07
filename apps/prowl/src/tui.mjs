@@ -1,7 +1,7 @@
 import { pathToFileURL } from 'node:url';
 import { CONFIG_PATH } from './config.mjs';
 import { CONFIG_FIELDS, JIRA } from './fields.mjs';
-import { parsePrRefs } from './github.mjs';
+import { cleanName, notARef, parsePaste } from './paste.mjs';
 import { createMascot, wrap } from './mascot.mjs';
 import { copyText, openExternal } from './proc.mjs';
 import { awaitingHuman, isOwn } from './reviewer/reviews.mjs';
@@ -30,7 +30,12 @@ const KEYBAR = { bg: bg(237), text: fg(253), labelHover: `${ST.bold}${fg(231)}${
 // What the pointer is over: a list or settings row, any other clickable thing (unless it says how), and a link.
 const HOVER = { row: bg(236), seg: `${ST.bold}${bg(238)}`, link: `\x1b[1;4;38;5;117m` };
 // Config's sections, each in its own colour; the Reviewer's and the Builder's in their sides' colours.
-const SECTION = { Prowl: '\x1b[38;5;117m', 'Boards and repos': '\x1b[38;5;114m', Tags: '\x1b[38;5;211m', Labels: '\x1b[38;5;211m', 'All sessions': '\x1b[38;5;80m' };
+const SECTION = {
+  Prowl: '\x1b[38;5;117m', 'Upkeep and display': '\x1b[38;5;117m',
+  Boards: '\x1b[38;5;114m', 'Jira fields': '\x1b[38;5;114m', 'GitHub and projects': '\x1b[38;5;114m',
+  'Build tags': '\x1b[38;5;211m', 'Review tags': '\x1b[38;5;211m', 'Build labels': '\x1b[38;5;211m', 'Review labels': '\x1b[38;5;211m',
+  'All sessions': '\x1b[38;5;80m', 'Quick reviews and builds': '\x1b[38;5;80m',
+};
 const sectionColor = s => (s.startsWith('Reviewer') ? ACCENT.reviewer.fg : s.startsWith('Builder') ? ACCENT.builder.fg : SECTION[s] || ST.grey);
 const SPIN = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
 const SIDES = ['reviewer', 'builder'];
@@ -125,6 +130,17 @@ function windowed(list, sel, h) {
 }
 
 function* keys(data) {
+  const paste = /\x1b\[200~([\s\S]*?)\x1b\[201~/g; // bracketed paste: the text pasted, in one piece
+  let at = 0;
+  for (let m; (m = paste.exec(data));) {
+    yield* keyPresses(data.slice(at, m.index));
+    yield { paste: m[1] };
+    at = m.index + m[0].length;
+  }
+  yield* keyPresses(data.slice(at));
+}
+
+function* keyPresses(data) {
   const NAMED = {
     '\x1b[A': 'up', '\x1b[B': 'down', '\x1b[C': 'right', '\x1b[D': 'left', '\x1bOA': 'up', '\x1bOB': 'down',
     '\x1bOC': 'right', '\x1bOD': 'left', '\x1b[H': 'home', '\x1b[F': 'end', '\x1b[1~': 'home', '\x1b[4~': 'end', '\x1b[3~': 'delete',
@@ -152,7 +168,8 @@ function* keys(data) {
  * Full-screen terminal UI: a tab for each side (Reviewer and Builder), each with Running, History, Needs you, Config
  * and Log. `app` is read every frame. `actions` = { sides: { reviewer, builder }, pollNow(side), togglePause(side),
  * toggleSide(side), stop(side, item), answer(item, text), discuss(item, question) (why it can't be asked, or ''), skip(item), handBack(item), follow(record), stopFollowing(record),
- * reviewPrs(refs) (a quick review), saveConfig, saveToken, quit }. `io` = { out, stdin, headless }
+ * quickReview(text, opts), quickBuild(text, opts) (each resolving with the run or record, { offer }, or null), answerOffer(offer,
+ * choice), stopWait(wait), saveConfig, saveToken, quit }. `io` = { out, stdin, headless }
  * (headless: no raw mode, mouse or timers, for the self-test), copy(text). Returns { restore, key(k), mouse(x, y, button), drag(x0, y0, x1, y1), frame() }.
  */
 export function startTui(app, actions, io = {}) {
@@ -168,6 +185,8 @@ export function startTui(app, actions, io = {}) {
     frame: [], // the rows last drawn, for mouse clicks
     text: [], // …and their text, for copying a selection
     drag: null, // a mouse selection while the left button is down: { x0, y0, x1, y1, moved }
+    offers: app.offers || (app.offers = []), // offers waiting to pop up, oldest first; the first shows when nothing else is open
+    offerAt: 0, // the choice under the cursor in the offer showing
   };
   const acc = (name = ui.side) => ACCENT[name];
   const cursor = on => (on ? [acc().fg, ' ❯ '] : ['', '   ']);
@@ -260,8 +279,10 @@ export function startTui(app, actions, io = {}) {
 
   function runningView(W, H) {
     if (ui.edit?.prs) return prsInput(W);
+    if (ui.edit?.build) return buildInput(W);
+    if (ui.edit?.naming) return nameInput(W);
     if (ui.side === 'builder') return builderRunning(W, H);
-    const runs = live('reviewer');
+    const runs = runningRows();
     if (!runs.length) {
       const n = app.boards().length;
       return [[], [[ST.grey, !isOn('reviewer') ? '  The Reviewer is off: e turns it on.'
@@ -270,6 +291,12 @@ export function startTui(app, actions, io = {}) {
     }
     const at = clampSel(RUNNING, runs.length);
     const rows = windowed(runs, at, Math.min(runs.length, Math.max(3, Math.floor(H / 3)))).map(({ item: r, i }) => {
+      if (r._wait) {
+        const n = r.waitingOn?.length || 0;
+        const left = [cursor(i === at), [ST.cyan, '◷ '], [ST.bold, `${r.key}  `]];
+        const right = [[ST.grey, `  ${r.retry ? 'to retry, when a slot frees' : `waiting on ${plural(n, 'PR')}`} · ${dur(Date.now() - r.since)} `]];
+        return onClick(spread([...left, ['', trunc(r.title, W - width(left) - width(right) - 1)]], right, W), pick(RUNNING, i));
+      }
       const stopping = r.status === 'stopping';
       const left = [cursor(i === at), [stopping ? ST.red : acc().fg, `${stopping ? '■' : spin()} `], [ST.bold, `${r.ticket}  `]];
       const right = [[ST.grey, `  ${plural(r.prs.length, 'PR')} · ${r.reviewNo > 1 ? `re-review #${r.reviewNo}` : 'first review'} · ${dur(Date.now() - r.startedAt)} `]];
@@ -277,29 +304,102 @@ export function startTui(app, actions, io = {}) {
       return onClick(spread([...left, ['', title]], right, W), pick(RUNNING, i));
     });
     const r = runs[at];
+    if (r._wait) {
+      const prs = (r.waitingOn || []).map(u => /github\.com\/[^/]+\/([^/]+)\/pull\/(\d+)/.exec(u)).filter(Boolean).map(m => `${m[1]}#${m[2]}`);
+      rows.push(rule(W), [[ST.bold, ` Activity · ${r.key}  `], [ST.grey, 'waiting on its PRs']],
+        [[ST.cyan, '  • '], ['', r.retry ? 'Its review failed: it is retried once, as soon as a slot frees.'
+          : prs.length ? `Re-reviewed once ${prs.join(', ')} ${prs.length > 1 ? 'are' : 'is'} labelled '${app.cfg.tags.trigger}' (s stops waiting; labels stay as they are).` : 'Checked each poll.']],
+        ...Object.entries(r.letGo || {}).map(([u, why]) => [[ST.grey, `  • ${u.split('/').slice(-3).join('/')}: let go, ${why}`]]),
+        ...(r.notes || []).map(n => [[ST.grey, `  • ${n}`]]));
+      return rows;
+    }
     rows.push(rule(W), [[ST.bold, ` Activity · ${r.ticket}  `], [ST.grey, prsOf(r).map(prName).join('  ')]]);
     return activity(rows, r, H);
   }
 
+  // The Reviewer's Running list: its reviews, then the quick reviews waiting on their PRs.
+  const runningRows = () => [...live('reviewer'), ...(reviewer.waits?.() || []).map(wt => Object.assign(wt, { _wait: true }))];
+
   // Where a Builder ticket stands, in a word or two.
-  const STEP_NAMES = { claim: 'claiming', adopt: 'looking for its PRs', read: 'reading the ticket', turn: 'starting a turn', session: 'session running', settle: 'reading the result',
+  const STEP_NAMES = { claim: 'claiming', adopt: 'looking for work started', finish: 'checking out its work', read: 'reading the ticket', turn: 'starting a turn', session: 'session running', settle: 'reading the result',
     repos: 'checking out repos', approve: 'approving the plan', publish: 'checking and publishing', round: 'starting a round', 'push-round': 'pushing the round', ci: 'waiting for CI', 'end-round': 'retagging' };
   function workStatus(w) {
     if (w.status === 'needs-you') return [ST.yellow, 'NEEDS YOU'];
-    if (w.status === 'active') return [ST.yellow, w.turnKind === 'round' ? `ROUND ${w.rounds}` : 'BUILDING'];
+    if (w.status === 'active') return [ST.yellow, w.turnKind === 'round' ? `ROUND ${w.rounds}` : w.turnKind === 'finish' ? 'FINISHING' : 'BUILDING'];
     if (w.status === 'following') return w.ready ? [ST.green, 'READY TO MERGE'] : [ST.cyan, w.rounds ? `FOLLOWING · r${w.rounds}` : 'PRS OPEN'];
     if (w.status === 'stopped') return [ST.grey, 'STOPPED'];
     if (w.status === 'done') return [ST.green, w.prs?.length ? 'DONE' : 'ENDED'];
     return [ST.grey, 'ENDED'];
   }
 
-  /** The quick review's input: PRs to review together, without a ticket. */
+  /** The quick review's input: PRs and tickets to review together. */
   function prsInput(W) {
-    const about = "Paste PR links (https://github.com/owner/repo/pull/12) or owner/repo#12, separated by spaces or commas. Prowl reviews them together as one set, the way it reviews a ticket's PRs, and posts a review on each. No ticket or tag is involved.";
-    return [[], [[ST.bold, '  Quick review: PRs reviewed together, without a ticket']], [],
+    const labelled = app.cfg.quickLabels !== false;
+    const about = `Paste PR links (https://github.com/owner/repo/pull/12), owner/repo#12 or tickets, separated by spaces or commas. A ticket stands for its open, ready PRs. Prowl reviews them together as one set, the way it reviews a ticket's PRs, and posts a review on each; no tag is written.${labelled ? ` It labels them '${app.cfg.tags.inProgress}', then '${app.cfg.tags.done}', and re-reviews once they are labelled '${app.cfg.tags.trigger}'.` : ''}`;
+    return [[], [[ST.bold, '  Quick review: PRs reviewed together']], [],
       [[ST.grey, '  PRs  '], ...editSegs(W - 8)], [],
       ...wrap(about, W - 4, 4).map(l => [[ST.grey, `  ${l}`]]),
       ...(ui.edit.error ? [[], [[ST.red, `  ${ui.edit.error}`]]] : [])];
+  }
+
+  /** The quick build's input: a ticket, PRs, or what to build. */
+  function buildInput(W) {
+    const about = `It starts at once, whether the Builder is on or not. Paste a ticket (with any instructions of your own), PR links, or what to build in your own words. A ticket is picked up where it stands and claimed '${app.cfg.builder.tags.inProgress}'. PRs are worked on as they are; with no ticket, on their GitHub labels. Text alone builds without a ticket, on branches named ${app.cfg.builder.quickBranchTemplate || 'prowl/{slug}'}.`;
+    return [[], [[ST.bold, '  Quick build']], [],
+      [[ST.grey, '  What  '], ...editSegs(W - 9)], [],
+      ...wrap(about, W - 4, 4).map(l => [[ST.grey, `  ${l}`]]),
+      ...(ui.edit.error ? [[], [[ST.red, `  ${ui.edit.error}`]]] : [])];
+  }
+
+  /** The name box, with Quick names set to ask. */
+  function nameInput(W) {
+    return [[], [[ST.bold, `  Name this quick ${ui.edit.naming}`]], [], [[ST.grey, '  Name  '], ...editSegs(W - 9)], [],
+      [[ST.grey, '  A few words, shown in Running and History. Empty: numbered only.']], ...(ui.edit.error ? [[], [[ST.red, `  ${ui.edit.error}`]]] : [])];
+  }
+
+  // ---- The offer: a paste of only tickets, before a quick review or build ----
+
+  const offerOpen = () => ui.offers.length > 0 && !ui.edit && !ui.confirm && !ui.notes && !ui.keys && !(view() === NEEDS && needs(ui.side).length);
+  function offerChoices(o) {
+    const it = o.tickets.length > 1 ? 'them' : 'it';
+    const tag = o.side === 'builder' ? app.cfg.builder.tags.start : app.cfg.tags.trigger;
+    return [
+      o.polled ? ['tag', `Tag ${it} '${tag}'`] : ['add', `Add ${o.boards.join(', ')} to the boards and tag ${it}`],
+      o.side === 'builder' ? ['build', 'Build it now as a quick build'] : ['review', 'Review it now as a quick review'],
+      ['cancel', 'Cancel'],
+    ];
+  }
+  function offerView(W) {
+    const o = ui.offers[0];
+    const names = o.tickets.map(t => `${t.key} "${t.title}"`).join(', ');
+    const where = o.polled ? `on ${o.tickets.length > 1 ? 'boards' : 'a board'} the ${NAMES[o.side]} polls` : `on ${o.boards.join(', ')}, which the ${NAMES[o.side]} doesn't poll yet`;
+    const why = o.side === 'builder' ? `Tagged '${app.cfg.builder.tags.start}', the Builder picks ${o.tickets.length > 1 ? 'them' : 'it'} up from the board like any ticket.`
+      : `Tagged '${app.cfg.tags.trigger}', the Reviewer reviews ${o.tickets.length > 1 ? 'them' : 'it'} from the board like any ticket, and re-reviews on the next tag.`;
+    const choices = offerChoices(o);
+    ui.offerAt = Math.max(0, Math.min(ui.offerAt, choices.length - 1));
+    return [[], [[`${ST.bold}${acc(o.side).fg}`, `  ${o.side === 'builder' ? 'Quick build' : 'Quick review'} of ${o.tickets.length > 1 ? 'tickets' : 'a ticket'} ${where}`]], [],
+      ...wrap(`${names}. ${why}`, W - 4, 4).map(l => [['', `  ${l}`]]), [],
+      ...choices.map(([k, label], i) => onClick([cursor(i === ui.offerAt), [i === ui.offerAt ? ST.bold : '', `${i + 1}  ${label}`]], () => chooseOffer(i)))];
+  }
+  function chooseOffer(i) {
+    const o = ui.offers.shift();
+    const [choice] = offerChoices(o)[i] || ['cancel'];
+    ui.offerAt = 0;
+    if (choice === 'cancel') return flash('Cancelled.');
+    actions.answerOffer(o, choice).then(
+      r => flash(r?.offer ? '' : choice === 'review' || choice === 'build' ? started(r, o.side) : r?.length ? `Tagged ${r.join(', ')}.` : 'Nothing tagged: the Log says why.'),
+      e => flash(`Couldn't do that: ${e.message}`));
+    return undefined;
+  }
+  const started = (r, name) => (!r ? 'Dry run: the Log says what would happen.'
+    : name === 'builder' ? `Quick build ${r.key} started.` : `Reviewing ${plural(r.prs.length, 'PR')} together as ${r.ticket}.`);
+  function offerKey(k) {
+    const n = offerChoices(ui.offers[0]).length;
+    if (k === 'up' || k === 'down') ui.offerAt = (ui.offerAt + (k === 'up' ? n - 1 : 1)) % n;
+    else if (k === 'enter' || k === ' ') chooseOffer(ui.offerAt);
+    else if (k === 'esc') chooseOffer(n - 1);
+    else if (k.length === 1 && k >= '1' && k <= String(n)) chooseOffer(Number(k) - 1);
+    return undefined;
   }
 
   function builderRunning(W, H) {
@@ -312,7 +412,7 @@ export function startTui(app, actions, io = {}) {
     }
     const at = clampSel(RUNNING, items.length);
     const rows = windowed(items, at, Math.min(items.length, Math.max(3, Math.floor(H / 3)))).map(({ item: w, i }) => {
-      const left = [cursor(i === at), [w.stopRequested ? ST.red : acc().fg, `${w.stopRequested ? '■' : spin()} `], [ST.bold, `${w.key}  `]];
+      const left = [cursor(i === at), [w.stopRequested ? ST.red : acc().fg, `${w.stopRequested ? '■' : spin()} `], [ST.bold, `${w.key}  `], ...(w.quick ? [[ST.cyan, 'quick  ']] : [])];
       const right = [[ST.grey, `  ${w.stopRequested ? 'stopping' : STEP_NAMES[w.step] || 'waiting'} · ${plural(w.turns?.length || 0, 'turn')} · $${(w.costUsd || 0).toFixed(2)} · ${dur(Date.now() - (w.claimedRoundAt || w.claimedAt || w.createdAt))} `]];
       return onClick(spread([...left, ['', trunc(w.title, W - width(left) - width(right) - 1)]], right, W), pick(RUNNING, i));
     });
@@ -392,7 +492,7 @@ export function startTui(app, actions, io = {}) {
       if (ui.side === 'builder') {
         const prs = r.prs?.length || 0;
         const head = [cursor(i === at), [ST.grey, `${stamp(r.updatedAt || r.createdAt)}  `], [ST.bold, r.key.padEnd(11)], [workStatus(r)[0], workStatus(r)[1].padEnd(18)],
-          [ST.grey, `${prs ? `${plural(prs, 'PR')} · ` : ''}$${(r.costUsd || 0).toFixed(2)}  `]];
+          [ST.grey, `${r.quick ? 'quick · ' : ''}${prs ? `${plural(prs, 'PR')} · ` : ''}$${(r.costUsd || 0).toFixed(2)}  `]];
         return onClick([...head, ['', trunc(r.title, W - width(head))]], pick(HISTORY, i));
       }
       if (r.pr) {
@@ -586,7 +686,7 @@ export function startTui(app, actions, io = {}) {
   function editSegs(room = Infinity) {
     const e = ui.edit;
     const from = Math.max(0, e.cursor - room + 1);
-    const v = (e.secret ? '•'.repeat(e.value.length) : e.value).slice(from);
+    const v = (e.secret ? '•'.repeat(e.value.length) : e.value.replace(/\n/g, '↵')).slice(from);
     const at = e.cursor - from;
     return [[ST.yellow, v.slice(0, at)], [ST.cursor, v[at] || ' '], [ST.yellow, v.slice(at + 1)]];
   }
@@ -595,22 +695,29 @@ export function startTui(app, actions, io = {}) {
     const fields = configRows();
     const at = clampSel(CONFIG, fields.length);
     const rows = [[[ST.grey, '  Saved to '], [ST.link, CONFIG_PATH, pathToFileURL(CONFIG_PATH).href], [ST.grey, ' on every change. The next poll uses it.']], []];
-    // Each section's heading goes above its first row, after a blank line, and the window counts them as rows.
-    const lines = fields.flatMap((f, i) => [...(f.section !== fields[i - 1]?.section ? [...(i ? [{}] : []), { heading: f.section }] : []), { f, i }]);
-    // Each section in its own colour: a heading with a rule, and a bar down the left of its rows.
-    for (const { item: { f, i, heading } } of windowed(lines, lines.findIndex(l => l.i === at), Math.max(1, H - 6))) {
-      if (!f) {
-        const c = sectionColor(heading || '');
-        rows.push(heading ? [[`${ST.bold}${c}`, ` ▍ ${heading.toUpperCase()} `], [`${ST.dim}${c}`, '─'.repeat(Math.max(0, W - heading.length - 5))]] : []);
+    // Each section is a card, in its own colour: a rounded box with its heading in the top edge, a blank row between
+    // cards. The window counts the edges and gaps as rows.
+    const lines = fields.flatMap((f, i) => [
+      ...(f.section !== fields[i - 1]?.section ? [...(i ? [{ gap: true }] : []), { top: f.section }] : []),
+      { f, i },
+      ...(f.section !== fields[i + 1]?.section ? [{ bottom: f.section }] : []),
+    ]);
+    const inner = W - 5; // between '  │ ' and '│'
+    for (const { item: { f, i, top, bottom, gap } } of windowed(lines, lines.findIndex(l => l.i === at), Math.max(1, H - 6))) {
+      if (gap) { rows.push([]); continue; }
+      if (top || bottom) {
+        const c = sectionColor(top || bottom);
+        rows.push(top ? [[c, '  ╭─'], [`${ST.bold}${c}`, ` ${top} `], [c, `${'─'.repeat(Math.max(0, W - top.length - 8))}╮`]] : [[c, `  ╰${'─'.repeat(W - 5)}╯`]]);
         continue;
       }
-      const value = i === at && ui.edit ? editSegs()
+      const c = sectionColor(f.section);
+      const value = i === at && ui.edit ? editSegs(Math.max(1, inner - LABEL_W - 3))
         : f.file ? [[ST.link, f.file, pathToFileURL(f.file).href]] : [[f.switch ? (isOn(f.switch) ? ST.green : ST.grey) : '', shown(f)]];
       const on = i === at;
-      rows.push(onClick([[sectionColor(f.section), ' ▏'], on ? [acc().fg, '❯ '] : ['', '  '],
-        [f.addBoard ? ST.green : on ? ST.bold : ST.grey, f.label.padEnd(LABEL_W)], ...value], pick(CONFIG, i)));
+      const body = [on ? [acc().fg, '❯ '] : ['', '  '], [f.addBoard ? ST.green : on ? ST.bold : ST.grey, f.label.padEnd(LABEL_W)], ...value];
+      rows.push(onClick([[c, '  │ '], ...clip(body, inner - 1), [c, '│']], pick(CONFIG, i)));
     }
-    rows.push([], ui.edit?.error ? [[ST.red, `  ${ui.edit.error}`]] : [[sectionColor(fields[at].section), '  ▏ '], [ST.grey, fields[at].help]]);
+    rows.push([], ui.edit?.error ? [[ST.red, `  ${ui.edit.error}`]] : [[sectionColor(fields[at].section), `  ${fields[at].section} ▏ `], [ST.grey, fields[at].help]]);
     const variants = Object.entries(reviewer.tagVariants || {}).map(([p, v]) => `${p}: ${v.join(', ') || 'none yet'}`).join('  ·  ');
     if (variants) rows.push([[ST.grey, `  ${JIRA(app.cfg) ? 'Labels' : 'Tags'} treated as the trigger: `], ['', variants]]);
     return rows;
@@ -637,14 +744,14 @@ export function startTui(app, actions, io = {}) {
   const CONFIG_KEYS = [['enter', 'edit', 'Edit the setting, flip its switch, or open its file'], ['a', 'add board', 'Add a board to watch'], ['d', 'delete board', 'Delete the selected board']];
   const VIEW_KEYS = {
     reviewer: [
-      [['s', 'stop', "Stop the selected review; its in-progress tag comes off, so re-tag the ticket to run it again"], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser']],
+      [['s', 'stop', "Stop the selected review (its in-progress tag comes off, so re-tag the ticket to run it again), or stop a quick review waiting on its PRs (◷; its labels stay as they are)"], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser']],
       [['enter', 'report', "Open the review's report"], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser']],
       [], CONFIG_KEYS, [],
     ],
     builder: [
       [['enter', 'brief', "Open the ticket's brief folder"], ['s', 'stop', 'Stop the selected build before its next push, PR, tag or turn'], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser']],
       [['enter', 'brief', "Open the ticket's brief folder"], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser'],
-        ['w', 'follow', "Follow the ticket's PRs through review"], ['t', 'unfollow', "Stop following the ticket's PRs"]],
+        ['w', 'follow', "Follow the ticket's PRs through review (not a quick build without a ticket)"], ['t', 'unfollow', "Stop following the ticket's PRs"]],
       [['space', 'pick', 'Pick the option under the cursor (or untick it, where several may be picked)'],
         ['enter', 'submit', 'Submit what you picked, your own answer, or your question for its session: one at a time'],
         ['[ ]', 'item', 'The previous or next item in Needs you'], ['s', 'skip', 'Skip the question (the session uses its default), or end the work'],
@@ -652,14 +759,16 @@ export function startTui(app, actions, io = {}) {
       CONFIG_KEYS, [],
     ],
   };
-  const NEW_REVIEW = ['n', 'quick review', 'Quick review: PRs reviewed together as one set, without a ticket (on the Reviewer)'];
+  const NEW_REVIEW = ['n', 'quick review', 'On the Reviewer: a quick review of the PRs or tickets you paste, reviewed together as one set. Pasting there opens it too'];
+  const NEW_BUILD = ['n', 'quick build', 'On the Builder: a quick build of a ticket, PRs, or what you describe; it starts at once. Pasting there opens it too'];
   const KEY_GROUPS = [
     ['Moving around', [['tab', 'side', 'Switch between the Reviewer and the Builder; R and B go straight to one'],
       ['←→', 'views', 'The previous or next view; 1–5 go straight to Running, History, Needs you, Config or Log'],
       ['↑↓', 'select', 'Move the selection; scroll this list and the Update Notes']]],
     ['The side in view', [['e', 'on/off', 'Turn the side in view on or off, at once'], ['r', 'poll', 'Poll the side in view now'],
-      ['p', 'pause', 'Pause the side in view: running sessions carry on, nothing new starts'], NEW_REVIEW]],
+      ['p', 'pause', 'Pause the side in view: running sessions carry on, nothing new starts'], NEW_REVIEW, NEW_BUILD]],
     ['Typing', [['enter', 'save', 'Save the edit, or send the answer'], ['esc', 'cancel', 'Cancel it'], ['←→', 'move', 'Move the cursor; home and end jump to either end']]],
+    ['Offers', [['1–3', 'choose', 'A paste of only tickets on a board pops up an offer first: tag them, add their board and tag them, or go ahead quickly'], ['↑↓ enter', 'choose', 'Move to a choice and take it'], ['esc', 'cancel', 'Cancel']]],
     ['Mouse', [['click', '', 'A side, view or row picks it; the selected row again does what enter does; a link opens; a key in the bar presses it'],
       ['scroll', '', 'Moves the selection, or scrolls']]],
     ['Prowl', [['/', 'all keys', 'Show or hide this list'], ['esc', 'close', 'Close this list, or answer no'],
@@ -723,21 +832,23 @@ export function startTui(app, actions, io = {}) {
     let nav;
     let own;
     if (ui.notes) [nav, own] = [[say(NAV.text, 'Update Notes: ↑↓ scrolls them, and any other key or a click closes them.')], keys('Update Notes', [['↑ ↓', 'scroll'], ['esc', 'close']])];
+    else if (offerOpen()) [nav, own] = [[say(NAV.text, 'Choose what to do with the pasted ticket: a number, or ↑↓ and enter.')], keys('Offer', [['1 2 3', 'choose'], ['↑ ↓', 'move'], ['enter', 'take it'], ['esc', 'cancel']])];
     else if (ui.confirm) {
       const answers = ui.confirm.key ? [[ui.confirm.key, 'quit'], ['n', 'stay']] : [['y', 'yes'], ['n', 'no']];
       [nav, own] = [[say(`${ST.bold}${ST.yellow}`, ui.confirm.text)], keys('Confirm', answers)];
     } else if (ui.edit) {
-      const about = ui.edit.prs ? 'Quick review: paste PR links or owner/repo#12, then enter.' : ui.edit.secret ? 'Paste the token, then enter.'
+      const about = ui.edit.prs ? 'Quick review: paste PR links, owner/repo#12 or tickets, then enter.' : ui.edit.build ? 'Quick build: paste a ticket, PRs, or what to build, then enter.'
+        : ui.edit.naming ? 'Type a name, then enter.' : ui.edit.secret ? 'Paste the token, then enter.'
         : ui.edit.form ? (ui.edit.field === 'ask' ? 'Ask about this: your question goes to its session, which replies under the question.' : 'Your own answer: type it, then enter to submit.')
           : 'Type, then enter to save.';
       [nav, own] = [[say(NAV.text, about)], keys('Typing', ui.edit.form ? [['enter', 'submit'], ['↑ ↓', 'move'], ['esc', 'back'], ['← →', 'cursor']]
-        : [['enter', ui.edit.prs ? 'review' : 'save'], ['esc', 'cancel'], ['← →', 'move']])];
+        : [['enter', ui.edit.prs ? 'review' : ui.edit.build ? 'build' : ui.edit.naming ? 'name' : 'save'], ['esc', 'cancel'], ['← →', 'move']])];
     } else if (ui.keys) [nav, own] = [[say(NAV.text, 'All keys: any other key closes this list and does its job.')], keys('Keys', [['↑ ↓', 'scroll'], ['/', 'close'], ['esc', 'close']])];
     else {
       const list = viewKeys();
       own = list.length ? keys(TABS[view()], list) : [[...tag(TABS[view()]), [fg(245), EMPTY[view()] || 'no keys here']]];
       // Every button that fits in a third of the screen's rows; on a small one, the least used come off first.
-      let moves = [...(SIDES.filter(visible).length > 1 ? [['tab', 'side']] : []), ['← →', 'views'], ...(ui.side === 'reviewer' ? [NEW_REVIEW] : []),
+      let moves = [...(SIDES.filter(visible).length > 1 ? [['tab', 'side']] : []), ['← →', 'views'], ui.side === 'reviewer' ? NEW_REVIEW : NEW_BUILD,
         ['r', 'poll'], ['p', 'pause'], ['e', 'on/off'], ['↑ ↓', 'select']];
       for (;;) {
         nav = stack(moves, NAV, W, [['', ' ']], [['/', 'all keys'], ['q', 'quit']]);
@@ -745,7 +856,7 @@ export function startTui(app, actions, io = {}) {
         moves = moves.slice(0, -1);
       }
     }
-    if (Date.now() < ui.flashUntil && !ui.notes && !ui.confirm && !ui.edit) nav = [say(`${ST.bold}${ST.green}`, ui.flash), ...nav.slice(1).map(() => [])];
+    if (Date.now() < ui.flashUntil && !ui.notes && !ui.confirm && !ui.edit && !offerOpen()) nav = [say(`${ST.bold}${ST.green}`, ui.flash), ...nav.slice(1).map(() => [])];
     ui.bars = [nav.length, own.length];
     return [...nav.map(r => bar(r, NAV)), ...own.map(r => bar(r, KEYBAR))];
   }
@@ -868,7 +979,7 @@ export function startTui(app, actions, io = {}) {
     out.push(sideBar(W), tabBar(), rule(W));
     const bars = footer(W, H);
     const bodyH = H - out.length - bars.length;
-    const body = (ui.notes ? notesView : ui.keys ? keysView : [runningView, historyView, needsView, configView, logView][view()])(W, bodyH).slice(0, bodyH);
+    const body = (ui.notes ? notesView : ui.keys ? keysView : offerOpen() ? offerView : [runningView, historyView, needsView, configView, logView][view()])(W, bodyH).slice(0, bodyH);
     while (body.length < bodyH) body.push([]);
     out.push(...body, ...bars);
     ui.frame = out;
@@ -917,21 +1028,67 @@ export function startTui(app, actions, io = {}) {
       : `${NAMES[name]} off: nothing new is claimed or started; running sessions finish.`);
   }
 
-  /** n, from anywhere: a quick review of the PRs typed in, reviewed together without a ticket. */
-  function newReview() {
+  /** What a start resolved with: an offer pops up; a run or record is flashed. */
+  const landed = name => r => { if (r?.offer) ui.offers.push(r.offer); else flash(started(r, name)); };
+
+  /** Quick names set to ask, with no single ticket to name it: a second box asks for the name, then `go(name)`. */
+  function maybeName(kind, needed, go) {
+    if (app.cfg.quickName !== 'ask' || !needed) { go(''); return; }
+    startEdit('', v => { go(cleanName(v)); return ''; });
+    ui.edit.naming = kind;
+  }
+
+  /** n on the Reviewer (or a paste there): a quick review of the PRs and tickets pasted, reviewed together. */
+  function newReview(value = '') {
     if (!isOn('reviewer')) return flash('The Reviewer is off: e turns it on.');
     ui.side = 'reviewer';
     ui.view.reviewer = RUNNING;
-    startEdit('', v => {
-      const refs = parsePrRefs(v);
-      if (typeof refs === 'string') return refs;
-      actions.reviewPrs(refs).then(
-        run => flash(run ? `Reviewing ${plural(run.prs.length, 'PR')} together as ${run.ticket}.` : 'Dry run: the Log says what would be reviewed.'),
-        e => flash(`Couldn't start the review: ${e.message}`));
+    startEdit(value.replace(/\s+/g, ' ').trim(), v => {
+      const paste = parsePaste(v, app.cfg.taskBoard);
+      if (paste.rest) return `${notARef(paste.rest)} isn't a PR or a ticket: paste PR links, owner/repo#12 or ticket keys`;
+      if (!paste.prs.length && !paste.tickets.length) return 'Paste at least one PR or ticket';
+      // Named after its ticket when there is exactly one; ask names the rest.
+      ui.edit = null;
+      maybeName('review', paste.tickets.length !== 1, name => {
+        actions.quickReview(v, { name }).then(landed('reviewer'), e => flash(`Couldn't start the review: ${e.message}`));
+      });
       return '';
     });
     ui.edit.prs = true;
     return undefined;
+  }
+
+  /** n on the Builder (or a paste there): a quick build of a ticket, PRs, or what you describe, after a y/n. */
+  function newBuild(value = '') {
+    ui.side = 'builder';
+    ui.view.builder = RUNNING;
+    startEdit(value.trim(), v => {
+      const paste = parsePaste(v, app.cfg.taskBoard);
+      if (paste.tickets.length > 1) return `One ticket per quick build: ${paste.tickets.join(', ')}`;
+      if (paste.tickets.length && paste.prs.length) return 'Paste a ticket or PRs, not both';
+      if (!paste.tickets.length && !paste.prs.length && !paste.rest) return 'Paste a ticket, PRs, or what to build';
+      const what = paste.tickets.length ? `${paste.tickets[0]}${paste.rest ? ', with your instructions' : ''}, claiming it '${app.cfg.builder.tags.inProgress}'`
+        : paste.prs.length ? `on ${plural(paste.prs.length, 'PR')}` : `"${trunc(paste.rest.split('\n')[0], 36)}", without a ticket`;
+      ui.confirm = { text: `Quick build ${what}?`, yes: () => maybeName('build', !paste.tickets.length, name => {
+        actions.quickBuild(v, { name }).then(landed('builder'), e => flash(`Couldn't start the build: ${e.message}`));
+      }) };
+      return '';
+    });
+    ui.edit.build = true;
+    return undefined;
+  }
+
+  /** A paste: into the box being typed in, or, with none open, a quick review or quick build of it on the side in view. */
+  function onPaste(text) {
+    if (ui.edit) {
+      const e = ui.edit;
+      const t = e.build ? text.replace(/\r\n?/g, '\n') : text.replace(/\s+/g, ' ');
+      e.value = e.value.slice(0, e.cursor) + t + e.value.slice(e.cursor);
+      e.cursor += t.length;
+      return undefined;
+    }
+    if (ui.notes || ui.confirm || ui.keys || offerOpen()) return undefined;
+    return ui.side === 'builder' ? newBuild(text) : newReview(text);
   }
 
   function configKey(k) {
@@ -1002,7 +1159,7 @@ export function startTui(app, actions, io = {}) {
   function editKey(k) {
     const e = ui.edit;
     if (k === 'esc') ui.edit = null;
-    else if (k === 'enter') { const err = e.commit(e.value.trim()); if (err) e.error = err; else ui.edit = null; }
+    else if (k === 'enter') { const err = e.commit(e.value.trim()); if (err) e.error = err; else if (ui.edit === e) ui.edit = null; } // a commit may open the next box
     else if (k === 'backspace') { if (e.cursor) { e.value = e.value.slice(0, e.cursor - 1) + e.value.slice(e.cursor); e.cursor--; } }
     else if (k === 'delete') e.value = e.value.slice(0, e.cursor) + e.value.slice(e.cursor + 1);
     else if (k === 'left') e.cursor = Math.max(0, e.cursor - 1);
@@ -1013,6 +1170,11 @@ export function startTui(app, actions, io = {}) {
   }
 
   function reviewerKey(k, r) {
+    if (r._wait) {
+      if (k === 's') ui.confirm = { text: `Stop waiting on ${r.key}'s PRs? Their labels stay as they are.`, yes: () => { actions.stopWait(r); flash(`${r.key} no longer waits on its PRs.`); } };
+      else if (k === 'a' && r.ticketUrl) openExternal(r.ticketUrl);
+      return undefined;
+    }
     if (k === 'o') prsOf(r).forEach(p => openExternal(p.url));
     else if (k === 'a' && r.ticketUrl) openExternal(r.ticketUrl);
     else if (k === 'enter' && view() === HISTORY && r.pr) openExternal(r.briefDir || r.pr.url);
@@ -1030,6 +1192,7 @@ export function startTui(app, actions, io = {}) {
     else if (k === 's' && view() === RUNNING) {
       ui.confirm = { text: `Stop ${w.key}? It stops before its next push, PR, tag or turn, and '${app.cfg.builder.tags.inProgress}' comes off.`, yes: () => actions.stop('builder', w) };
     } else if (k === 'w' && view() === HISTORY) {
+      if (!w.ref) return flash(`${w.key} has no ticket to follow.`);
       if (!isOn('builder')) return flash('w follows a ticket\'s PRs with the Builder: turn it on first (e).');
       actions.follow(w).then(() => flash(`Following ${w.key}'s PRs.`), e => flash(`Couldn't follow ${w.key}: ${e.message}`));
     } else if (k === 't' && view() === HISTORY && w.status === 'following') {
@@ -1046,6 +1209,7 @@ export function startTui(app, actions, io = {}) {
       else ui.notes = null;
       return undefined;
     }
+    if (offerOpen()) return offerKey(k);
     if (ui.confirm) {
       const c = ui.confirm;
       const yes = c.key || 'y';
@@ -1090,12 +1254,12 @@ export function startTui(app, actions, io = {}) {
       return undefined;
     }
     if (k === 'e') return toggleSide();
-    if (k === 'n') return newReview();
+    if (k === 'n') return ui.side === 'builder' ? newBuild() : newReview();
     if (k === 'r') { actions.pollNow(ui.side); flash(isOn(ui.side) ? `Polling the ${NAMES[ui.side]} now.` : `The ${NAMES[ui.side]} is off: e turns it on.`); return undefined; }
     if (k === 'p') { actions.togglePause(ui.side); flash(side().paused ? `${NAMES[ui.side]} paused: running sessions carry on, nothing new starts.` : 'Resumed.'); return undefined; }
     if (view() === CONFIG) return configKey(k);
     if (view() === NEEDS) return needsKey(k);
-    const r = (view() === RUNNING ? live(ui.side) : view() === HISTORY ? history(ui.side) : [])[sel()[view()]];
+    const r = (view() === RUNNING ? (ui.side === 'reviewer' ? runningRows() : live(ui.side)) : view() === HISTORY ? history(ui.side) : [])[sel()[view()]];
     if (!r) return undefined;
     return ui.side === 'reviewer' ? reviewerKey(k, r) : builderKey(k, r);
   }
@@ -1159,12 +1323,14 @@ export function startTui(app, actions, io = {}) {
     if (!row || (ui.confirm && !row.footer)) return undefined;
     return hitAt(row, x)?.();
   }
-  const input = k => (typeof k === 'object' ? onMouse(k) : onKey(k));
+  const input = k => (typeof k === 'object' ? (k.paste != null ? onPaste(k.paste) : onMouse(k)) : onKey(k));
 
   if (io.headless) {
     return {
       restore() {},
       key(k) { onKey(k); },
+      /** A bracketed paste of `text`. */
+      paste(text) { onPaste(text); },
       /** A click (button 0) or wheel turn (64 up, 65 down) at column `x`, row `y` of the last frame, from 0. */
       mouse(x, y, button = 0) { onMouse({ mouse: button, x, y, release: false }); if (button < 64) onMouse({ mouse: button, x, y, release: true }); },
       /** The pointer moved to (x, y), no button down. */
@@ -1178,11 +1344,16 @@ export function startTui(app, actions, io = {}) {
   }
   // Save the tab title and set it, alternate screen, hidden cursor, and the mouse reported: clicks, drags, the wheel
   // and the pointer moving, for hover (any-motion tracking, SGR encoding).
-  out.write('\x1b[22;0t\x1b]0;Prowl\x07\x1b[?1049h\x1b[?25l\x1b[?1003h\x1b[?1006h');
+  out.write('\x1b[22;0t\x1b]0;Prowl\x07\x1b[?1049h\x1b[?25l\x1b[?1003h\x1b[?1006h\x1b[?2004h'); // …and bracketed paste
   stdin.setRawMode(true);
   stdin.setEncoding('utf8');
   stdin.resume();
-  stdin.on('data', data => {
+  let held = ''; // the start of a paste whose end hasn't arrived yet
+  stdin.on('data', chunk => {
+    let data = held + chunk;
+    held = '';
+    const open = data.lastIndexOf('\x1b[200~');
+    if (open >= 0 && data.indexOf('\x1b[201~', open) < 0) { held = data.slice(open); data = data.slice(0, open); }
     let moved = true; // only the pointer moving: repainted at most every 30ms, so a quick sweep can't flood the terminal
     for (const k of keys(data)) { input(k); if (!(k.mouse & 32)) moved = false; }
     if (!moved || Date.now() - painted > 30) paint(false);
@@ -1194,7 +1365,7 @@ export function startTui(app, actions, io = {}) {
   return {
     restore() {
       clearInterval(timer);
-      out.write('\x1b[?1006l\x1b[?1003l\x1b[?2026l\x1b[?25h\x1b[?1049l\x1b[23;0t'); // …and restore the tab title
+      out.write('\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[?2026l\x1b[?25h\x1b[?1049l\x1b[23;0t'); // …and restore the tab title
       try { stdin.setRawMode(false); } catch { /* not a TTY any more */ }
       stdin.pause();
     },

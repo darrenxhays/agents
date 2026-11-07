@@ -66,3 +66,28 @@ export const fetchBranch = (clone, branch) => serial(clone, async () => {
 
 /** Pushes HEAD of `dir` to origin's `branch`. Never forced: a push that isn't a fast-forward is rejected by git. */
 export const push = (dir, branch) => git(dir, 'push', 'origin', `HEAD:refs/heads/${branch}`);
+
+/**
+ * `git diff --numstat -z` of what the commits in from..HEAD change themselves, leaving out what a merge of the base
+ * (`exclude`) brought in: each of their own commits, and each merge's own lines (its conflict resolutions). With no
+ * merge in the range, from..HEAD as it is.
+ */
+export async function ownNumstat(dir, from, exclude) {
+  const list = async kind => (await git(dir, 'rev-list', kind, `${from}..HEAD`, `^${exclude}`)).split('\n').filter(Boolean);
+  const merges = await list('--merges');
+  if (!merges.length) return git(dir, 'diff', '--numstat', '-z', `${from}..HEAD`);
+  let out = '';
+  for (const c of await list('--no-merges')) out += await git(dir, 'diff', '--numstat', '-z', `${c}^`, c);
+  for (const m of merges) {
+    const lines = {};
+    let file = '';
+    for (const line of (await git(dir, 'show', '--cc', '--format=', '-U0', m)).split('\n')) {
+      const head = /^diff --cc (.+)$/.exec(line);
+      if (head) { file = head[1]; continue; }
+      if (!file || /^(\+\+\+|---) |^@@@/.test(line)) continue;
+      if (/^[ +-]{2}/.test(line) && /[+-]/.test(line.slice(0, 2))) lines[file] = (lines[file] || 0) + 1;
+    }
+    for (const [f, n] of Object.entries(lines)) out += `${n}\t0\t${f}\0`;
+  }
+  return out;
+}

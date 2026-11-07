@@ -39,11 +39,60 @@ export function parsePrRefs(text) {
   return refs;
 }
 
-/** A PR by repo and number, in openPrs()'s shape, with its state: 'open', 'closed' or 'merged'. */
+/** A PR by repo and number, in openPrs()'s shape, with its state ('open', 'closed' or 'merged'), head commit and labels. */
 export async function prByRef({ repo, number }) {
   const p = JSON.parse(await run('gh', ['api', `repos/${repo}/pulls/${number}`, '--jq',
-    '{url: .html_url, title, number, repo: .base.repo.full_name, author: .user.login, draft, state, merged: (.merged_at != null)}']));
-  return { url: p.url, title: p.title, number: p.number, repo: p.repo, author: p.author || '', draft: Boolean(p.draft), state: p.merged ? 'merged' : p.state };
+    '{url: .html_url, title, number, repo: .base.repo.full_name, author: .user.login, draft, state, merged: (.merged_at != null), head: .head.sha, labels: [.labels[].name]}']));
+  return { url: p.url, title: p.title, number: p.number, repo: p.repo, author: p.author || '', draft: Boolean(p.draft), state: p.merged ? 'merged' : p.state, headSha: p.head || '', labels: p.labels || [] };
+}
+
+// Labels, for the label cycle of quick reviews and ticketless builds (src/labels.mjs queues the writes).
+
+/** The names of the labels on a PR. */
+export async function prLabels(pr) {
+  return (await run('gh', ['api', `repos/${pr.repo}/issues/${pr.number}/labels`, '--paginate', '--jq', '.[].name'])).split('\n').map(l => l.trim()).filter(Boolean);
+}
+
+/** Puts label `name` on a PR, creating it on the repo first when the repo has none of that name. */
+export async function addLabel(pr, name) {
+  const missing = await run('gh', ['api', `repos/${pr.repo}/labels/${encodeURIComponent(name)}`, '--jq', '.name']).then(() => false, e => {
+    if (/\(HTTP 404\)/.test(e.message)) return true;
+    throw e;
+  });
+  if (missing) {
+    await run('gh', ['api', '-X', 'POST', `repos/${pr.repo}/labels`, '-f', `name=${name}`, '-f', 'color=c5def5', '-f', 'description=Set by Prowl', '--jq', '.name'])
+      .catch(e => { if (!/\(HTTP 422\)/.test(e.message)) throw e; }); // created meanwhile
+  }
+  await run('gh', ['api', '-X', 'POST', `repos/${pr.repo}/issues/${pr.number}/labels`, '-f', `labels[]=${name}`, '--jq', 'length']);
+}
+
+/** Takes label `name` off a PR; one that is already off counts as taken off. */
+export async function removeLabel(pr, name) {
+  await run('gh', ['api', '-X', 'DELETE', `repos/${pr.repo}/issues/${pr.number}/labels/${encodeURIComponent(name)}`, '--jq', 'length'])
+    .catch(e => { if (!/\(HTTP (404|410)\)/.test(e.message)) throw e; });
+}
+
+/** Marks a draft PR ready for review. */
+export async function markReady(pr) {
+  await run('gh', ['pr', 'ready', pr.url]);
+}
+
+/** Every branch name in `repo` (owner/name). */
+export async function repoBranches(repo) {
+  return (await run('gh', ['api', `repos/${repo}/branches`, '--paginate', '--jq', '.[].name'])).split('\n').map(l => l.trim()).filter(Boolean);
+}
+
+/**
+ * `branch` against `base` in `repo`: { head, ahead, authors (the GitHub logins of the commits ahead), files, additions,
+ * deletions }, or null when `repo` has no such branch.
+ */
+export async function branchVsBase(repo, base, branch) {
+  const out = await run('gh', ['api', `repos/${repo}/compare/${base}...${branch}`, '--jq',
+    '{ahead: .ahead_by, authors: [.commits[] | (.author.login // "")], head: (.commits[-1].sha // ""), files: (.files | length), additions: ([.files[].additions] | add // 0), deletions: ([.files[].deletions] | add // 0)}'])
+    .catch(e => { if (/\(HTTP 404\)/.test(e.message)) return null; throw e; });
+  if (!out) return null;
+  const v = JSON.parse(out);
+  return { head: v.head || '', ahead: v.ahead || 0, authors: v.authors || [], files: v.files || 0, additions: v.additions || 0, deletions: v.deletions || 0 };
 }
 
 /** The commit at the head of the PR now. */
@@ -128,10 +177,12 @@ export async function prThreads(pr) {
 
 /** What the Builder needs to know about a PR before it touches it. */
 export async function prFacts(pr) {
-  const v = JSON.parse(await run('gh', ['pr', 'view', pr.url, '--json', 'state,isDraft,isCrossRepository,headRefName,headRefOid,baseRefName,author,reviewDecision']));
+  const v = JSON.parse(await run('gh', ['pr', 'view', pr.url, '--json', 'state,isDraft,isCrossRepository,headRefName,headRefOid,baseRefName,author,reviewDecision,mergeable,labels,additions,deletions,changedFiles']));
   return {
     state: v.state, draft: Boolean(v.isDraft), fork: Boolean(v.isCrossRepository), headBranch: v.headRefName, headSha: v.headRefOid, base: v.baseRefName,
     defaultBranch: await defaultBranch(pr.repo), author: v.author?.login || '', reviewDecision: v.reviewDecision || '',
+    // MERGEABLE, CONFLICTING, or UNKNOWN while GitHub works it out (read again next poll).
+    mergeable: v.mergeable || 'UNKNOWN', labels: (v.labels || []).map(l => l.name), additions: v.additions || 0, deletions: v.deletions || 0, files: v.changedFiles || 0,
   };
 }
 
@@ -186,6 +237,11 @@ export async function prForBranch(repo, branch) {
   const out = (await run('gh', ['api', `repos/${repo}/pulls?state=open&head=${repo.split('/')[0]}:${encodeURIComponent(branch)}`, '--jq', '.[0] | [.html_url, .number] | @tsv'])).trim();
   const [url, number] = out.split('\t');
   return url ? { url, number: Number(number) } : null;
+}
+
+/** True when `branch` in `repo` has had a PR, open, closed or merged: it isn't a branch with no PR. */
+export async function branchHadPr(repo, branch) {
+  return Number((await run('gh', ['api', `repos/${repo}/pulls?state=all&head=${repo.split('/')[0]}:${encodeURIComponent(branch)}`, '--jq', 'length'])).trim()) > 0;
 }
 
 /** Replaces a PR's body with the one in `file` ({ body }). */

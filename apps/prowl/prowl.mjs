@@ -3,7 +3,7 @@
 // GitHub PRs of tickets tagged for review; the Builder builds tickets tagged to start and opens their PRs. See README.md.
 // Run it from your projects folder:
 //   node /path/to/prowl.mjs [--setup] [--dry-run] [--once] [--self-test] [--reviewer-only | --builder-only]
-//     [--work <ticket>] [--follow <ticket>] [--review <pr> [<pr>...]]
+//     [--work <ticket>] [--follow <ticket>] [--review <pr or ticket>...] [--build <paste>] [--as <ticket or name>]
 import fs from 'node:fs';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -49,19 +49,27 @@ const { createBuilder } = await import('./src/builder/builder.mjs');
 const { createShell } = await import('./src/shell.mjs');
 const { migrateFixes, needsMigration } = await import('./src/migrate.mjs');
 const update = await import('./src/update.mjs');
-const { parsePrRefs } = await import('./src/github.mjs');
+const github = await import('./src/github.mjs');
+const { createLabels } = await import('./src/labels.mjs');
 
 const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url)); // this folder is also the plugin with prowl-review and prowl-build
 const ONCE = args.has('--once');
 const LOCK = path.join(HOME, 'lock');
 const workKey = valueOf('--work');
 const followKey = valueOf('--follow');
-// --review takes every argument after it up to the next flag: PR links or owner/repo#12.
-const afterReview = args.has('--review') ? process.argv.slice(process.argv.indexOf('--review') + 1) : null;
-const nextFlag = afterReview?.findIndex(a => a.startsWith('--'));
-const reviewRefs = afterReview && parsePrRefs(afterReview.slice(0, nextFlag < 0 ? undefined : nextFlag).join(' '));
-if (typeof reviewRefs === 'string') {
-  console.error(`--review: ${reviewRefs}. Give one or more PRs, e.g. prowl --review https://github.com/owner/repo/pull/12 owner/repo#13`);
+// --review and --build take every argument after them up to the next flag: a paste (PRs, tickets, and for --build
+// what to build). --as names the run: a ticket, or a name.
+const pasteAfter = flag => {
+  if (!args.has(flag)) return null;
+  const after = process.argv.slice(process.argv.indexOf(flag) + 1);
+  const next = after.findIndex(a => a.startsWith('--'));
+  return after.slice(0, next < 0 ? undefined : next).join(' ');
+};
+const reviewPaste = pasteAfter('--review');
+const buildPaste = pasteAfter('--build');
+const asName = valueOf('--as') || '';
+if ((reviewPaste != null && !reviewPaste.trim()) || (buildPaste != null && !buildPaste.trim())) {
+  console.error('--review takes PRs or tickets (e.g. prowl --review https://github.com/owner/repo/pull/12 owner/repo#13); --build a ticket, PRs, or what to build in quotes.');
   process.exit(1);
 }
 let tui = null; // set once the TUI is up; until then (and with --once) logs go to stdout
@@ -119,7 +127,10 @@ function hoot(text, mood) {
 }
 app.hoot = hoot;
 
-const sideDeps = name => ({ log: (...a) => log(name, ...a), forget: key => forget(name, key), hoot, appDir: PLUGIN_DIR, trackers: TRACKERS });
+// GitHub labels on PRs: one queue for both sides, so writes to a PR land in order whichever side asked.
+const labels = createLabels({ gh: github, log });
+app.offers = []; // offers waiting to pop up in the TUI: a paste of only tickets, before a quick review or build
+const sideDeps = name => ({ log: (...a) => log(name, ...a), forget: key => forget(name, key), hoot, appDir: PLUGIN_DIR, trackers: TRACKERS, labels, saveConfig: () => saveConfig(app.cfg) });
 const reviewer = createReviewer(app, sideDeps('reviewer'));
 const builder = createBuilder(app, sideDeps('builder'));
 const sides = [reviewer, builder];
@@ -184,15 +195,28 @@ for (const [key, source] of [[workKey, 'manual'], [followKey, 'follow']]) {
   }
 }
 
-// prowl --review <pr>... starts a quick review of the PRs, together and without a ticket. It needs the Reviewer.
-if (reviewRefs) {
+// prowl --review <paste> starts a quick review of its PRs (and its tickets' PRs), together. It needs the Reviewer.
+if (reviewPaste != null) {
   if (!app.sideOn('reviewer')) app.override.reviewer = true;
   try {
     await reviewer.settle(); // reviews that ended since the last launch free their slots first
-    const run = await reviewer.reviewPrs(reviewRefs);
-    console.log(run ? `Reviewing ${run.prs.map(p => p.url).join(' ')} together as ${run.ticket}.` : 'Dry run: logged what would be reviewed.');
+    const run = await reviewer.quickReview(reviewPaste, { as: asName, oneShot: ONCE });
+    if (run?.offer) app.offers.push(run.offer);
+    console.log(run?.offer ? 'Prowl asks what to do with the ticket first.' : run ? `Reviewing ${run.prs.map(p => p.url).join(' ')} together as ${run.ticket}.` : 'Dry run: logged what would be reviewed.');
   } catch (e) {
     console.error(`Couldn't start the quick review: ${e.message}`);
+    process.exit(1);
+  }
+}
+
+// prowl --build <paste> starts a quick build: at once, whether the Builder is on or not.
+if (buildPaste != null) {
+  try {
+    const w = await builder.quickBuild(buildPaste, { as: asName, oneShot: ONCE });
+    if (w?.offer) app.offers.push(w.offer);
+    console.log(w?.offer ? 'Prowl asks what to do with the ticket first.' : w ? `Building ${w.key} "${w.title}" with the Builder, as a quick build.` : 'Dry run: logged what would be built.');
+  } catch (e) {
+    console.error(`Couldn't start the quick build: ${e.message}`);
     process.exit(1);
   }
 }
@@ -202,6 +226,7 @@ if (ONCE) {
   if (app.sideOn('reviewer')) await reviewer.settle();
   await shell.pollOnce();
   await builder.drain(); // the Builder's due steps; sessions it starts keep running in the background
+  await labels.drain(); // label writes due on GitHub; one that fails is retried on the next launch
   process.exit(0);
 }
 if (!process.stdin.isTTY || !process.stdout.isTTY) {
@@ -236,10 +261,19 @@ tui = startTui(app, {
   handBack: item => builder.handBack(item).catch(e => log('builder', 'error', `${item.ticket}: couldn't hand it back (${e.message})`)),
   follow: w => builder.enqueue(w.key, 'follow'),
   stopFollowing: w => builder.stopFollowing(w),
-  reviewPrs: refs => reviewer.reviewPrs(refs).catch(e => {
+  quickReview: (text, opts) => reviewer.quickReview(text, opts).catch(e => {
     log('reviewer', 'error', `Couldn't start the quick review: ${e.message}`);
     throw e;
   }),
+  quickBuild: (text, opts) => builder.quickBuild(text, opts).catch(e => {
+    log('builder', 'error', `Couldn't start the quick build: ${e.message}`);
+    throw e;
+  }),
+  answerOffer: (offer, choice) => byName[offer.side].answerOffer(offer, choice).catch(e => {
+    log(offer.side, 'error', `Couldn't do that: ${e.message}`);
+    throw e;
+  }),
+  stopWait: wt => reviewer.stopWait(wt),
   saveConfig: () => {
     saveConfig(app.cfg);
     seedChecks(); // the Checks before push file to fill in, with examples; never overwritten once edited
@@ -255,5 +289,6 @@ tui = startTui(app, {
 for (const sig of ['SIGTERM', 'SIGHUP']) process.on(sig, () => quit(0));
 process.on('uncaughtException', e => { tui?.restore(); tui = null; console.error(e); process.exit(1); });
 process.on('unhandledRejection', e => log('prowl', 'error', `unhandled: ${e?.stack || e}`));
-ticker = setInterval(shell.tick, 1000);
-shell.tick();
+const tick = () => { shell.tick(); labels.tick(); };
+ticker = setInterval(tick, 1000);
+tick();

@@ -68,7 +68,7 @@ async function boardId(cfg, board) {
 
 const ticketOf = (cfg, issue) => ({
   key: issue.key, title: issue.fields.summary || '', url: ticketUrl(cfg, issue.key), tags: issue.fields.labels || [],
-  assignee: issue.fields.assignee?.displayName || '', ref: { site: siteOf(cfg), key: issue.key },
+  assignee: issue.fields.assignee?.displayName || '', closed: issue.fields.status?.statusCategory?.key === 'done', ref: { site: siteOf(cfg), key: issue.key },
 });
 
 /**
@@ -136,8 +136,38 @@ const revision = async (cfg, key) => (await api(cfg, `/rest/api/3/issue/${enc(ke
 export async function readItem(cfg, ref) {
   // The revision first: a write between the two reads then shows in the labels, or comes after rev, never neither.
   const rev = await revision(cfg, ref.key);
-  const issue = await api(cfg, `/rest/api/3/issue/${enc(ref.key)}?fields=summary,labels,assignee`);
+  const issue = await api(cfg, `/rest/api/3/issue/${enc(ref.key)}?fields=summary,labels,assignee,status`);
   return { ...ticketOf(cfg, issue), rev };
+}
+
+/** The board holding the issue: the first of its project's boards whose filter takes it in. { board } (its name, or its id when names repeat), or null. */
+export async function boardOf(cfg, ticket) {
+  const project = String(ticket.key).split('-')[0];
+  const boards = (await api(cfg, `/rest/agile/1.0/board?projectKeyOrId=${enc(project)}&maxResults=50`)).values || [];
+  for (const b of boards) {
+    const page = await api(cfg, `/rest/agile/1.0/board/${b.id}/issue?jql=${enc(`key = ${ticket.key}`)}&fields=summary&maxResults=1`).catch(() => null);
+    if (!page?.issues?.length) continue;
+    const unique = boards.filter(x => x.name.toLowerCase() === b.name.toLowerCase()).length === 1;
+    return { board: unique ? b.name : String(b.id) };
+  }
+  return null;
+}
+
+/**
+ * Branches linked to the issue through Jira's development information (a GitHub or other dev tool integration):
+ * [{ branch, repo (owner/name, on GitHub), url }], repo '' for another host. [] when the site has none to give.
+ */
+export async function linkedBranches(cfg, ref) {
+  try {
+    const { id } = await api(cfg, `/rest/api/3/issue/${enc(ref.key)}?fields=summary`);
+    const dev = await api(cfg, `/rest/dev-status/latest/issue/detail?issueId=${enc(id)}&applicationType=GitHub&dataType=branch`);
+    return (dev?.detail || []).flatMap(d => d.branches || []).map(b => {
+      const m = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/i.exec(b.repository?.url || '');
+      return { branch: b.name || '', repo: m ? m[1] : '', url: b.url || b.repository?.url || '' };
+    }).filter(b => b.branch);
+  } catch {
+    return [];
+  }
 }
 
 /**

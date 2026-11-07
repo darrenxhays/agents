@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import * as ado from '../ado.mjs';
 import * as jira from '../jira.mjs';
 import { CHECKS_PATH, loadConfig } from '../config.mjs';
+import { createLabels } from '../labels.mjs';
 import { mentions } from '../match.mjs';
 import * as brief from './brief.mjs';
 import { createBuilder } from './builder.mjs';
@@ -48,6 +49,7 @@ function adoServer() {
     const body = opts.body ? JSON.parse(opts.body) : null;
     calls.push(`${method} ${p}${body?.query ? ` ${body.query}` : ''}`);
     let m;
+    if (p === '/o/_apis/projects/Shop/teams') return json({ value: [{ name: 'Web' }] });
     if (p.endsWith('/_apis/work/teamsettings/teamfieldvalues')) return json({ field: { referenceName: 'System.AreaPath' }, values: [{ value: 'Shop', includeChildren: true }] });
     if (p === '/o/Shop/_apis/wit/tags') return json({ value: [...new Set(Object.values(items).flatMap(tagsOf))].map(name => ({ name })) });
     if (p === '/o/Shop/_apis/wit/wiql') {
@@ -81,6 +83,7 @@ function jiraServer() {
   const changelog = {};
   const calls = [];
   let rival = false; // another copy of Prowl, on the same account, claims first on the next label write
+  const dev = []; // branches Jira's development information links to issues
   const edit = (key, ops, who = 'Octo Cat') => {
     const labels = issues[key].fields.labels;
     const before = [...labels];
@@ -99,6 +102,8 @@ function jiraServer() {
     calls.push(`${method} ${p}${q.get('jql') ? ` ${q.get('jql')}` : ''}`);
     let m;
     if (p === '/rest/agile/1.0/board') return json({ values: [{ id: 7, name: 'Shop board' }] });
+    if (p === '/rest/dev-status/latest/issue/detail') return json({ detail: [{ branches: dev }] });
+    if (p === '/rest/agile/1.0/board/7/issue' && /^key = /.test(q.get('jql'))) return json({ issues: [{ key: q.get('jql').slice(6) }], total: 1 });
     if (p === '/rest/agile/1.0/board/7/issue') {
       const mine = q.get('jql').includes('assignee = currentUser()');
       const list = Object.values(issues).filter(i => i.fields.labels.length && (!mine || i.fields.assignee?.accountId === 'acct-me'));
@@ -127,7 +132,7 @@ function jiraServer() {
     }
     return json({ errorMessages: [`no fixture for ${method} ${p}`] }, 404);
   }
-  return { issues, changelog, calls, fetch, rivalNext: () => { rival = true; }, labels: key => issues[key].fields.labels, edit };
+  return { issues, changelog, calls, fetch, rivalNext: () => { rival = true; }, labels: key => issues[key].fields.labels, edit, dev };
 }
 
 /** GitHub, in memory: the PRs Prowl opens, their reviews, threads, checks and replies. Heads are read from the bare repos. */
@@ -136,8 +141,30 @@ function githubFake(bares) {
   const head = (repo, branch) => execFileSync('git', ['ls-remote', bares[repo], `refs/heads/${branch}`], { encoding: 'utf8' }).split(/\s/)[0];
   const find = pr => prs.find(p => p.url === pr.url || (p.repo === pr.repo && p.number === pr.number));
   const view = p => ({ url: p.url, title: p.title, number: p.number, repo: p.repo, author: p.author, draft: p.draft, state: p.state });
+  const gitOf = (repo, ...a) => execFileSync('git', ['--git-dir', bares[repo], ...a], { encoding: 'utf8' }).trim();
+  // Commits made by the test's own git identity are yours (octocat); a commit's author name stands for anyone else's login.
+  const login = name => (name === 'Prowl Test' ? 'octocat' : name);
   return {
     prs,
+    labelCalls: [],
+    prByRef: async ({ repo, number }) => {
+      const p = find({ repo, number });
+      if (!p) throw new Error('gh: Not Found (HTTP 404)');
+      return { ...view(p), state: p.state === 'OPEN' ? 'open' : p.state.toLowerCase(), headSha: head(p.repo, p.head), labels: [...(p.labels || [])], body: p.body };
+    },
+    prLabels: async pr => [...(find(pr).labels || [])],
+    addLabel: async (pr, name) => { const p = find(pr); (p.labels ??= []).push(name); },
+    removeLabel: async (pr, name) => { const p = find(pr); p.labels = (p.labels || []).filter(l => l !== name); },
+    markReady: async pr => { find(pr).draft = false; },
+    branchHadPr: async (repo, branch) => prs.some(x => x.repo === repo && x.head === branch),
+    defaultBranch: async () => 'main',
+    repoBranches: async repo => gitOf(repo, 'for-each-ref', '--format=%(refname:short)', 'refs/heads').split('\n').filter(Boolean),
+    branchVsBase: async (repo, base, branch) => {
+      let tip;
+      try { tip = gitOf(repo, 'rev-parse', `refs/heads/${branch}`); } catch { return null; }
+      const authors = gitOf(repo, 'log', '--format=%an', `${base}..${branch}`).split('\n').filter(Boolean).map(login);
+      return { head: tip, ahead: authors.length, authors, files: 1, additions: 1, deletions: 0 };
+    },
     me: async () => 'octocat',
     openPrs: async (owner, key) => prs.filter(p => p.state === 'OPEN' && mentions(`${p.title} ${p.body}`, key)).map(view),
     prsMentioning: async (owner, key) => prs.filter(p => mentions(`${p.title} ${p.body}`, key)).map(view),
@@ -152,7 +179,8 @@ function githubFake(bares) {
     editPr: async (pr, file) => { find(pr).body = JSON.parse(read(file)).body; },
     prFacts: async pr => {
       const p = find(pr);
-      return { state: p.state, draft: p.draft, fork: false, headBranch: p.head, headSha: head(p.repo, p.head), base: p.base, defaultBranch: 'main', author: p.author, reviewDecision: '' };
+      return { state: p.state, draft: p.draft, fork: Boolean(p.fork), headBranch: p.head, headSha: head(p.repo, p.head), base: p.base, defaultBranch: 'main', author: p.author, reviewDecision: '',
+        mergeable: p.mergeable || 'MERGEABLE', labels: [...(p.labels || [])], additions: 1, deletions: 0, files: 1 };
     },
     prReviews: async pr => find(pr).reviews,
     prThreads: async pr => find(pr).threads,
@@ -238,14 +266,17 @@ function harness(board, script, { cfgOver = {}, trackerWrap = t => t } = {}) {
   const gh = githubFake(bares);
   const session = fakeSession(script);
   const trackers = { ado, jira };
+  const labels = createLabels({ gh, log: (side, level, msg) => logs.push(`${level} ${msg}`), file: path.join(root, 'labels.json') });
+  const saves = [];
   const b = createBuilder(app, {
     log: (level, msg) => { logs.push(`${level} ${msg}`); return true; }, forget() {}, hoot() {}, appDir: APP_DIR, trackers,
-    tracker: trackerWrap(board === 'ado' ? ado : jira), github: gh, session, notify() {},
+    tracker: trackerWrap(board === 'ado' ? ado : jira), github: gh, session, notify() {}, labels, saveConfig: () => saves.push(structuredClone(cfg[board].boards)),
+    autoName: async () => 'Dark mode toggle',
     clone: (repo, target) => new Promise((ok, fail) => { try { execFileSync('git', ['clone', '-q', bares[repo], target], { stdio: 'ignore' }); ok(); } catch (e) { fail(e); } }),
     statePath: path.join(root, 'work.json'),
   });
-  const poll = async () => { await b.poll(); await b.drain(); };
-  return { b, app, server, gh, session, logs, bares, cfg, root, projects, poll, done: () => fs.rmSync(root, { recursive: true, force: true }) };
+  const poll = async () => { await b.poll(); await b.drain(); await labels.drain(); };
+  return { b, app, server, gh, session, logs, bares, cfg, root, projects, poll, labels, saves, done: () => fs.rmSync(root, { recursive: true, force: true }) };
 }
 
 const remoteHas = (bare, branch) => execFileSync('git', ['ls-remote', bare, `refs/heads/${branch}`], { encoding: 'utf8' }).trim() !== '';
@@ -254,6 +285,8 @@ const worktreeOf = (w, repo) => w.repos.find(r => r.repo === repo).worktree;
 
 /** The session most builds use: investigate (asking for octo-org/api), plan both repos, then commit in both. */
 const twoRepoBuild = (overrides = {}) => (w, prompt) => {
+  // A finish session (work picked up): nothing left to add, unless the test says what to commit.
+  if (prompt.startsWith('/prowl:prowl-build finish ')) return overrides.finish ? overrides.finish(w, prompt) : { result: { status: 'complete', summary: 'Nothing left to do.' } };
   if (prompt.startsWith('/prowl:prowl-build ')) {
     fs.writeFileSync(path.join(w.briefDir, 'investigation.md'), '# Investigation\n');
     return { result: { status: 'needs-repos', repos: [{ repo: 'octo-org/api', why: 'the API stores carts' }], investigation: 'investigation.md' } };
@@ -288,6 +321,8 @@ export async function run(assert) {
     await trackersTests(assert);
     await builds(assert);
     await feedback(assert);
+    await pickups(assert);
+    await quickBuilds(assert);
   } finally {
     globalThis.fetch = realFetch;
     for (const k of Object.keys(process.env)) if (!(k in envBefore)) delete process.env[k];
@@ -969,7 +1004,13 @@ async function feedback(assert) {
   git(path.join(h.root, 'seed', 'octo-org/web'), 'push', '-q', 'origin', 'HEAD:refs/heads/feature/cart');
   await h.poll();
   let a = h.b.history()[0];
-  assert.deepEqual([a.adopted, h.session.turns.length, h.server.tags(123)], [true, 0, ['Web', 'Ready for Review']], 'no feedback yet: just the done tag');
+  assert.deepEqual([a.adopted, h.session.turns.length, h.server.tags(123)], [true, 1, ['Web', 'Ready for Review']], 'nothing to fix: a finish session, then the done tag');
+  const finishTurn = h.session.turns[0];
+  assert.ok(finishTurn.prompt.startsWith('/prowl:prowl-build finish ') && finishTurn.prompt.includes('feature/cart at ') && finishTurn.prompt.includes('PR https://github.com/octo-org/web/pull/9'),
+    'the finish session is given the PR, its branch and head');
+  assert.ok(finishTurn.prompt.includes('If nothing is left to do, end with status complete'), 'and told how to say nothing is left');
+  assert.deepEqual([h.gh.prs.length, a.status], [1, 'following'], 'complete: no new PR, handed off and followed');
+  assert.equal(git(path.join(h.projects, 'web'), 'branch', '--list', 'feature/*'), '', 'no local branch made for your branch');
   h.done();
   h = harness('ado', roundScript());
   h.gh.prs.push({ repo: 'octo-org/web', number: 9, url: 'https://github.com/octo-org/web/pull/9', title: 'AB#123: Save the cart', body: '', head: 'feature/cart', base: 'main', draft: false, state: 'OPEN', author: 'octocat', reviews: [], threads: [], checks: [], replies: [] });
@@ -983,14 +1024,22 @@ async function feedback(assert) {
   addFeedback(h, 'https://github.com/octo-org/web/pull/9');
   await h.poll();
   a = h.b.history()[0];
-  assert.deepEqual([a.rounds, h.gh.prs[0].replies.length], [1, 2], 'with feedback: a round at once');
+  assert.deepEqual([a.rounds, h.gh.prs[0].replies.length], [1, 2], 'with feedback: a fix round at once');
+  assert.deepEqual(h.session.turns.map(t => t.prompt.split(' ')[1]), ['feedback', 'finish'], 'then a finish session');
+  assert.deepEqual([a.status, h.server.tags(123)], ['following', ['Web', 'Ready for Review']], 'then the done tag');
   assert.deepEqual([git(mine, 'symbolic-ref', '--short', 'HEAD'), git(mine, 'rev-parse', 'feature/cart')], ['main', myTip], 'your local branch of that name, ahead of the remote, untouched');
   assert.equal(git(mine, 'worktree', 'list').split('\n').length, 1, "the round's worktree is gone");
   h.done();
   h = harness('ado', roundScript());
   h.gh.prs.push({ repo: 'octo-org/web', number: 9, url: 'https://github.com/octo-org/web/pull/9', title: 'AB#123: Save the cart', body: '', head: 'feature/cart', base: 'main', draft: true, state: 'OPEN', author: 'octocat', reviews: [], threads: [], checks: [], replies: [] });
+  git(path.join(h.root, 'seed', 'octo-org/web'), 'push', '-q', 'origin', 'HEAD:refs/heads/feature/cart');
   await h.poll();
-  assert.ok(!h.b.history()[0].adopted && h.gh.prs.length === 3, 'a draft is not adopted: the ticket is built');
+  assert.deepEqual([h.b.history()[0].adopted, h.gh.prs.length, h.gh.prs[0].draft], [true, 1, false], 'Pick up drafts: your draft is picked up, finished, and marked ready');
+  h.done();
+  h = harness('ado', roundScript(), { cfgOver: { pickup: { drafts: false, branches: true, checks: true, conflicts: true } } });
+  h.gh.prs.push({ repo: 'octo-org/web', number: 9, url: 'https://github.com/octo-org/web/pull/9', title: 'AB#123: Save the cart', body: '', head: 'feature/cart', base: 'main', draft: true, state: 'OPEN', author: 'octocat', reviews: [], threads: [], checks: [], replies: [] });
+  await h.poll();
+  assert.ok(!h.b.history()[0].adopted && h.gh.prs.length === 3 && h.gh.prs[0].draft, 'off: a draft is left alone, and the ticket is built');
   h.done();
 
   // --follow (or w in History) claims nothing, and leaves a review asked for or under way alone, even with feedback waiting.
@@ -1206,5 +1255,235 @@ async function feedback(assert) {
   await h.poll();
   assert.equal(h.b.needs()[0]?.kind, 'cap');
   assert.ok(h.server.tags(123).includes('In Development'), 'keeping In Development');
+  h.done();
+}
+
+// ---- Picking up work at any stage: your branches, your PRs' failing checks and conflicts, others' work as context ----
+
+/** A commit on `branch` of `repo`'s remote, by `who` (the test's own identity is yours: octocat). Resolves with it. */
+function pushTo(h, repo, branch, files, who = 'Prowl Test', from = 'main') {
+  const dir = path.join(h.root, 'pushers', `${repo.replace('/', '-')}-${Math.random().toString(36).slice(2, 7)}`);
+  execFileSync('git', ['clone', '-q', h.bares[repo], dir], { stdio: 'ignore' });
+  git(dir, 'checkout', '-q', '-B', branch, `origin/${from}`);
+  for (const [f, text] of Object.entries(files)) { fs.mkdirSync(path.dirname(path.join(dir, f)), { recursive: true }); fs.writeFileSync(path.join(dir, f), text); }
+  git(dir, 'add', '-A');
+  execFileSync('git', ['-C', dir, '-c', `user.name=${who}`, '-c', 'user.email=x@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', `${who} works on ${branch}`]);
+  git(dir, 'push', '-q', 'origin', `HEAD:refs/heads/${branch}`);
+  return git(dir, 'rev-parse', 'HEAD');
+}
+const remoteHead = (h, repo, branch) => execFileSync('git', ['ls-remote', h.bares[repo], `refs/heads/${branch}`], { encoding: 'utf8' }).split(/\s/)[0];
+
+/** A finish session that commits on top of each branch it continues (and nothing else), and says done. */
+const finishOnTop = (w, prompt) => {
+  if (!prompt.startsWith('/prowl:prowl-build finish ')) return { result: 'unexpected prompt' };
+  const recs = w.repos.filter(r => r.continued);
+  const commits = recs.map(r => ({ repo: r.repo, sha: commit(r.worktree, { 'FINISH.md': `finished ${r.branch}\n` }, `${w.key}: finish it`) }));
+  return { result: { status: 'done', commits, prs: recs.map(r => ({ repo: r.repo, title: `${w.key}: Save the cart`, body: 'Finished.' })), summary: 'Finished.' } };
+};
+
+async function pickups(assert) {
+  for (const board of ['ado', 'jira']) {
+    const key = board === 'ado' ? 'AB#123' : 'PROJ-123';
+    const tagsNow = h => (board === 'ado' ? h.server.tags(123) : h.server.labels('PROJ-123'));
+    const rfr = board === 'ado' ? 'Ready for Review' : 'Ready-for-Review';
+    // A pushed branch of yours with no PR: continued by a finish session, pushed on top, and a PR opened for it.
+    let h = harness(board, twoRepoBuild({ finish: finishOnTop }));
+    const mine = board === 'ado' ? 'feature/123-cart' : 'feature/proj_123-cart';
+    const myTip = pushTo(h, 'octo-org/web', mine, { 'src/cart.js': 'mine\n' });
+    pushTo(h, 'octo-org/web', board === 'ado' ? 'fix/AB123-theirs' : 'fix/PROJ-123-theirs', { 'x.js': 'theirs\n' }, 'Someone');
+    pushTo(h, 'octo-org/web', board === 'ado' ? 'feature/1234-other' : 'feature/PROJ-1234-other', { 'y.js': 'other\n' });
+    await h.poll();
+    let w = h.b.history()[0];
+    const finishTurn = h.session.turns[0];
+    assert.ok(finishTurn.prompt.startsWith('/prowl:prowl-build finish ') && finishTurn.prompt.includes(`${mine} at ${myTip}`) && finishTurn.prompt.includes('no PR yet'), `${board}: your branch, named with the ticket, given to a finish session at its head`);
+    assert.ok(finishTurn.prompt.includes('has no commits of yours ahead of main') && h.logs.some(l => /has no commits of yours ahead of main; it is context only/.test(l)), `${board}: someone else's branch is context, and the Log says so`);
+    assert.ok(!finishTurn.prompt.includes('1234-other'), `${board}: a longer number is another ticket`);
+    assert.equal(git(remoteHead(h, 'octo-org/web', mine) && h.bares['octo-org/web'], 'rev-parse', `${remoteHead(h, 'octo-org/web', mine)}^`), myTip, `${board}: pushed on top of your branch, never over it`);
+    assert.deepEqual([h.gh.prs.length, h.gh.prs[0].head, h.gh.prs[0].title.includes(key)], [1, mine, true], `${board}: a PR opened for the branch, no new branch made`);
+    assert.ok(!remoteHas(h.bares['octo-org/web'], `prowl/${board === 'ado' ? '123' : 'PROJ-123'}-save-the-cart-between-visits`), `${board}: no prowl/ branch`);
+    assert.deepEqual([w.status, tagsNow(h).includes(rfr)], ['following', true], `${board}: handed off with the done tag`);
+    h.done();
+
+    // Your PR with failing required checks and a conflict: a fix round with the job's log and the base to merge (only
+    // your own changes count against Max lines per push), then a finish session; mergeability unknown waits a poll.
+    h = harness(board, (w2, prompt) => {
+      if (prompt.startsWith('/prowl:prowl-build feedback ')) {
+        const p = w2.round.prs[0];
+        git(p.worktree, '-c', 'user.name=Prowl Test', '-c', 'user.email=prowl@example.invalid', 'merge', '-q', '--no-edit', p.mergeBase);
+        const sha = commit(p.worktree, { 'src/cart.js': 'fixed\n' }, `${w2.key}: fix the build`);
+        return { result: { status: 'fixed', summary: 'Fixed.', commits: [{ pr: `${p.repo}#${p.number}`, sha }], checks: [], items: [], questions: [] } };
+      }
+      return twoRepoBuild()(w2, prompt);
+    }, { cfgOver: { maxChangedLines: 40 } });
+    pushTo(h, 'octo-org/web', 'feature/cart', { 'src/cart.js': 'mine\n' });
+    pushTo(h, 'octo-org/web', 'main', { 'big.txt': 'x\n'.repeat(400) }, 'Someone'); // the base moves on, a lot
+    h.gh.prs.push({ repo: 'octo-org/web', number: 9, url: 'https://github.com/octo-org/web/pull/9', title: `${key}: Save the cart`, body: '', head: 'feature/cart', base: 'main', draft: false, state: 'OPEN', author: 'octocat',
+      reviews: [], threads: [], checks: [{ name: 'build', bucket: 'fail', link: 'https://github.com/octo-org/web/actions/runs/1' }], replies: [], mergeable: 'UNKNOWN' });
+    await h.poll();
+    w = h.b.history()[0];
+    assert.deepEqual([w.step, h.session.turns.length], ['adopt', 0], `${board}: GitHub still working out mergeability: looked at again next poll`);
+    assert.ok(h.logs.some(l => /still working out whether .*web#9 conflicts; looking again next poll/.test(l)));
+    h.gh.prs[0].mergeable = 'CONFLICTING';
+    w._retryAt = 0;
+    await h.b.drain();
+    await h.labels.drain();
+    const fb = read(path.join(w.briefDir, 'feedback-1.md'));
+    assert.ok(fb.includes('### Failing required checks') && fb.includes('build (https://github.com/octo-org/web/actions/runs/1)') && fb.includes('Error: 1 test failed'), `${board}: the failing check, with its job's log`);
+    assert.ok(fb.includes('### Conflicts with its base') && fb.includes('git merge') && fb.includes('Never rebase'), `${board}: the conflict: merge the base in, never rebase`);
+    assert.ok(!h.logs.some(l => /needs you/.test(l)), `${board}: the base's 400 lines don't count against Max lines per push`);
+    assert.equal(git(h.bares['octo-org/web'], 'rev-list', '--merges', '--count', 'main..feature/cart'), '1', `${board}: the merge pushed`);
+    assert.deepEqual(h.session.turns.map(t => t.prompt.split(' ')[1]), ['feedback', 'finish'], `${board}: a fix round with no plan step, then a finish session`);
+    assert.deepEqual([w.status, tagsNow(h).includes(rfr), h.gh.prs.length], ['following', true, 1], `${board}: then handed off, on the same PR`);
+    h.done();
+
+    // Someone else's PR (or a fork) is context: the ticket is built.
+    h = harness(board, twoRepoBuild());
+    h.gh.prs.push({ repo: 'octo-org/web', number: 9, url: 'https://github.com/octo-org/web/pull/9', title: `${key}: Their take`, body: '', head: 'feature/theirs', base: 'main', draft: false, state: 'OPEN', author: 'teammate', reviews: [], threads: [], checks: [], replies: [] });
+    await h.poll();
+    assert.ok(h.logs.some(l => /web#9 isn't yours, so Prowl won't push to it; it is context only/.test(l)) && h.gh.prs.length === 3, `${board}: someone else's PR is context; the ticket is built`);
+    h.done();
+  }
+
+  // A branch that moved since the survey: looked at again, and the push sits on top of what's there now.
+  let h = harness('ado', twoRepoBuild({ finish: finishOnTop }));
+  pushTo(h, 'octo-org/web', 'feature/123-cart', { 'src/cart.js': 'mine\n' });
+  const real = h.gh.branchVsBase;
+  let once = true;
+  let theirs = '';
+  h.gh.branchVsBase = async (...a) => { const v = await real(...a); if (once && a[2] === 'feature/123-cart') { once = false; theirs = pushTo(h, 'octo-org/web', 'feature/123-cart', { 'b.js': 'b\n' }, 'Prowl Test', 'feature/123-cart'); } return v; };
+  await h.poll();
+  assert.ok(h.logs.some(l => /feature\/123-cart moved since Prowl looked .*; looking again/.test(l)), 'moved since the survey: looked at again');
+  assert.equal(git(h.bares['octo-org/web'], 'rev-parse', 'feature/123-cart^'), theirs, 'and pushed on top of what is there now');
+  h.done();
+
+  // Azure DevOps' linked branch: placed through a linked PR with the same connection id; Azure Repos' only listed.
+  h = harness('ado', twoRepoBuild({ finish: finishOnTop }));
+  pushTo(h, 'octo-org/web', 'spike/saving', { 'src/cart.js': 'mine\n' });
+  h.gh.prs.push({ repo: 'octo-org/web', number: 4, url: 'https://github.com/octo-org/web/pull/4', title: 'AB#123: an old try', body: '', head: 'old/try', base: 'main', draft: false, state: 'CLOSED', author: 'octocat', reviews: [], threads: [], checks: [], replies: [] });
+  h.server.items[123].relations.push({ rel: 'ArtifactLink', url: 'vstfs:///GitHub/Branch/c0nn-1%2Fspike%2Fsaving' }, { rel: 'ArtifactLink', url: 'vstfs:///GitHub/PullRequest/c0nn-1%2F4' },
+    { rel: 'ArtifactLink', url: 'vstfs:///Git/Ref/p1%2Fr1%2FGBdev%2Fazure' }, { rel: 'ArtifactLink', url: 'vstfs:///GitHub/Branch/unknown%2Fnowhere' });
+  await h.poll();
+  let prompt = h.session.turns[0]?.prompt || '';
+  assert.ok(prompt.includes('octo-org/web: spike/saving at'), 'Azure DevOps: a linked branch placed through the linked PR with its connection id, and continued');
+  assert.ok(prompt.includes('dev/azure: linked on the ticket; not on GitHub') && prompt.includes("nowhere: linked on the ticket, but Prowl can't tell which repo it is in"), 'one in Azure Repos, or unplaced, listed for the session only');
+  h.done();
+  // Jira's development information: a GitHub branch continued; another host's listed.
+  h = harness('jira', twoRepoBuild({ finish: finishOnTop }));
+  pushTo(h, 'octo-org/web', 'spike/saving', { 'src/cart.js': 'mine\n' });
+  h.server.dev.push({ name: 'spike/saving', url: 'https://github.com/octo-org/web/tree/spike/saving', repository: { url: 'https://github.com/octo-org/web' } },
+    { name: 'gl/branch', url: 'https://gitlab.example/x', repository: { url: 'https://gitlab.example/team/x' } });
+  await h.poll();
+  prompt = h.session.turns[0]?.prompt || '';
+  assert.ok(prompt.includes('octo-org/web: spike/saving at') && prompt.includes('gl/branch: linked on the ticket; not on GitHub'), "Jira: dev info's GitHub branch continued, another host's listed");
+  h.done();
+
+  // Pick up branches off: today's build, the branch left alone.
+  h = harness('ado', twoRepoBuild(), { cfgOver: { pickup: { drafts: true, branches: false, checks: true, conflicts: true } } });
+  pushTo(h, 'octo-org/web', 'feature/123-cart', { 'src/cart.js': 'mine\n' });
+  await h.poll();
+  assert.ok(h.session.turns[0].prompt.startsWith('/prowl:prowl-build ') && !h.session.turns[0].prompt.includes('finish') && h.gh.prs.length === 2, 'off: built as before');
+  h.done();
+}
+
+// ---- Quick builds, and the label cycle of a build without a ticket ----
+
+async function quickBuilds(assert) {
+  // Text only: named, quick.md, its own branch names, on labels; it starts at once though the Builder is off.
+  const withRounds = (w0, prompt) => {
+    if (w0.turnKind !== 'round') return twoRepoBuild()(w0, prompt);
+    const p = w0.round.prs[0];
+    const sha = commit(p.worktree, { 'src/theme.js': 'export const dark = true;\n' }, 'Use the theme');
+    return { result: { status: 'fixed', summary: 'Themed.', commits: [{ pr: `${p.repo}#${p.number}`, sha }], checks: [], items: [], questions: [] } };
+  };
+  let h = harness('ado', withRounds);
+  h.server.setTags(123, ['Web']); // nothing on the board to start
+  h.app.on = false;
+  let w = await h.b.quickBuild('Add a dark mode toggle to octo-org/web');
+  assert.deepEqual([w.key, w.title, w.quick, w.markers, w.step], ['BUILD#1', 'Dark mode toggle', true, 'labels', 'read'], 'text only: BUILD#n, named, on labels');
+  await h.b.drain();
+  await h.labels.drain();
+  assert.ok(h.session.turns[0].prompt.startsWith(`/prowl:prowl-build ${path.join(w.briefDir, 'quick.md')}`) && read(path.join(w.briefDir, 'quick.md')).includes('Add a dark mode toggle'), 'briefed from quick.md, in your words');
+  assert.ok(h.session.turns[0].prompt.includes('octo-org/web:'), 'the repo the text names checked out');
+  assert.ok(remoteHas(h.bares['octo-org/web'], 'prowl/dark-mode-toggle'), 'Quick build branch names: prowl/{slug}');
+  assert.deepEqual([h.gh.prs.length, h.gh.prs.every(p => !/AB#|undefined/.test(p.title))], [2, true], 'its PRs, with no ticket key');
+  assert.deepEqual(h.gh.prs.map(p => p.labels), [['Ready for Review'], ['Ready for Review']], 'labelled Ready for Review once open');
+  assert.ok(!h.server.calls.some(c => c.startsWith('PATCH')), 'no ticket written');
+  // The round gate: In Review or Ready for Review labels hold a round; a round labels its PRs In Development.
+  h.app.on = true;
+  const web = h.gh.prs.find(p => p.repo === 'octo-org/web');
+  web.reviews.push({ user: 'lead', state: 'CHANGES_REQUESTED', at: new Date(Date.now() + 60_000).toISOString(), body: 'Use the theme.' });
+  await h.poll();
+  assert.equal(w.rounds, 0, 'Ready for Review on: no round');
+  for (const p of h.gh.prs) p.labels = ['Reviewed'];
+  web.labels = ['In Review'];
+  await h.poll();
+  assert.equal(w.rounds, 0, 'In Review on one of them: no round');
+  web.labels = ['Reviewed'];
+  const roundLabels = [];
+  const realStart = h.session.start;
+  h.session.start = (...a) => { roundLabels.push([...h.gh.prs.flatMap(p => p.labels || []), ...h.labels.state().ops.map(o => o.add)]); return realStart(...a); };
+  await h.labels.drain();
+  await h.poll();
+  assert.equal(w.rounds, 1, 'reviewed: the round');
+  assert.ok(roundLabels.at(-1).includes('In Development'), 'In Development on (or on its way) as the round starts');
+  assert.deepEqual(web.labels, ['Reviewed', 'Ready for Review'], 'then Ready for Review; In Review and Reviewed are never touched');
+  assert.equal((await h.b.history().find(x => x.key === 'BUILD#1')).ref, null);
+  h.done();
+
+  // A ticket and your instructions: claimed In Development without its start tag, surveyed, built, the instructions in the brief.
+  for (const board of ['ado', 'jira']) {
+    h = harness(board, twoRepoBuild());
+    const key = board === 'ado' ? 'AB#124' : 'PROJ-124';
+    w = await h.b.quickBuild(`${key} keep it small, please`);
+    assert.deepEqual([w.key, w.markers, w.quick, w.instructions], [key, 'tags', true, 'keep it small, please'], `${board}: a ticket with text: no offer, its tags`);
+    await h.b.drain();
+    assert.ok(h.session.turns[0].prompt.includes('keep it small, please'), `${board}: your instructions in the brief`);
+    assert.ok((board === 'ado' ? h.server.tags(124) : h.server.labels('PROJ-124')).some(t => /In.Development/.test(t)), `${board}: claimed In Development`);
+    // A ticket alone, on a board: the offer first. Tag it puts the start tag on.
+    if (board === 'ado') h.server.items[126].fields['System.AreaPath'] = 'Shop';
+    const alone = board === 'ado' ? 'AB#126' : 'PROJ-126';
+    if (board === 'ado') h.server.setTags(126, []);
+    else h.server.edit('PROJ-126', [{ remove: 'Ready-to-Start' }]);
+    const r = await h.b.quickBuild(alone);
+    assert.deepEqual([Boolean(r.offer), r.offer?.side, r.offer?.polled], [true, 'builder', true], `${board}: a ticket alone, on a polled board: an offer`);
+    assert.deepEqual(await h.b.answerOffer(r.offer, 'tag'), [alone], `${board}: Tag it`);
+    assert.ok((board === 'ado' ? h.server.tags(126) : h.server.labels('PROJ-126')).some(t => /Ready.to.Start/.test(t)), `${board}: tagged to start`);
+    const built = await h.b.answerOffer(r.offer, 'build');
+    assert.equal(built.key, alone, `${board}: Build it now: a quick build`);
+    h.done();
+  }
+
+  // PR links: one ticket among what they mention makes it that ticket's build; none, a build on labels.
+  h = harness('ado', twoRepoBuild());
+  h.gh.prs.push({ repo: 'octo-org/web', number: 9, url: 'https://github.com/octo-org/web/pull/9', title: 'AB#123: Save the cart', body: '', head: 'feature/cart', base: 'main', draft: false, state: 'OPEN', author: 'octocat', reviews: [], threads: [], checks: [], replies: [] },
+    { repo: 'octo-org/api', number: 10, url: 'https://github.com/octo-org/api/pull/10', title: 'Tidy logging', body: 'no ticket', head: 'tidy', base: 'main', draft: false, state: 'OPEN', author: 'octocat', reviews: [], threads: [], checks: [], replies: [] });
+  pushTo(h, 'octo-org/web', 'feature/cart', { 'src/cart.js': 'mine\n' });
+  pushTo(h, 'octo-org/api', 'tidy', { 'log.js': 'mine\n' });
+  w = await h.b.quickBuild('https://github.com/octo-org/web/pull/9');
+  assert.deepEqual([w.key, w.markers, w.scope.map(p => p.number)], ['AB#123', 'tags', [9]], 'one ticket mentioned: its build, on its tags, scoped to the PR');
+  await h.b.drain();
+  assert.ok(h.session.turns[0].prompt.startsWith('/prowl:prowl-build finish ') && h.gh.prs.length === 2, 'picked up: a finish session, no new PR');
+  const q = await h.b.quickBuild('octo-org/api#10');
+  assert.deepEqual([q.key, q.markers, q.title], ['BUILD#1', 'labels', 'Dark mode toggle'], 'none mentioned: named, on labels');
+  await h.b.drain();
+  await h.labels.drain();
+  assert.deepEqual(h.gh.prs[1].labels, ['Ready for Review'], 'its PR labelled for review once finished');
+  assert.ok(h.b.history().every(x => x.quick), 'marked quick');
+  h.done();
+  // Outside Max parallel builds: a quick build waiting on you holds no slot, and a tagged ticket is still picked up.
+  h = harness('ado', (w0, prompt) => (w0.quick ? { result: { status: 'question', question: { id: 'Q1', question: 'Which theme?', options: ['Dark', 'Light'], default: 'Dark' } } } : twoRepoBuild()(w0, prompt)),
+    { cfgOver: { maxConcurrent: 1 } });
+  const asking = await h.b.quickBuild('Add a dark mode toggle to octo-org/web');
+  await h.b.drain();
+  assert.equal(asking.status, 'needs-you', 'the quick build waits on you');
+  await h.poll();
+  assert.ok(h.b.history().some(x => x.key === 'AB#123' && x.source === 'tag' && x.prs.length === 2), 'a quick build holds no slot: the tagged ticket is built');
+  // Errors, and a dry run.
+  await assert.rejects(h.b.quickBuild('AB#123 AB#124'), /one ticket per quick build/);
+  await assert.rejects(h.b.quickBuild('AB#124 octo-org/web#9'), /a ticket or PRs, not both/);
+  await assert.rejects(h.b.quickBuild('  '), /Paste a ticket, PRs, or what to build/);
+  h.app.dryRun = () => true;
+  assert.equal(await h.b.quickBuild('a dry thing'), null, 'a dry run starts nothing');
+  assert.ok(h.logs.some(l => /would quick-build "Dark mode toggle"/.test(l)), 'and logs it');
   h.done();
 }

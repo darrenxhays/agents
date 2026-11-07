@@ -40,6 +40,17 @@ export function branchName(templ, key, title, n = 1) {
   return n > 1 ? `${name}-${n}` : name;
 }
 
+/**
+ * True when `branch` names ticket `key`: its number on digit boundaries on Azure DevOps (feature/12345-x and
+ * fix/AB12345 name AB#12345; 123456 doesn't), the key with or without its dash on Jira (PROJ-123, proj_123, PROJ123).
+ */
+export function branchForTicket(branch, key) {
+  const ado = /^AB#(\d+)$/i.exec(String(key));
+  if (ado) return new RegExp(`(?<!\\d)${ado[1]}(?!\\d)`).test(branch);
+  const jira = /^([A-Z][A-Z0-9_]*)-(\d+)$/i.exec(String(key));
+  return Boolean(jira) && new RegExp(`(?<![a-z0-9])${jira[1]}[-_]?${jira[2]}(?!\\d)`, 'i').test(branch);
+}
+
 /** Compares branch names as versions: release/1.10 sorts after release/1.9. */
 export function versionCompare(a, b) {
   const parts = s => String(s).split(/(\d+)/).filter(Boolean);
@@ -90,7 +101,7 @@ export function repoCandidates(texts, prRepos = []) {
 export const ownerAllowed = (repo, cfg) => [cfg.githubOwner, ...(cfg.builder.extraOwners || [])].filter(Boolean)
   .some(o => repo.toLowerCase().startsWith(`${o.toLowerCase()}/`));
 
-const STATUSES = ['needs-repos', 'needs-approval', 'question', 'done', 'blocked'];
+const STATUSES = ['needs-repos', 'needs-approval', 'question', 'done', 'complete', 'blocked'];
 const REPO = /^[\w.-]+\/[\w.-]+$/;
 const isList = v => v == null || Array.isArray(v);
 

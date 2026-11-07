@@ -7,15 +7,18 @@ import path from 'node:path';
 import { HOME, readChecks, writeJson } from '../config.mjs';
 import { matchChecks, runChecks, TAIL } from '../checks.mjs';
 import { actionable, appendAnswer, parkedUrls, pastAnswers, readAnswers, repliesToPost, stripParked, validateFeedback } from '../feedback.mjs';
-import { addWorktree, fetchBranch, git, push, remoteSha, removeWorktree, short, succeeds } from '../git.mjs';
+import { addWorktree, fetchBranch, git, ownNumstat, push, remoteSha, removeWorktree, short, succeeds } from '../git.mjs';
 import * as github from '../github.mjs';
 import { branchRefusal, guardFailures, prRefusal } from '../guards.mjs';
+import { createLabels, matching } from '../labels.mjs';
 import { mentions } from '../match.mjs';
+import { offerFor, acceptOffer } from '../offers.mjs';
+import { autoName, cleanName, parsePaste, ticketKey } from '../paste.mjs';
 import { killTree, notifyDesktop } from '../proc.mjs';
 import { alive, capHit, readActivity } from '../sessions.mjs';
 import { fill, outputTemplate } from '../templates.mjs';
 import * as brief from './brief.mjs';
-import { ensureClone, ghClone, prepareRepo, remoteBranches, worktreeRoot } from './repos.mjs';
+import { defaultBranchOf, ensureClone, ghClone, prepareRepo, remoteBranches, worktreeRoot } from './repos.mjs';
 import * as rules from './rules.mjs';
 import { startDiscussion, startTurn } from './session.mjs';
 
@@ -44,8 +47,9 @@ class Stopped extends Error {}
 const DEFAULT_SESSION = { start: startTurn, discuss: startDiscussion, alive, kill: w => killTree(w.pid) };
 
 /**
- * The Builder side. `deps`: { log(level, msg, key), forget(key), hoot(text, mood), appDir, trackers, and for the
- * self-test: tracker (one module for every board), github, session ({ start, alive, kill }), clone(repo, dir), notify, statePath }.
+ * The Builder side. `deps`: { log(level, msg, key), forget(key), hoot(text, mood), appDir, trackers, labels (the label
+ * queue both sides share), saveConfig(), and for the self-test: tracker (one module for every board), github, session
+ * ({ start, alive, kill }), clone(repo, dir), notify, statePath, autoName }.
  */
 export function createBuilder(app, deps) {
   const { log, hoot, appDir } = deps;
@@ -69,10 +73,15 @@ export function createBuilder(app, deps) {
   const tags = () => rules.builderTags(cfg());
   const isOwn = p => Boolean(app.me && p.author?.toLowerCase() === app.me.toLowerCase());
   const notifyIf = (title, text) => { if (b().notify) notify(title, text); };
+  const labels = deps.labels || createLabels({ gh, log: (sd, ...a) => log(...a), file: path.join(path.dirname(statePath), 'labels.json') });
+  const pickup = () => ({ drafts: true, branches: true, checks: true, conflicts: true, ...(b().pickup || {}) });
+  // A quick build without a ticket marks its cycle with labels on its PRs; every other build with its ticket's tags.
+  const byLabels = w => w?.markers === 'labels';
 
   const current = key => records().find(r => r.key === key && !['done', 'stopped', 'ended'].includes(r.status));
   // Tickets being built, from the claim until their PRs open, Needs you included: the ones Max parallel builds counts.
-  const building = () => records().filter(r => ['active', 'needs-you'].includes(r.status) && !r.prsOpenedAt && r.claimedAt);
+  // A quick build is outside the limit.
+  const building = () => records().filter(r => ['active', 'needs-you'].includes(r.status) && !r.prsOpenedAt && r.claimedAt && !r.quick);
   let claiming = 0; // claims awaiting the tracker, which hold a slot too
   const slotsUsed = (but = null) => building().filter(r => r !== but).length + claiming;
   side.running = () => records().filter(r => r.status === 'active');
@@ -190,7 +199,7 @@ export function createBuilder(app, deps) {
     }
     if (!on() || side.paused) return;
     const w = await claim(ticket, 'tag');
-    if (w) await step(w, adoptOrRead);
+    if (w) await step(w, survey);
   }
 
   /** Claims `ticket` (start tag → In Development); the loser backs off. Resolves with its record, or null. */
@@ -253,7 +262,7 @@ export function createBuilder(app, deps) {
     w.ticket = ticket;
     const claimed = await claim(ticket, w.source, w);
     touch(w);
-    return claimed ? adoptOrRead(claimed) : undefined;
+    return claimed ? survey(claimed) : undefined;
   }
 
   /** Switched off as it claimed `ticket`: puts back what the claim took off. */
@@ -270,7 +279,11 @@ export function createBuilder(app, deps) {
    * Development gone (when it was there), or the done or reviewing tag on (when it wasn't), as a review may have
    * claimed it since. Resolves with the time of the first try, from which feedback counts.
    */
-  async function handOff(w) {
+  async function handOff(w, prs = w.prs) {
+    if (byLabels(w)) {
+      labelPrs(w, prs, b().requestReview ? cfg().tags.trigger : '');
+      return Date.now();
+    }
     const { isStart, has } = tags();
     const tracker = trackerOf(w);
     const item = await tracker.readItem(cfg(), w.ref);
@@ -292,7 +305,29 @@ export function createBuilder(app, deps) {
     return at;
   }
 
-  const marked = () => (b().requestReview ? `marked '${cfg().tags.trigger}'` : `'${b().tags.inProgress}' removed`);
+  const marked = w => `${byLabels(w) ? 'its PRs ' : ''}${b().requestReview ? `marked '${cfg().tags.trigger}'` : `'${b().tags.inProgress}' removed`}`;
+
+  /**
+   * A ticketless build's markers: `add` ('' for none) on each of `prs`, the Builder's other label off. The Builder's
+   * labels are In Development and Ready for Review; it never touches In Review or Reviewed.
+   */
+  function labelPrs(w, prs, add) {
+    const mine = [b().tags.inProgress, cfg().tags.trigger];
+    labels.own('builder', w.uid, prs.map(p => p.url));
+    for (const p of prs) labels.set('builder', w.uid, p, add, mine.filter(t => t !== add), cfg().tagMatchMaxTypos);
+  }
+
+  /** Why a ticketless build's round waits (a PR labelled In Review or Ready for Review, or a label write still queued), or ''. */
+  async function labelHold(w, prs = w.prs) {
+    const { inProgress: reviewing, trigger } = cfg().tags;
+    for (const p of prs) {
+      if (labels.pending(p.url)) return `${prName(p)} has a label change still queued`;
+      const on = await gh.prLabels(p);
+      const hit = [reviewing, trigger].find(t => matching(on, t, t === trigger ? cfg().tagMatchMaxTypos : 0).length);
+      if (hit) return `${prName(p)} is labelled '${hit}'`;
+    }
+    return '';
+  }
 
   /** Sets the tags Prowl owns on `w`'s ticket to `add` ('' for none); while the tracker fails, again each minute. Resolves true once done. */
   async function retagSoon(w, add) {
@@ -304,7 +339,8 @@ export function createBuilder(app, deps) {
       return true;
     }
     try {
-      await trackerOf(w).retag(cfg(), w.ref, tags().owned, add);
+      if (byLabels(w)) labelPrs(w, w.prs || [], ''); // the queue retries a write that fails
+      else await trackerOf(w).retag(cfg(), w.ref, tags().owned, add);
     } catch (e) {
       Object.assign(w, { step: 'retag', retagTo: add, _retryAt: Date.now() + 60_000 });
       touch(w);
@@ -347,18 +383,234 @@ export function createBuilder(app, deps) {
     return undefined;
   }
 
+  // ---- Picking up work at any stage ----
+
+  const ticketTexts = data => [data.description, data.acceptanceCriteria, data.reproSteps, ...data.comments.map(c => c.text),
+    ...[data.parent, ...data.children, ...data.related].filter(Boolean).map(i => i.description), ...data.links.map(l => l.url)];
+  const prRef = p => ({ repo: p.repo, number: p.number, url: p.url, title: p.title });
+
+  /**
+   * What has been done on `w` already, per repo: its open PRs (drafts too, with Pick up drafts) and its pushed
+   * branches with your commits and no PR (Pick up branches), and what each PR needs fixed: feedback, failing
+   * required checks, conflicts. Then: nothing found builds it; something to fix starts a fix round, then a finish
+   * session; nothing to fix, a finish session. Your PRs and branches are continued; anyone else's, and forks, are context.
+   * Following by hand (--follow, w) only follows (adoptOrRead).
+   */
+  async function survey(w) {
+    app.me ||= await gh.me(); // --work can run before the first poll
+    if (w.source === 'follow') return adoptOrRead(w);
+    const pk = pickup();
+    const found = { prs: [], branches: [], context: [], listed: [] };
+    const tracker = byLabels(w) ? null : trackerOf(w);
+    const data = w.ref ? await tracker.workItem(cfg(), w.ref) : null;
+    // The ticket's open PRs, or the PRs a quick build was given.
+    const open = [];
+    if (w.scope) for (const ref of w.scope) { const pr = await gh.prByRef(ref); if (pr.state === 'open') open.push(pr); }
+    else if (w.ref) open.push(...await gh.openPrs(cfg().githubOwner, w.key));
+    for (const p of open) {
+      if (p.draft && !pk.drafts) continue; // Pick up drafts off: left alone, as before
+      const facts = await gh.prFacts(p);
+      if (facts.state !== 'OPEN') continue;
+      const entry = { ...prRef(p), branch: facts.headBranch, head: facts.headSha, base: facts.base, draft: facts.draft, defaultBranch: facts.defaultBranch, mergeable: facts.mergeable,
+        stat: { files: facts.files || 0, additions: facts.additions || 0, deletions: facts.deletions || 0 } };
+      const why = prRefusal(facts, p, app.me, b().protectedBranches, { drafts: pk.drafts });
+      if (why) {
+        found.context.push({ ...entry, why });
+        log('info', `${w.key}: ${why}; it is context only`);
+      } else if (found.prs.some(x => x.repo === entry.repo)) {
+        found.context.push({ ...entry, why: 'another of your PRs in the same repo is continued' });
+        log('info', `${w.key}: ${prName(entry)} is context only: Prowl continues one branch per repo`);
+      } else found.prs.push(entry);
+    }
+    if (pk.conflicts && found.prs.some(p => p.mergeable === 'UNKNOWN')) {
+      w._retryAt = Date.now() + cfg().pollSeconds * 1000;
+      const unknown = found.prs.filter(p => p.mergeable === 'UNKNOWN');
+      return log('info', `${w.key}: GitHub is still working out whether ${unknown.map(prName).join(', ')} conflict${unknown.length > 1 ? '' : 's'}; looking again next poll`, `work:${w.uid}`);
+    }
+    if (pk.branches && data && !w.scope) await surveyBranches(w, data, found); // given PRs: those are the scope
+    w.survey = found;
+    if (!found.prs.length && !found.branches.length) {
+      if (found.context.length) log('info', `${w.key}: nothing of yours to continue; building it`);
+      w.step = 'read';
+      touch(w);
+      return read(w);
+    }
+    // What each of your PRs needs fixed first.
+    const fix = {};
+    for (const p of found.prs) {
+      const reasons = [];
+      const [reviews, threads] = await Promise.all([gh.prReviews(p), gh.prThreads(p)]);
+      if (rules.feedbackDue({ reviews, threads }, 0, b().fixFrom)) reasons.push('feedback');
+      let failing = [];
+      if (pk.checks) {
+        failing = (await gh.requiredChecks(p.url).catch(() => [])).filter(c => ['fail', 'cancel'].includes(c.bucket));
+        if (failing.length) reasons.push('failing checks');
+      }
+      if (pk.conflicts && p.mergeable === 'CONFLICTING') reasons.push(`conflicts with ${p.base}`);
+      if (reasons.length) fix[p.url] = { reasons, failing: failing.map(c => ({ name: c.name, link: c.link || '' })), conflict: p.mergeable === 'CONFLICTING' && pk.conflicts };
+    }
+    const work = [...found.prs.map(prName), ...found.branches.map(x => `${x.repo} ${x.branch}`)].join(', ');
+    Object.assign(w, { prs: found.prs.map(prRef), adopted: true, lastActivityAt: 0 });
+    if (byLabels(w) && found.prs.length) labelPrs(w, found.prs, b().tags.inProgress);
+    if (Object.keys(fix).length) {
+      log('ok', `${w.key}: picking up ${work}; a fix round first (${Object.entries(fix).map(([url, f]) => `${prName(found.prs.find(x => x.url === url))}: ${f.reasons.join(', ')}`).join('; ')})`);
+      Object.assign(w, { pickupFix: fix, finishAfterRound: true, roundPrs: found.prs.filter(p => fix[p.url]).map(prRef), roundClaimed: Boolean(w.claimedAt) || byLabels(w), step: 'round', status: 'active' });
+    } else {
+      log('ok', `${w.key}: picking up ${work}; nothing to fix, so a session finishes it`);
+      Object.assign(w, { step: 'finish', status: 'active' });
+    }
+    touch(w);
+    return undefined;
+  }
+
+  /**
+   * Your pushed branches for the ticket with no PR, in the repos it names (or its PRs are in): named with its number,
+   * or linked on the ticket. Only branches with commits of yours ahead of the base count; only GitHub ones are
+   * continued, and a linked branch Prowl can't place is listed for the session.
+   */
+  async function surveyBranches(w, data, found) {
+    const owner = cfg().githubOwner;
+    const mentioning = await gh.prsMentioning(owner, w.key).catch(() => []);
+    const repos = rules.repoCandidates(ticketTexts(data), mentioning.map(p => p.repo)).filter(r => rules.ownerAllowed(r, cfg()));
+    const lists = {};
+    for (const repo of repos) lists[repo] = await gh.repoBranches(repo).catch(e => { log('warn', `${w.key}: couldn't list ${repo}'s branches (${e.message})`); return []; });
+    const want = repos.flatMap(repo => lists[repo].filter(n => rules.branchForTicket(n, w.key)).map(branch => ({ repo, branch })));
+    // Linked on the ticket: Azure DevOps' GitHub branch links name a connection id, not the repo.
+    if (data.github) {
+      for (const { id, branch } of data.github.branches) {
+        const viaPr = [...new Set(data.github.prs.filter(x => x.id === id).map(x => mentioning.find(m => m.number === x.number)?.repo).filter(Boolean))];
+        const inRepos = viaPr.length === 1 ? viaPr : repos.filter(r => lists[r].includes(branch));
+        if (inRepos.length) want.push(...inRepos.map(repo => ({ repo, branch })));
+        else found.listed.push({ branch, why: "linked on the ticket, but Prowl can't tell which repo it is in" });
+      }
+      for (const x of data.otherBranches || []) found.listed.push({ branch: x.branch, why: 'linked on the ticket; not on GitHub, so Prowl only lists it' });
+    } else if (trackerOf(w).linkedBranches) {
+      for (const x of await trackerOf(w).linkedBranches(cfg(), w.ref)) {
+        if (x.repo && rules.ownerAllowed(x.repo, cfg())) want.push({ repo: x.repo, branch: x.branch });
+        else found.listed.push({ branch: x.branch, repo: x.repo, why: x.repo ? "linked on the ticket, in a repo Prowl can't work in" : 'linked on the ticket; not on GitHub, so Prowl only lists it' });
+      }
+    }
+    const taken = new Set([...found.prs, ...found.context].map(p => `${p.repo} ${p.branch}`.toLowerCase()));
+    for (const { repo, branch } of want) {
+      const id = `${repo} ${branch}`.toLowerCase();
+      if (taken.has(id)) continue;
+      taken.add(id);
+      if (await gh.branchHadPr(repo, branch)) continue; // it has (or had) a PR: not a branch with no PR
+      const base = await gh.defaultBranch(repo);
+      if (branch === base) continue;
+      const vs = await gh.branchVsBase(repo, base, branch);
+      if (!vs?.ahead) continue;
+      const entry = { repo, branch, head: vs.head, base, defaultBranch: base, stat: { files: vs.files, additions: vs.additions, deletions: vs.deletions } };
+      const theirs = !vs.authors.some(a => a && a.toLowerCase() === app.me.toLowerCase());
+      const why = theirs ? `${repo} ${branch} has no commits of yours ahead of ${base}` : branchRefusal(branch, base, b().protectedBranches) && `${repo}'s ${branchRefusal(branch, base, b().protectedBranches)}`;
+      if (why) {
+        found.context.push({ ...entry, why });
+        log('info', `${w.key}: ${why}; it is context only`);
+      } else if (found.prs.some(x => x.repo === repo) || found.branches.some(x => x.repo === repo)) {
+        found.context.push({ ...entry, why: 'another of your branches in the same repo is continued' });
+      } else found.branches.push(entry);
+    }
+  }
+
+  /**
+   * The finish session: each PR and branch picked up checked out at its head (each must still be where the survey
+   * found it), the ticket's other repos as for a build, and a brief to finish what is left.
+   */
+  async function finish(w) {
+    checkStop(w);
+    const s = w.survey || { prs: [], branches: [], context: [], listed: [] };
+    fs.mkdirSync(w.briefDir, { recursive: true });
+    let candidates = [];
+    if (w.ref) {
+      const data = await trackerOf(w).workItem(cfg(), w.ref);
+      w.title = data.title || w.title;
+      const prs = await gh.prsMentioning(cfg().githubOwner, w.key).catch(() => []);
+      fs.writeFileSync(path.join(w.briefDir, 'ticket.md'), brief.ticketMd(data, { prs, trackerName: trackerOf(w).name }));
+      candidates = rules.repoCandidates(ticketTexts(data), prs.map(p => p.repo));
+    } else {
+      fs.writeFileSync(path.join(w.briefDir, 'quick.md'), brief.quickMd(w));
+      candidates = quickRepos(w.instructions);
+    }
+    const repos = [];
+    const existing = [];
+    for (const e of [...s.prs, ...s.branches]) {
+      checkStop(w);
+      const dir = await ensureClone(cfg(), e.repo, clone);
+      const head = await fetchBranch(dir, e.branch);
+      if (head !== e.head) {
+        // Moved since the survey (someone pushed): look at it again, rather than build on what the survey didn't see.
+        log('info', `${w.key}: ${e.repo} ${e.branch} moved since Prowl looked (${short(e.head)} → ${short(head)}); looking again`);
+        Object.assign(w, { step: 'adopt', survey: null });
+        touch(w);
+        return undefined;
+      }
+      const baseSha = await fetchBranch(dir, e.base).catch(() => '');
+      const worktree = path.join(worktreeRoot(cfg(), w), e.repo.split('/')[1]);
+      await addWorktree(dir, worktree, head);
+      repos.push({ repo: e.repo, clone: dir, worktree, defaultBranch: e.defaultBranch || await defaultBranchOf(dir), branch: e.branch, base: e.base, baseSha, mergeBase: baseSha,
+        continued: { head, draft: Boolean(e.draft) }, ...(e.url && { pr: { url: e.url, number: e.number, repo: e.repo, title: e.title } }) });
+      existing.push({ repo: e.repo, branch: e.branch, head, base: e.base, draft: e.draft, pr: e.url || '', stat: e.stat, worktree });
+    }
+    const unavailable = [];
+    for (const repo of candidates.filter(r => !repos.some(x => x.repo.toLowerCase() === r.toLowerCase()))) {
+      if (!rules.ownerAllowed(repo, cfg())) unavailable.push({ repo, why: "it isn't under the GitHub org or Other owners" });
+      else if (repos.length >= b().maxRepos) unavailable.push({ repo, why: `over Max repos per ticket (${b().maxRepos})` });
+      else {
+        try {
+          repos.push(await prepareRepo(cfg(), repo, path.join(worktreeRoot(cfg(), w), repo.split('/')[1]), clone));
+        } catch (e) {
+          unavailable.push({ repo, why: `Prowl couldn't check it out (${e.message.split('\n')[0]})` });
+        }
+      }
+    }
+    const answers = pastAnswers(readAnswers(answersPath), [w.title, w.instructions || ''].join('\n'), repos.map(r => r.repo));
+    if (answers.length) fs.writeFileSync(path.join(w.briefDir, 'answers.md'), brief.answersMd(answers));
+    Object.assign(w, {
+      repos, sessionId: randomUUID(), sessionStarted: false, sessionCostUsd: 0, turnKind: 'finish', step: 'turn',
+      prompt: brief.finishPrompt({ briefDir: w.briefDir, ticket: w, repos, existing, listed: s.listed, context: s.context, unavailable, answers: answers.length > 0, instructions: w.ref ? w.instructions || '' : '' }), // without a ticket, they are in quick.md
+    });
+    touch(w);
+    log('info', `${w.key}: checked out ${existing.map(e => `${e.repo} ${e.branch}`).join(', ')} to finish`);
+    return undefined;
+  }
+
+  /**
+   * The repos a quick build's text names: GitHub links and repo: lines, owner/name, and a bare word that is a clone of
+   * <GitHub org>/<word> in the Projects Directory already.
+   */
+  function quickRepos(text) {
+    const found = rules.repoCandidates([text]);
+    for (const m of String(text || '').matchAll(/(?<![\w./:-])([\w.-]+\/[\w.-]+)(?![\w/-])/g)) if (rules.ownerAllowed(m[1], cfg())) found.push(m[1]);
+    for (const word of String(text || '').split(/[\s,;:()"'`]+/)) {
+      if (/^[\w.-]{2,}$/.test(word) && cfg().githubOwner && fs.existsSync(path.join(cfg().workDir, word, '.git'))) found.push(`${cfg().githubOwner}/${word}`);
+    }
+    const seen = new Set();
+    return found.filter(r => !seen.has(r.toLowerCase()) && seen.add(r.toLowerCase()));
+  }
+
   // ---- Reading the ticket and starting the session ----
 
   async function read(w) {
+    if (!w.ref) return readQuick(w);
     const tracker = trackerOf(w);
     const data = await tracker.workItem(cfg(), w.ref);
     w.title = data.title || w.title;
     const prs = await gh.prsMentioning(cfg().githubOwner, w.key).catch(() => []);
-    const texts = [data.description, data.acceptanceCriteria, data.reproSteps, ...data.comments.map(c => c.text),
-      ...[data.parent, ...data.children, ...data.related].filter(Boolean).map(i => i.description), ...data.links.map(l => l.url)];
-    const candidates = rules.repoCandidates(texts, prs.map(p => p.repo));
+    const candidates = rules.repoCandidates(ticketTexts(data), prs.map(p => p.repo));
     fs.mkdirSync(w.briefDir, { recursive: true });
     fs.writeFileSync(path.join(w.briefDir, 'ticket.md'), brief.ticketMd(data, { prs, trackerName: tracker.name }));
+    return prepareBuild(w, candidates, [data.title, data.description, data.acceptanceCriteria].join('\n'));
+  }
+
+  /** A quick build without a ticket: quick.md from the user's text, and the repos it names (or none: the session asks). */
+  async function readQuick(w) {
+    fs.mkdirSync(w.briefDir, { recursive: true });
+    fs.writeFileSync(path.join(w.briefDir, 'quick.md'), brief.quickMd(w));
+    return prepareBuild(w, quickRepos(w.instructions), [w.title, w.instructions].join('\n'));
+  }
+
+  /** Checks out `candidates` for a build, and briefs its session. `about`: the text past answers are matched on. */
+  async function prepareBuild(w, candidates, about) {
     const unavailable = [];
     const repos = [];
     for (const repo of candidates) {
@@ -372,14 +624,14 @@ export function createBuilder(app, deps) {
         }
       }
     }
-    const answers = pastAnswers(readAnswers(answersPath), [data.title, data.description, data.acceptanceCriteria].join('\n'), repos.map(r => r.repo));
+    const answers = pastAnswers(readAnswers(answersPath), about, repos.map(r => r.repo));
     if (answers.length) fs.writeFileSync(path.join(w.briefDir, 'answers.md'), brief.answersMd(answers));
     Object.assign(w, {
       repos, sessionId: randomUUID(), sessionStarted: false, sessionCostUsd: 0, turnKind: 'build', step: 'turn',
-      prompt: brief.buildPrompt({ briefDir: w.briefDir, ticket: w, repos, unavailable, answers: answers.length > 0 }),
+      prompt: brief.buildPrompt({ briefDir: w.briefDir, ticket: w, repos, unavailable, answers: answers.length > 0, instructions: w.ref ? w.instructions || '' : '' }),
     });
     touch(w);
-    log('info', `${w.key}: read the ticket; ${repos.length ? `checked out ${repos.map(r => r.repo).join(', ')}` : 'no repo found yet'}`);
+    log('info', `${w.key}: ${w.ref ? 'read the ticket' : 'read what to build'}; ${repos.length ? `checked out ${repos.map(r => r.repo).join(', ')}` : 'no repo found yet'}`);
   }
 
   /**
@@ -517,6 +769,7 @@ export function createBuilder(app, deps) {
     for (const change of wanted) {
       const rec = w.repos.find(r => r.repo.toLowerCase() === change.repo.toLowerCase());
       if (!rec) throw new NeedsYou('conflict', `The plan changes ${change.repo}, which isn't checked out for ${w.key}.`, { retry: 'approve' });
+      if (rec.continued) { branches.push(rec); continue; } // your branch, continued where it is
       if (rec.branch && (await git(rec.worktree, 'symbolic-ref', '--short', 'HEAD').catch(() => '')).trim() === rec.branch) { branches.push(rec); continue; }
       const remote = await remoteBranches(rec.clone);
       const pick = rules.pickBase(b().base, rec.repo, { planBase: change.base, remote, defaultBranch: rec.defaultBranch });
@@ -524,7 +777,7 @@ export function createBuilder(app, deps) {
       const baseSha = await fetchBranch(rec.clone, pick.base);
       let branch = '';
       for (let n = 1; !branch; n++) {
-        const name = rules.branchName(b().branchTemplate, w.key, w.title, n);
+        const name = w.ref ? rules.branchName(b().branchTemplate, w.key, w.title, n) : rules.branchName(b().quickBranchTemplate || 'prowl/{slug}', '', w.title, n);
         if (await succeeds(rec.clone, 'rev-parse', '--verify', '--quiet', `refs/heads/${name}`)) continue; // a kept local branch: never touched
         const there = remote.includes(name) ? await remoteSha(rec.clone, name) : '';
         if (there && pushedByProwl(there)) continue;
@@ -572,10 +825,12 @@ export function createBuilder(app, deps) {
       const failed = guardFailures({
         base: base(rec), head, remote: await remoteSha(rec.worktree, rec.branch), expected: expected(rec),
         ancestor: await succeeds(rec.worktree, 'merge-base', '--is-ancestor', base(rec), 'HEAD'),
-        onBranch: onBranch ? (await git(rec.worktree, 'symbolic-ref', '--short', 'HEAD').catch(() => '')).trim() === rec.branch : true,
-        numstat: await git(rec.worktree, 'diff', '--numstat', '-z', `${base(rec)}..HEAD`), // -z: paths unquoted
+        onBranch: (typeof onBranch === 'function' ? onBranch(rec) : onBranch) ? (await git(rec.worktree, 'symbolic-ref', '--short', 'HEAD').catch(() => '')).trim() === rec.branch : true,
+        // With the base merged in, only the session's own changes count: not what the merge brought from the base.
+        numstat: rec.mergeBase ? await ownNumstat(rec.worktree, base(rec), rec.mergeBase)
+          : await git(rec.worktree, 'diff', '--numstat', '-z', `${base(rec)}..HEAD`), // -z: paths unquoted
         // Every commit pushed, not just the end state, and what a merge adds itself (--cc: a conflict's resolution).
-        diff: await git(rec.worktree, 'log', '-p', '--cc', '-U0', '--format=', `${base(rec)}..HEAD`),
+        diff: await git(rec.worktree, 'log', '-p', '--cc', '-U0', '--format=', `${base(rec)}..HEAD`, ...(rec.mergeBase ? [`^${rec.mergeBase}`] : [])),
       }, b());
       if (failed[0]?.kind === 'moved') return { moved: `${rec.repo}: ${failed[0].text}` };
       if (failed.length) throw new NeedsYou('guard', `Prowl didn't push ${w.key} to ${rec.repo}: ${failed.map(x => x.text).join('; ')}.`, { retry: 'continue' });
@@ -583,14 +838,25 @@ export function createBuilder(app, deps) {
     return true;
   }
 
+  /**
+   * Checks, pushes and opens the PRs, then hands off. A branch picked up (`continued`) is pushed on top of the head the
+   * survey found, which it must still be at; a PR picked up gets no new PR, a branch picked up gets one opened, and a
+   * draft picked up is marked ready unless Open PRs as drafts is on. A finish session with nothing to add (complete)
+   * only hands off.
+   */
   async function publish(w) {
     checkStop(w);
-    const recs = w.repos.filter(r => r.branch && (w.result?.commits || []).some(c => c.repo.toLowerCase() === r.repo.toLowerCase()));
-    if (!recs.length) throw new NeedsYou('failed', `The session for ${w.key} said it was done, but none of its commits are on Prowl's branches.`, { retry: 'continue' });
-    const ok = await checkAll(w, recs.filter(r => !r.pr), { base: r => r.baseSha, expected: r => r.pushedSha || '', onBranch: true });
+    const committed = r => (w.result?.commits || []).some(c => c.repo.toLowerCase() === r.repo.toLowerCase());
+    const recs = w.repos.filter(r => r.branch && (committed(r) || r.continued));
+    if (!recs.some(committed) && !(w.result?.status === 'complete' && recs.length)) {
+      throw new NeedsYou('failed', `The session for ${w.key} said it was done, but none of its commits are on Prowl's branches.`, { retry: 'continue' });
+    }
+    const todo = recs.filter(r => !r.handedOver);
+    const pushing = todo.filter(committed);
+    const ok = await checkAll(w, pushing, { base: r => (r.continued ? r.continued.head : r.baseSha), expected: r => r.pushedSha || (r.continued ? r.continued.head : ''), onBranch: r => !r.continued });
     if (ok === false) return undefined;
     if (ok.moved) throw new NeedsYou('conflict', `Prowl didn't push ${w.key}: ${ok.moved}.`, { retry: 'publish' });
-    for (const rec of recs.filter(r => !r.pr)) {
+    for (const rec of pushing) {
       checkStop(w);
       const refused = branchRefusal(rec.branch, rec.defaultBranch, b().protectedBranches);
       if (refused) throw new NeedsYou('guard', `Prowl won't push to ${rec.repo}'s ${refused}.`, { retry: 'publish' });
@@ -603,22 +869,32 @@ export function createBuilder(app, deps) {
         log('ok', `${w.key}: pushed ${short(head)} to ${rec.repo} ${rec.branch}`);
       }
     }
-    for (const rec of recs.filter(r => !r.pr)) {
+    for (const rec of todo) {
       checkStop(w);
-      const spec = (w.result.prs || []).find(p => p.repo.toLowerCase() === rec.repo.toLowerCase()) || {};
-      const title = mentions(spec.title, w.key) ? spec.title : `${w.key}: ${spec.title || w.title}`;
-      const file = path.join(w.briefDir, `pr-${rec.repo.split('/')[1]}.json`);
-      writeJson(file, { title, head: rec.branch, base: rec.base, body: spec.body || '', draft: Boolean(b().draftPrs) });
-      // A retry first looks for the PR an earlier create opened before its answer was lost.
-      const opened = await gh.prForBranch(rec.repo, rec.branch);
-      if (!opened) checkStop(w);
-      rec.pr = { ...(opened || (await gh.createPr(rec.repo, file))), repo: rec.repo, title };
-      rec.prBody = spec.body || '';
+      if (!rec.pr) {
+        const spec = (w.result?.prs || []).find(p => p.repo.toLowerCase() === rec.repo.toLowerCase()) || {};
+        const title = !w.ref ? spec.title || w.title : mentions(spec.title, w.key) ? spec.title : `${w.key}: ${spec.title || w.title}`;
+        const file = path.join(w.briefDir, `pr-${rec.repo.split('/')[1]}.json`);
+        writeJson(file, { title, head: rec.branch, base: rec.base, body: spec.body || (w.ref ? w.key : ''), draft: Boolean(b().draftPrs) });
+        // A retry first looks for the PR an earlier create opened before its answer was lost.
+        const opened = await gh.prForBranch(rec.repo, rec.branch);
+        if (!opened) checkStop(w);
+        rec.pr = { ...(opened || (await gh.createPr(rec.repo, file))), repo: rec.repo, title };
+        Object.assign(rec, { prBody: spec.body || (w.ref ? w.key : ''), opened: true });
+        touch(w);
+        log('ok', `${w.key}: opened ${rec.pr.url}`);
+      }
+      if (rec.continued?.draft && !b().draftPrs && !rec.readied) {
+        await gh.markReady(rec.pr);
+        rec.readied = true;
+        log('ok', `${w.key}: marked ${prName(rec.pr)} ready for review`);
+      }
+      rec.handedOver = true;
       touch(w);
-      log('ok', `${w.key}: opened ${rec.pr.url}`);
     }
-    if (recs.length > 1 && !w.linked) {
-      for (const rec of recs) {
+    // The PRs Prowl opened list the others; a PR you opened keeps its description.
+    if (recs.length > 1 && recs.some(r => r.opened) && !w.linked) {
+      for (const rec of recs.filter(r => r.opened)) {
         checkStop(w); // before each PR write
         const others = recs.filter(r => r !== rec).map(r => `- ${r.pr.url}`);
         const file = path.join(w.briefDir, `pr-${rec.repo.split('/')[1]}.json`);
@@ -629,14 +905,15 @@ export function createBuilder(app, deps) {
       touch(w);
     }
     checkStop(w);
-    const handedOff = await handOff(w); // feedback from then on counts, even when a retry finishes the handoff later
+    const prs = recs.map(r => ({ repo: r.repo, number: r.pr.number, url: r.pr.url, title: r.pr.title }));
+    const handedOff = await handOff(w, prs); // feedback from then on counts, even when a retry finishes the handoff later
     Object.assign(w, {
-      prs: recs.map(r => ({ repo: r.repo, number: r.pr.number, url: r.pr.url, title: r.pr.title })), prsOpenedAt: Date.now(), lastActivityAt: handedOff, lastPushAt: Date.now(),
+      prs, prsOpenedAt: Date.now(), lastActivityAt: handedOff, lastPushAt: Date.now(),
       status: b().followUp ? 'following' : 'done', step: null, checkFails: 0, ...(!b().followUp && { endedAt: Date.now(), note: 'PRs opened' }),
     });
     touch(w);
-    log('ok', `${w.key}: ${w.prs.length} PR${w.prs.length > 1 ? 's' : ''} open, ${marked()}`);
-    hoot(`Opened ${w.prs.length > 1 ? `${w.prs.length} PRs` : 'a PR'} for ${w.title}`, 'cheer');
+    log('ok', `${w.key}: ${w.prs.length} PR${w.prs.length > 1 ? 's' : ''} open, ${marked(w)}`);
+    hoot(recs.some(r => r.opened) ? `Opened ${w.prs.length > 1 ? `${w.prs.length} PRs` : 'a PR'} for ${w.title}` : `Handed ${w.title} on for review`, 'cheer');
     notifyIf(`Prowl: PRs open for ${w.key}`, w.title);
     await tidy(w, w.repos);
     return undefined;
@@ -649,6 +926,7 @@ export function createBuilder(app, deps) {
   async function tidy(w, recs, rounds = []) {
     for (const p of rounds) await removeWorktree(p.clone, p.worktree).catch(() => {});
     for (const rec of recs) {
+      if (rec.continued) { await removeWorktree(rec.clone, rec.worktree).catch(() => {}); continue; } // detached at your branch: no branch of Prowl's
       let keep = false;
       if (rec.branch && fs.existsSync(rec.worktree)) {
         const head = (await git(rec.worktree, 'rev-parse', 'HEAD').catch(() => '')).trim();
@@ -671,7 +949,7 @@ export function createBuilder(app, deps) {
         log('info', `${w.key}: ${prName(pr)} is ${facts.state.toLowerCase()}; no longer following it`);
         continue;
       }
-      if (!feedback || prRefusal(facts, pr, app.me, b().protectedBranches)) continue; // drafts, others' PRs and forks get no round
+      if (!feedback || prRefusal(facts, pr, app.me, b().protectedBranches, { drafts: pickup().drafts })) continue; // others' PRs and forks (and drafts, unless picked up) get no round
       const [reviews, threads] = await Promise.all([gh.prReviews(pr), gh.prThreads(pr)]);
       if (rules.feedbackDue({ reviews, threads }, w.lastActivityAt || 0, b().fixFrom)) due.push(pr);
     }
@@ -683,10 +961,10 @@ export function createBuilder(app, deps) {
     for (const w of records().filter(r => r.status === 'following' && !r.step && !r._busy)) {
       if (!b().followUp) continue;
       try {
-        const item = await trackerOf(w).readItem(cfg(), w.ref);
         // A review asked for or under way finishes first, and so does work someone else claimed (In Development).
-        // (Tags compare without case or punctuation, so Jira's Ready-for-Review matches.)
-        const waiting = [cfg().tags.trigger, cfg().tags.inProgress, b().tags.inProgress].some(t => tags().has(item.tags, t));
+        // (Tags compare without case or punctuation, so Jira's Ready-for-Review matches.) Without a ticket: its PRs' labels.
+        const held = byLabels(w) ? [] : (await trackerOf(w).readItem(cfg(), w.ref)).tags;
+        const waiting = byLabels(w) ? Boolean(await labelHold(w)) : [cfg().tags.trigger, cfg().tags.inProgress, b().tags.inProgress].some(t => tags().has(held, t));
         const due = await dueFeedback(w, !waiting); // waiting, it still notices merged and closed PRs
         if (w.status !== 'following' || w.step) continue; // stopped following (t) while this looked
         if (!w.prs.length) {
@@ -735,13 +1013,21 @@ export function createBuilder(app, deps) {
   async function round(w) {
     checkStop(w);
     const tracker = trackerOf(w);
+    const back = why => {
+      Object.assign(w, { step: null, status: 'following' });
+      touch(w);
+      return log('warn', `${w.key}: round not started, ${why}`);
+    };
+    if (!w.roundClaimed && byLabels(w)) {
+      const held = await labelHold(w, w.roundPrs || w.prs);
+      if (held) return back(held);
+      if (!on() && !w.finishAfterRound) return back('the Builder is off');
+      labelPrs(w, w.roundPrs || w.prs, b().tags.inProgress);
+      w.roundClaimed = true;
+      touch(w);
+    }
     if (!w.roundClaimed) {
       const ticket = await tracker.readItem(cfg(), w.ref);
-      const back = why => {
-        Object.assign(w, { step: null, status: 'following' });
-        touch(w);
-        return log('warn', `${w.key}: round not started, ${why}`);
-      };
       // Read again now: a review or someone else's claim since follow() looked waits for its turn.
       const waiting = [cfg().tags.trigger, cfg().tags.inProgress, b().tags.inProgress].find(t => tags().has(ticket.tags, t));
       if (waiting) return back(`the ticket carries '${waiting}' now`);
@@ -766,23 +1052,30 @@ export function createBuilder(app, deps) {
     const answersText = [];
     const collectedAt = Date.now(); // feedback after this is the next round's
     // Which PRs are due, read again now (a retry can come minutes after follow() looked): the round ends with every PR's feedback collected.
+    // At pick-up, a PR's failing checks and conflicts are due too.
     w.roundPrs = await dueFeedback(w);
+    for (const p of w.prs) if (w.pickupFix?.[p.url] && !w.roundPrs.some(x => x.url === p.url)) w.roundPrs.push(p);
     for (const pr of w.roundPrs) {
       const facts = await gh.prFacts(pr);
-      if (facts.state !== 'OPEN' || prRefusal(facts, pr, app.me, b().protectedBranches)) continue;
+      if (facts.state !== 'OPEN' || prRefusal(facts, pr, app.me, b().protectedBranches, { drafts: pickup().drafts })) continue;
       const dir = await ensureClone(cfg(), pr.repo, clone);
       const sha = await fetchBranch(dir, facts.headBranch);
+      // The base too: a session may merge it in (never rebase), and what that brings doesn't count against Max lines per push.
+      const baseSha = await fetchBranch(dir, facts.base).catch(() => '');
       const worktree = path.join(worktreeRoot(cfg(), w), `${pr.repo.split('/')[1]}-${pr.number}`);
       await addWorktree(dir, worktree, sha);
+      const fix = w.pickupFix?.[pr.url];
+      const failing = [];
+      for (const c of fix?.failing || []) failing.push({ ...c, log: await gh.failedLog(c.link).catch(() => '') });
       const details = await gh.detailsFromGitHub(pr).catch(() => '');
       const threads = actionable(await gh.prThreads(pr), b().fixFrom, parkedUrls(details));
       const reviews = (await gh.prReviews(pr)).filter(r => r.state === 'CHANGES_REQUESTED' && (Date.parse(r.at) || 0) > (w.lastActivityAt || 0));
       answersText.push(details, ...threads.map(t => t.body), ...reviews.map(r => r.body));
       prs.push({ pr, repo: pr.repo, number: pr.number, url: pr.url, title: pr.title, branch: facts.headBranch, headSha: sha, worktree, clone: dir, details: stripParked(details), reviews, threads,
-        defaultBranch: facts.defaultBranch });
+        defaultBranch: facts.defaultBranch, mergeBase: baseSha, failing, ...(fix?.conflict && baseSha && { conflict: { base: facts.base, baseSha } }) });
     }
     if (!prs.length) {
-      Object.assign(w, { status: 'following', step: 'end-round', roundClaimed: false });
+      Object.assign(w, { status: w.finishAfterRound ? 'active' : 'following', step: 'end-round', roundClaimed: false });
       touch(w);
       return undefined;
     }
@@ -794,7 +1087,7 @@ export function createBuilder(app, deps) {
     w.round = {
       n, startedAt: Date.now(), collectedAt, feedbackPath,
       prs: prs.map(p => ({ repo: p.repo, number: p.number, url: p.url, title: p.title, branch: p.branch, headSha: p.headSha, worktree: p.worktree, clone: p.clone,
-        defaultBranch: p.defaultBranch, threads: p.threads.map(t => ({ id: t.id, commentId: t.commentId, url: t.url })) })),
+        defaultBranch: p.defaultBranch, mergeBase: p.mergeBase, threads: p.threads.map(t => ({ id: t.id, commentId: t.commentId, url: t.url })) })),
     };
     Object.assign(w, { sessionId: randomUUID(), sessionStarted: false, sessionCostUsd: 0, turnKind: 'round', checkFails: 0, ciFails: 0, invalidAsked: false, roundClaimed: false });
     log('ok', `${w.key}: feedback round ${w.rounds} on ${prs.map(p => prName(p)).join(', ')}`);
@@ -823,7 +1116,8 @@ export function createBuilder(app, deps) {
     checkStop(w);
     // Its feedback stays due (lastActivityAt as it was): the next round starts from the new head.
     const drop = async why => {
-      await trackerOf(w).retag(cfg(), w.ref, tags().owned, '');
+      if (byLabels(w)) labelPrs(w, w.round.prs, '');
+      else await trackerOf(w).retag(cfg(), w.ref, tags().owned, '');
       await tidy(w, [], w.round.prs);
       Object.assign(w, { status: 'following', step: null, round: null, roundPrs: [] });
       touch(w);
@@ -861,6 +1155,8 @@ export function createBuilder(app, deps) {
         }
         p.pushedSha = head;
         w.lastPushAt = Date.now();
+        const surveyed = w.survey?.prs.find(x => x.url === p.url);
+        if (surveyed) surveyed.head = head; // the finish session that follows a pick-up's round starts from here
         touch(w);
         log('ok', `${w.key}: pushed ${short(head)} to ${prName(p)}`);
       }
@@ -915,12 +1211,19 @@ export function createBuilder(app, deps) {
   /** Ends a round (or an adoption): back to the done tag, and the round's worktrees go. */
   async function endRound(w) {
     checkStop(w);
+    if (w.finishAfterRound) {
+      // A pick-up's fix round: a finish session comes next, and hands off once it is done.
+      if (w.round) await tidy(w, [], w.round.prs);
+      Object.assign(w, { finishAfterRound: false, pickupFix: null, round: null, roundPrs: [], roundClaimed: false, lastActivityAt: w.round?.collectedAt || Date.now() });
+      log('ok', `${w.key}: fix round ${w.rounds} done; a session finishes the rest`);
+      return next(w, 'finish');
+    }
     const handedOff = await handOff(w);
     if (w.round) await tidy(w, [], w.round.prs);
     // Feedback since the round collected its own (posted during its session or CI wait, say), or since the handoff, is still due.
     Object.assign(w, { status: 'following', step: null, lastActivityAt: w.round?.collectedAt || handedOff, round: null, roundPrs: [] });
     touch(w);
-    log('ok', `${w.key}: ${marked()}${w.rounds ? ` after feedback round ${w.rounds}` : ''}; following its PRs`);
+    log('ok', `${w.key}: ${marked(w)}${w.rounds ? ` after feedback round ${w.rounds}` : ''}; following its PRs`);
   }
 
   // ---- Stopping, and Needs you ----
@@ -933,7 +1236,7 @@ export function createBuilder(app, deps) {
     Object.assign(w, { status: 'stopped', step: null, stopRequested: false, endedAt: Date.now(), note: why });
     touch(w);
     const untagged = untag && (await retagSoon(w, ''));
-    await tidy(w, (w.repos || []).filter(r => !r.pr), w.round?.prs || []).catch(() => {});
+    await tidy(w, (w.repos || []).filter(r => !r.pr || r.continued), w.round?.prs || []).catch(() => {});
     log('warn', `${w.key}: ${why}${untagged ? `; '${b().tags.inProgress}' removed` : ''}`);
   }
 
@@ -1055,6 +1358,81 @@ export function createBuilder(app, deps) {
     return w;
   };
 
+  /**
+   * A quick build (n or a paste in the Builder, or prowl --build): it starts at once, whether the Builder is on or not,
+   * and outside Max parallel builds. What's pasted decides it. A ticket (and any text, as your instructions): picked up
+   * at whatever stage it is, without its start tag, claimed In Development, its tags driving the cycle. PRs: those PRs;
+   * one ticket among what they mention makes it that ticket's build, otherwise it runs on its PRs' labels. Text only: a
+   * build without a ticket, named per Quick names, on labels. `opts`: { as (a ticket or a name), name (typed, for ask),
+   * oneShot (prowl --once: an offer is only logged), offered (the offer was turned down) }. Resolves with the record,
+   * { offer } when a paste of only a ticket gets one first, or null on a dry run.
+   */
+  side.quickBuild = async function quickBuild(text, opts = {}) {
+    const c = cfg();
+    const paste = parsePaste(text, c.taskBoard);
+    const instructions = paste.rest;
+    if (paste.tickets.length > 1) throw new Error(`one ticket per quick build: ${paste.tickets.join(', ')}`);
+    if (paste.tickets.length && paste.prs.length) throw new Error('paste a ticket or PRs, not both');
+    if (!paste.tickets.length && !paste.prs.length && !instructions) throw new Error('Paste a ticket, PRs, or what to build');
+    app.me ||= await gh.me();
+    const tracker = trackerOf();
+    let ticket = null;
+    let scope = null;
+    if (paste.tickets.length) {
+      ticket = await tracker.lookup(c, paste.tickets[0]);
+      if (!instructions && !opts.offered) {
+        const offer = await offerFor(app, tracker, [ticket], b().tags.inProgress);
+        if (offer && !opts.oneShot) return { offer: { ...offer, side: 'builder', text, as: opts.as || '' } };
+        if (offer) log('info', `${ticket.key}: ${offer.polled ? `could be tagged '${b().tags.start}' instead` : `could be tagged '${b().tags.start}', with ${offer.boards.join(', ')} added to the boards`}; building now, as asked`);
+      }
+    } else if (paste.prs.length) {
+      const prs = [];
+      for (const ref of paste.prs) {
+        const pr = await gh.prByRef(ref).catch(e => { throw new Error(`couldn't read ${ref.repo}#${ref.number} (${e.message})`); });
+        if (pr.state !== 'open') throw new Error(`${pr.repo}#${pr.number} is ${pr.state}`);
+        prs.push(pr);
+      }
+      scope = prs.map(prRef);
+      const mentioned = [...new Set(prs.flatMap(p => parsePaste(`${p.title}\n${p.body || ''}`, c.taskBoard).tickets))];
+      if (mentioned.length === 1) ticket = await tracker.lookup(c, mentioned[0]).catch(() => null);
+    }
+    const asKey = opts.as && ticketKey(opts.as, c.taskBoard);
+    if (asKey) ticket = await tracker.lookup(c, asKey);
+    if (ticket && current(ticket.key)) throw new Error(`${ticket.key} is already ${current(ticket.key).status === 'following' ? 'being followed' : 'being built'}`);
+    let w;
+    if (ticket) {
+      if (app.dryRun()) { log('info', `${ticket.key}: would quick-build it (dry run)`); return null; }
+      w = newRecord(ticket, 'quick');
+      Object.assign(w, { quick: true, markers: 'tags', step: 'claim', ticket, instructions, scope });
+    } else {
+      let name = cleanName((!asKey && opts.as) || opts.name);
+      if (!name && c.quickName === 'auto') name = await (deps.autoName || autoName)(c, [text, ...(scope || []).map(p => `${prName(p)}: ${p.title}`)].join('\n')).catch(() => '');
+      const n = Math.max(0, ...records().filter(r => /^BUILD#\d+$/.test(r.key)).map(r => Number(r.key.split('#')[1]))) + 1;
+      const key = `BUILD#${n}`;
+      const title = name || (scope ? `Quick build: ${scope.map(prName).join(', ')}` : instructions.split('\n')[0].slice(0, 60));
+      if (app.dryRun()) { log('info', `${key}: would quick-build "${title}" (dry run)`); return null; }
+      w = newRecord({ key, title, url: '', ref: null }, 'quick');
+      Object.assign(w, { quick: true, markers: 'labels', instructions, scope, step: scope ? 'adopt' : 'read', claimedAt: Date.now() });
+    }
+    touch(w);
+    log('ok', `${w.key}: quick build of ${scope ? scope.map(prName).join(', ') : ticket ? `"${w.title}"` : `"${w.title}", without a ticket`}`);
+    hoot(`Quick build: ${w.title}`);
+    return w;
+  };
+
+  /**
+   * An answer to an offer from quickBuild(): 'tag' (tag the ticket to start, adding its board with 'add'), 'build' (a
+   * quick build now) or 'cancel'.
+   */
+  side.answerOffer = async function answerOffer(offer, choice) {
+    if (choice === 'build') return side.quickBuild(offer.text, { as: offer.as, offered: true });
+    if (choice !== 'tag' && choice !== 'add') return null;
+    return acceptOffer(app, trackerOf(), offer, {
+      tag: b().tags.start, busyTag: b().tags.inProgress, isTag: tags().isStart, addBoards: choice === 'add', log,
+      saveConfig: () => deps.saveConfig?.(),
+    });
+  };
+
   async function claimQueued(w) {
     if (app.dryRun()) {
       Object.assign(w, { status: 'ended', step: null, endedAt: Date.now(), note: 'dry run' });
@@ -1072,20 +1450,20 @@ export function createBuilder(app, deps) {
       w.ticket = ticket;
       return adoptOrRead(w);
     }
-    if (slotsUsed(w) >= b().maxConcurrent) {
+    if (!w.quick && slotsUsed(w) >= b().maxConcurrent) { // a quick build starts at once
       w._retryAt = Date.now() + 30_000;
       log('info', `${w.key}: waiting, ${b().maxConcurrent} already being built`, `pick:${w.key}`);
       return undefined;
     }
     const claimed = await claim(ticket, w.source, w);
     touch(w);
-    if (claimed) return adoptOrRead(claimed);
+    if (claimed) return survey(claimed);
     return undefined;
   }
 
   // ---- Driven by the shell ----
 
-  const STEPS = { claim: claimQueued, adopt: adoptOrRead, read, turn, settle, repos, approve, publish, round, 'push-round': pushRound, ci, 'end-round': endRound,
+  const STEPS = { claim: claimQueued, adopt: survey, finish, read, turn, settle, repos, approve, publish, round, 'push-round': pushRound, ci, 'end-round': endRound,
     retag: w => retagSoon(w, w.retagTo), reclaim };
 
   /** Once a second, on or off: tails sessions, settles ended turns, runs due steps. Claims and turns wait while off or paused. */
@@ -1106,7 +1484,8 @@ export function createBuilder(app, deps) {
         }
         continue;
       }
-      if (['claim', 'reclaim', 'turn', 'round'].includes(w.step) && (!on() || side.paused)) continue;
+      // A quick build starts at once, on or off, until its PRs are open; its rounds wait like any other.
+      if (['claim', 'reclaim', 'turn', 'round'].includes(w.step) && (!on() || side.paused) && !(w.quick && !w.prsOpenedAt)) continue;
       // In dry run, saved work that would spend, push, post or tag waits; a queued claim ends itself.
       if (['reclaim', 'turn', 'round', 'publish', 'push-round', 'end-round', 'retag'].includes(w.step) && app.dryRun()) continue;
       if (w.stopRequested) { step(w, async x => stopNow(x)); continue; }

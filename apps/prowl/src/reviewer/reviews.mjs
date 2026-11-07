@@ -52,7 +52,7 @@ export function startReview(cfg, pluginDir, { tracker, ticket, prs, approvedPrs 
   const run = {
     id, tracker, ticket: ticket.key, ticketUrl: ticket.url, ref: ticket.ref, title: ticket.title, prs, reviewNo, priorId: prior?.id || null,
     me, startedAt: Date.now(), status: 'running', pid: null, pendingTag: null, reviewedPrs: [], contextPrs: approvedPrs, leftOut,
-    ...(quick && { quick: true }), // asked for in Prowl (n) with no ticket: no tags to set, and never retried
+    ...(quick && { quick: true }), // asked for in Prowl (n, prowl --review): no tags to set
     // Ends the body of each review the session posts, so finish() can tell its reviews from thread replies.
     marker: postMarker(id),
     // PR URL -> the head commit Prowl approved it at; the skipped and left-out PRs carry over, and finalize() adds this review's.
@@ -200,7 +200,9 @@ export function buildPrompt({ ticket, title, ticketUrl, prs, contextPrs = [], le
     '## Context from Prowl, the review poller',
     '',
     ...(quick ? [
-      '- No ticket: this is a quick review the user asked Prowl for, of these PRs together as one set. Take the goal of the work from the PRs themselves.',
+      ticketUrl ? `- Ticket: ${ticket} "${title}" (${ticketUrl}). This is a quick review the user asked Prowl for, of these PRs together as one set.`
+        : '- No ticket: this is a quick review the user asked Prowl for, of these PRs together as one set. Take the goal of the work from the PRs themselves.',
+      ...(prior ? [`- This is review ${reviewNo} of these PRs, a RE-REVIEW: they were labelled for review again.`] : []),
       '- Nobody is watching this session: never stop to ask a question; make the reasonable call and note it in the report.',
     ] : [
       `- Ticket: ${ticket} "${title}" (${ticketUrl})`,

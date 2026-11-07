@@ -85,12 +85,15 @@ export function branchRefusal(branch, defaultBranch, protectedBranches = []) {
   return '';
 }
 
-/** Why Prowl won't work on a PR, or '': it must be the user's, not a draft, not from a fork, and not on a protected branch. */
-export function prRefusal(facts, pr, me, protectedBranches = []) {
+/**
+ * Why Prowl won't work on a PR, or '': it must be the user's, not from a fork, and not on a protected branch; nor a
+ * draft, unless `drafts` (Pick up drafts).
+ */
+export function prRefusal(facts, pr, me, protectedBranches = [], { drafts = false } = {}) {
   const name = `${pr.repo}#${pr.number}`;
   const author = facts.author || pr.author || '';
   if (!me || author.toLowerCase() !== me.toLowerCase()) return `${name} isn't yours, so Prowl won't push to it`;
-  if (facts.draft) return `${name} is a draft`;
+  if (facts.draft && !drafts) return `${name} is a draft`;
   if (facts.fork) return `${name} comes from a fork, so Prowl won't push to it`;
   const why = branchRefusal(facts.headBranch, facts.defaultBranch, protectedBranches);
   return why ? `${name}'s branch ${why}` : '';

@@ -54,9 +54,11 @@ async function api(rawOrg, route, { method = 'GET', body, type = 'application/js
 
 const enc = encodeURIComponent;
 const wiqlString = s => `'${String(s).replace(/'/g, "''")}'`;
-const toItem = w => ({ id: w.id, rev: w.rev, title: w.fields['System.Title'] || '', tags: splitTags(w.fields['System.Tags']), assignee: person(w.fields['System.AssignedTo']) });
+const toItem = w => ({ id: w.id, rev: w.rev, title: w.fields['System.Title'] || '', tags: splitTags(w.fields['System.Tags']), assignee: person(w.fields['System.AssignedTo']),
+  state: w.fields['System.State'] || '', area: w.fields['System.AreaPath'] || '' });
 const person = p => (typeof p === 'string' ? p : p?.displayName || p?.uniqueName || '');
-const ITEM_FIELDS = 'System.Title,System.Tags,System.AssignedTo,System.TeamProject';
+const ITEM_FIELDS = 'System.Title,System.Tags,System.AssignedTo,System.TeamProject,System.State,System.AreaPath';
+const CLOSED = ['Closed', 'Done', 'Removed']; // the states a board's query leaves out
 const splitTags = field => String(field || '').split(';').map(t => t.trim()).filter(Boolean);
 
 export const workItemUrl = (org, project, id) => `${org.replace(/\/+$/, '')}/${enc(project)}/_workitems/edit/${id}`;
@@ -69,7 +71,7 @@ export async function whoAmI(cfg) {
 
 const ticketOf = (org, project, item) => ({
   key: `AB#${item.id}`, title: item.title, url: workItemUrl(org, project, item.id), tags: item.tags, rev: item.rev, assignee: item.assignee,
-  ref: { org, project, id: item.id },
+  closed: CLOSED.includes(item.state), area: item.area, ref: { org, project, id: item.id },
 });
 
 /** Open work items on the board carrying a tag `isTrigger` accepts; with `assignedToMe`, only yours. */
@@ -144,6 +146,47 @@ async function updatesOf(ref) {
     if (page.length < 200) break;
   }
   return updates;
+}
+
+/**
+ * The team board nearest the work item (`ticket` as lookup() or readItem() read it): the team whose area paths take
+ * in the item's, by the longest of them. { project, team }, or null when no team's board shows it.
+ */
+export async function boardOf(cfg, ticket) {
+  const { org, project } = ticket.ref;
+  const area = String(ticket.area || '').toLowerCase();
+  if (!area) return null;
+  const teams = (await api(org, `_apis/projects/${enc(project)}/teams?$top=500&api-version=7.1`)).value || [];
+  let best = null;
+  for (const t of teams) {
+    const scope = await boardScope(org, project, t.name).catch(() => null);
+    if (scope?.field !== 'System.AreaPath') continue;
+    for (const v of scope.values) {
+      const path = String(v.value).toLowerCase();
+      const takesIn = area === path || (v.includeChildren && area.startsWith(`${path}\\`));
+      if (takesIn && (!best || path.length > best.depth)) best = { depth: path.length, board: { project, team: t.name } };
+    }
+  }
+  return best?.board || null;
+}
+
+/**
+ * GitHub branches and PRs linked to the work item, from its artifact links: vstfs:///GitHub/Branch/<id>%2F<branch>
+ * and vstfs:///GitHub/PullRequest/<id>%2F<n>, where <id> is Azure DevOps' id for the repo's connection (not GitHub's).
+ */
+export function githubLinks(urls) {
+  const out = { branches: [], prs: [] };
+  for (const url of urls) {
+    const m = /^vstfs:\/\/\/GitHub\/(Branch|PullRequest)\/(.+)$/i.exec(String(url || ''));
+    const cut = m ? m[2].search(/%2F/i) : -1;
+    if (cut < 1) continue;
+    const [id, rest] = [m[2].slice(0, cut), m[2].slice(cut + 3)];
+    let value;
+    try { value = decodeURIComponent(rest); } catch { continue; }
+    if (/^branch$/i.test(m[1])) out.branches.push({ id, branch: value });
+    else if (/^\d+$/.test(value)) out.prs.push({ id, number: Number(value) });
+  }
+  return out;
 }
 
 /** The field and values that define a team's board, e.g. System.AreaPath UNDER 'My Project\My Team'. */
@@ -237,6 +280,10 @@ export async function workItem(cfg, ref) {
     parent: items('parent')[0] || null, children: items('children'), related: items('related'),
     links: rels.filter(r => r.rel === 'ArtifactLink' || r.rel === 'Hyperlink').map(r => ({ name: r.attributes?.name || (r.rel === 'Hyperlink' ? 'Link' : 'Artifact'), url: r.url })),
     attachments: rels.filter(r => r.rel === 'AttachedFile').map(r => r.attributes?.name || 'attachment'),
+    github: githubLinks(rels.filter(r => r.rel === 'ArtifactLink').map(r => r.url)),
+    // Branches in Azure Repos (vstfs:///Git/Ref/<project>%2F<repo>%2FGB<branch>): another host, listed for the session only.
+    otherBranches: rels.filter(r => r.rel === 'ArtifactLink' && /^vstfs:\/\/\/Git\/Ref\//i.test(r.url || ''))
+      .map(r => ({ branch: String(r.url).split(/%2F/i).slice(2).join('/').replace(/^GB/, ''), url: r.url })).filter(b => b.branch),
   };
 }
 

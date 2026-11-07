@@ -1,6 +1,6 @@
 ---
 name: prowl-build
-description: Builds one ticket, unattended, in git worktrees Prowl has already checked out, or (with `feedback`) works through the review feedback on the PRs Prowl opened for it. Build mode investigates where the change belongs and what it touches upstream and downstream, plans it, implements it on Prowl's branches with tests, runs each repo's own checks, reviews its own diff, commits per repo and writes result.json. Feedback mode sorts every finding and thread into fix, dispute, ask or park, fixes with tests and commits once per PR. It never pushes, opens PRs, posts on GitHub or changes the ticket: Prowl's own code does that after checking the commits. Run only by Prowl's Builder.
+description: Builds one ticket, unattended, in git worktrees Prowl has already checked out; (with `finish`) finishes a ticket whose work has already started, on the user's own branches; or (with `feedback`) works through the review feedback, failing checks and conflicts on its PRs. Build mode investigates where the change belongs and what it touches upstream and downstream, plans it, implements it on Prowl's branches with tests, runs each repo's own checks, reviews its own diff, commits per repo and writes result.json. Feedback mode sorts every finding and thread into fix, dispute, ask or park, fixes with tests and commits once per PR. It never pushes, opens PRs, posts on GitHub or changes the ticket: Prowl's own code does that after checking the commits. Run only by Prowl's Builder.
 ---
 
 # PR-Owl Build
@@ -11,7 +11,7 @@ You are building one ticket, or fixing the review feedback on the PRs built for 
 
 Prowl has already:
 
-- read the ticket with its own sign-in into `ticket.md` (build mode), or collected each PR's review details file, its reviews requesting changes and its unresolved threads into `feedback.md` (feedback mode), in the brief folder (`PROWL_BRIEF_DIR`);
+- read the ticket with its own sign-in into `ticket.md` (build and finish modes; for a quick build without a ticket, `quick.md` holds what the user asked for, in their own words), or collected each PR's review details file, its reviews requesting changes and its unresolved threads into `feedback.md` (feedback mode), in the brief folder (`PROWL_BRIEF_DIR`);
 - checked out a git worktree per repo or PR, listed in your invocation;
 - fenced this session: pushing, changing git remotes, posting on GitHub, writing to the tracker, MCP tools outside the user's allow list, and writing outside the worktrees and the brief folder are all blocked.
 
@@ -39,9 +39,20 @@ Work in stages. Where a stage ends a turn, write `result.json` and stop: Prowl r
 
 If you can't go on (something is missing that no answer will provide), end with `blocked` and a reason. If you need the user's answer mid-build, end with `question`.
 
+## Finish mode: `/prowl:prowl-build finish <ticket.md>`
+
+Work on the ticket has already started: the user's own PRs or pushed branches, each listed in your invocation with its repo, branch, head, base, whether it is a draft, its size and its worktree, detached at the branch's head. Other people's work, and branches Prowl can't continue, are listed for context only.
+
+1. **Investigate** as in build mode, starting from what is there: read each branch's diff against its base (`git diff <base>...HEAD` in its worktree) and the ticket, and work out what is left to do.
+2. **Plan only what is left**, as in build mode, and end with `needs-approval`. If nothing is left, end with `complete` instead (no plan, no commits).
+3. **Implement**, once approved: in an existing branch's worktree, commit on top of its head; in other repos, on the branches Prowl names in the `approve` message. Keep the user's design and approach: extend it, don't redo it.
+4. **Check, review your diff and commit** as in build mode, then end with `done`.
+
+Never rewrite, rebase, squash or amend anything on the user's branches, and never commit on someone else's work listed as context.
+
 ## Feedback mode: `/prowl:prowl-build feedback <feedback.md>`
 
-`feedback.md` holds each PR (its branch, and its worktree detached at its head), the PR's latest PR-Owl details file with Parked findings left out, the reviews requesting changes, the unresolved review threads (each with its thread ID, author, `path:line`, ask and URL) and the user's past answers.
+`feedback.md` holds each PR (its branch, and its worktree detached at its head), its failing required checks with the failed job's log and its conflicts with its base (when Prowl picked the work up), the PR's latest PR-Owl details file with Parked findings left out, the reviews requesting changes, the unresolved review threads (each with its thread ID, author, `path:line`, ask and URL) and the user's past answers.
 
 1. **Sort every item.** Each finding in a details file, each review's request and each thread is one item, sorted per `<CONFIG>/build.md` into:
    - **fix**: you can change the code to resolve it;
@@ -49,7 +60,7 @@ If you can't go on (something is missing that no answer will provide), end with 
    - **ask**: only the user can decide. Look for the answer first (the ticket, the details file, the threads, the past answers, the code) and record what you checked in `searched`;
    - **park**: only a person can do it, outside the code (a CI pipeline, tracker or permissions config, a product decision already raised).
 
-   A thread and a finding about the same problem are one item: fix it once and list it under both.
+   A thread and a finding about the same problem are one item: fix it once and list it under both. A failing check and a conflict are items too, with no thread: fix the check's failure if the PR caused it (one that also fails on the base is `pre-existing`); resolve a conflict by merging the base in (`git merge <sha>`, as `feedback.md` gives it), keeping both sides' intent, and committing the merge. **Never rebase.**
 2. **Fix in severity order**, with tests: the smallest change that fixes each item, with its callers and siblings. Run the repo's own checks as in build mode.
 3. **Commit once per PR**, on top of its head, with the *Fix commit message* template from `<CONFIG>/output.md`. With nothing to fix on a PR, make no commit there.
 4. **Write `result.json`** (below). **Notes become replies:** Prowl posts each fix and dispute note on its thread from the user's account, so write them as a teammate would: plain and short, with no headings or severity.
@@ -62,7 +73,7 @@ Build mode:
 
 ```json
 {
-  "status": "needs-repos | needs-approval | question | done | blocked",
+  "status": "needs-repos | needs-approval | question | done | complete | blocked",
   "repos": [{ "repo": "owner/name", "why": "..." }],
   "investigation": "investigation.md",
   "plan": "plan.md",
@@ -79,7 +90,8 @@ Build mode:
 
 - `needs-repos` lists `repos`. `needs-approval` names `plan` (a file in the brief folder), `changes` (every repo the plan changes) and `openQuestions` (empty when there are none). `question` fills `question`. `blocked` fills `reason`.
 - A question whose options can be combined (several may apply at once) adds `"multiple": true`: the user may pick several, and the answer lists them separated by `; `. Its `default` may then be a list. Leave it out when exactly one option is the answer. The user may also answer in their own words instead of an option.
-- `done` lists every commit, and a PR title and body for each repo with commits. Put the ticket key in each title.
+- `done` lists every commit, and a PR title and body for each repo with commits. Put the ticket key in each title (a quick build without a ticket has none). Prowl opens a PR only where none is open yet.
+- `complete` (finish mode only): nothing is left to add. Prowl hands the existing work on for review as it is.
 
 Feedback mode:
 
@@ -101,7 +113,7 @@ Feedback mode:
 Prowl resumes this session (`claude --resume`) with one of:
 
 - `repos ready:` (one `owner/name: <worktree>` line each) and `repos not available:` (one `owner/name: <why>` line each): go on investigating.
-- `approve` (one `owner/name: <branch>` line each): the plan is approved; implement on those branches.
+- `approve` (one `owner/name: <branch>` line each): the plan is approved; implement on those branches. A line marked *continue it* is one of the user's branches: commit on top of its head, where its worktree already is.
 - `answers:` (one `<id>: <answer>` line each; a blocked turn's id is `blocked`): act on the answers, then plan again, or go on.
 - `plan feedback: <note>`: revise the plan and end with `needs-approval` again.
 - `checks failed:` (the commands, then their output): Prowl's checks or the PR's required CI failed on your commits. Fix that first, commit again, and end as before.
@@ -112,7 +124,7 @@ Prowl resumes this session (`claude --resume`) with one of:
 ## Hard rules
 
 - Never push, force-push, change remotes, open or edit PRs, post or resolve anything on GitHub, or change the ticket.
-- Never rewrite history: new commits only, on the branch or head Prowl gave you.
+- Never rewrite history: new commits only, on the branch or head Prowl gave you. Merge a base in; never rebase.
 - Never write outside the worktrees and the brief folder.
 - Never commit secrets, and never touch CI workflow files unless the ticket is about them.
 - A dispute needs evidence. "I disagree" is not a dispute.
