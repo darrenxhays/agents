@@ -2,6 +2,9 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.23.1
+- The review skill's instructions no longer point at things that don't exist (another skill, and report sections Prowl never asks for). Findings on a merged or closed PR now go under **Issues found** in the report, marked no-post. Nothing to do.
+
 ## 2.23.0
 - Reviews now look for consumers outside the PRs under review. When a PR changes something another service could depend on (a response or request shape, a published event, a package's exported API, a shared schema, a config key), the review searches the org's code for repos that read it, reads them as the other side of the contract, and posts a confirmed break on the PR making the change, naming the consumer's repo and file. Before, a consumer only counted if its own PR was in the batch.
 - The default review rules (`review.md`) gain a **Consumers outside the batch** check. If you've edited your copy in `~/.prowl/config/`, it is kept: add the check from the new default if you want it.

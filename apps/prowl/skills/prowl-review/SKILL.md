@@ -1,6 +1,6 @@
 ---
 name: prowl-review
-description: Reviews a set of related GitHub PRs together as one body of work, for Prowl's Reviewer. Builds a batch brief, gives each PR its own reviewer subagent, verifies every finding independently, and posts only verified findings as one review per PR. Review-only; never changes code.
+description: Reviews a set of related GitHub PRs together as one body of work, for Prowl's Reviewer. Builds a batch brief, gives each PR its own reviewer subagent, verifies every finding independently, and posts only verified findings as one review per PR. Review-only; never changes code. Use when Prowl starts a review of a ticket's PRs or a quick review (`prowl --review`); run only by Prowl.
 ---
 
 # PR-Owl Review
@@ -9,7 +9,7 @@ description: Reviews a set of related GitHub PRs together as one body of work, f
 
 You are the orchestrator of a **review-only** pipeline over a set of related PRs. Your jobs, in order: parse and verify the PR list; **inspect the PRs to understand the work as a whole**; write one review specification per PR; fan those out to reviewer subagents, one per PR; triage and dedupe what comes back; get every finding independently verified; post only the verified findings to the PRs; synthesize.
 
-How this differs from `adversarial-pr-review`, and why:
+Three things define this pipeline, and why:
 
 - **You DO read the PRs — to understand, not to review.** A batch review is only better than N independent reviews if someone holds the whole picture: which PR produces the contract another consumes, what merge order is safe, what the work claimed to deliver versus what it actually contains. That someone is you. But your reading stops at *understanding and decomposition*. If you notice a probable defect while mapping the batch, **do not post it and do not treat it as a finding** — write it into the relevant review spec as a *hypothesis to test*, so a reviewer investigates it properly with evidence. An orchestrator that starts reviewing burns the context it needs for synthesis and anchors the final report on its own first impressions.
 - **Nothing is posted until it is verified.** Reviewers return findings to you; they never touch the PR. Posting happens once, at the end, from the verified ledger. This is what makes every comment on the PR credible.
@@ -19,6 +19,7 @@ How this differs from `adversarial-pr-review`, and why:
 
 A batch run is long. Context may be summarized part-way through, so keep your working state in files, not only in your head. Create a run folder in the scratchpad directory (`<scratchpad>/prowl-review/<batch-id>/`, where `<batch-id>` is `rb-<yyyymmdd>-<short-slug>`) and write to it as you go:
 
+- `config-paths.md` — the resolved config paths (below)
 - `batch-brief.md` — Step 2 output
 - `existing-comments.md` — what other reviewers already said on each PR (Step 2)
 - `prior-findings.md` — Prowl's own open threads on each PR, whoever's Prowl posted them (Step 2)
@@ -45,7 +46,7 @@ gh pr view <number> --repo <owner/repo> --json number,title,body,state,url,autho
 - **Report unresolvable entries explicitly.** Never silently drop one — a missing row in the final table reads as "reviewed and clean".
 - **No PR list found → ask the user for one.** Never guess at open PRs.
 - **Already approved** (the invocation lists the PR as approved earlier and unchanged since) → treat it exactly like a PR whose state is not OPEN, below. It gets no spec or reviewer, and nothing is posted on it.
-- **State not OPEN** (merged/closed) → keep the PR **as context** for the batch brief (its code has landed and the others depend on it) but mark it `no-post`: it gets no review comments. Findings against it are reported in the report under "Findings on merged/closed PRs (not posted)".
+- **State not OPEN** (merged/closed) → keep the PR **as context** for the batch brief (its code has landed and the others depend on it) but mark it `no-post`: it gets no review comments. Findings against it go in the report's *Issues found* section, marked *no-post*.
 
 **Posting mode per PR.** Everything posts from the default `gh` identity; never set or override `GH_TOKEN`. GitHub rejects `APPROVE`/`REQUEST_CHANGES` on a PR authored by the authenticated user, so resolve the login once (`gh api user -q .login`) and set each PR to `formal` (author is someone else — verdict lands as a real review event) or `comment` (author is the user — verdict stated in the body of a `COMMENT` review). Tell the user which PRs are in comment mode.
 
@@ -57,7 +58,7 @@ This is your one reading pass. The goal is a **batch brief** that a reviewer who
 
 Gather, per PR: title, description, linked work items/issues (fetch them if an issue-tracker tool is available — the stated goal usually lives there, not in the PR body), commit messages, `gh pr diff --stat`, and the file list. Then read the diffs for **shape**: which parts of the system each PR touches, what shared surfaces it adds or changes (functions, APIs, commands, messages, data formats, schemas, config keys, feature flags, registrations), what it consumes from a sibling PR.
 
-**Budget.** If the batch's combined diff is under roughly 1,500 changed lines, read the diffs yourself (`gh pr diff`). Above that, dispatch one **mapping subagent per PR** (general-purpose, read-only, working-copy rules below) to return a structured per-PR map — parts of the system touched, shared surfaces produced/consumed, data changes, flags, tests added, notable risks — and build the brief from those maps. Either way, the brief is *your* synthesis.
+**Budget.** If the batch's combined diff is under roughly 1,500 changed lines, read the diffs yourself (`gh pr diff`). Above that, dispatch one **mapping subagent per PR** (general-purpose, read-only, under the three prohibitions in Step 4) to return a structured per-PR map — parts of the system touched, shared surfaces produced/consumed, data changes, flags, tests added, notable risks — and build the brief from those maps. Either way, the brief is *your* synthesis.
 
 Write `batch-brief.md` with:
 
@@ -138,7 +139,7 @@ Each verifier prompt must contain: the instruction to read `<SKILL_DIR>/referenc
 
 Prior findings go to verifiers too, grouped with their PR's findings: each is re-verified against the current head of its PR and classified Fixed (cite the commit), Still open, or No longer applicable (code removed, PR merged or closed), weighing any `prowl-fix` reply on its thread.
 
-Update the ledger from each verifier report: `CONFIRMED`, `ADJUSTED` (apply the adjusted severity/location/wording and note why), `REFUTED` (keep the entry with the refutation — it goes in the final report, not on the PR), `UNVERIFIABLE`, `DUPLICATE-OF F-xx`, `ADDRESSED-IN <PR>` (another PR in the batch already handles it — treated like REFUTED for posting, but noted under cross-PR observations). Copy each finding's *Already raised* line into the ledger. Add any *Related issue observed* items as new `UNINVESTIGATED` entries and verify them the same way.
+Update the ledger from each verifier report: `CONFIRMED`, `ADJUSTED` (apply the adjusted severity/location/wording and note why), `REFUTED` (keep the entry with the refutation — it goes in the final report, not on the PR), `UNVERIFIABLE`, `DUPLICATE-OF F-xx`, `ADDRESSED-IN <PR>` (another PR in the batch already handles it — treated like REFUTED for posting). Copy each finding's *Already raised* line into the ledger. Add any *Related issue observed* items as new `UNINVESTIGATED` entries and verify them the same way.
 
 ## Step 7 — Settle the ledger
 
