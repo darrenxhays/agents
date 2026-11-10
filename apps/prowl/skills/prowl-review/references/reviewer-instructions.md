@@ -11,7 +11,7 @@ Three things you never do:
 ## Read first
 
 1. This file, in full.
-2. The review spec the orchestrator gave you, in full — especially *Areas*, *Sibling PRs*, *Consumers outside the batch*, and *Hypotheses*.
+2. The review spec the orchestrator gave you, in full — especially *Axes*, *Sibling PRs*, *Consumers outside the batch*, and *Hypotheses*.
 3. The review config (`review.md`) at the absolute path the orchestrator gave you: your stance, what to look for, and the severity definitions.
 4. Any convention files the spec lists.
 
@@ -33,7 +33,7 @@ Review the way the *Reviewer stance* section of `review.md` says.
 
 ## Scope discipline
 
-- Cover axis A and the areas the spec names over your PR (*What to look for* in `review.md`). Spend your effort where defects are likely, not on accounting for every area.
+- Cover axis A and the axes the spec names over your PR (*What to look for* in `review.md`). Spend your effort where defects are likely, not on accounting for every axis.
 - **Do not fully investigate a sibling PR's own code.** Its reviewer covers it. If you notice something there, record it in *Out-of-scope observations* with location and one line of evidence. The orchestrator routes it to a verifier. Ignoring it loses a real defect; investigating it duplicates another reviewer's work.
 - **Report an outcome for every hypothesis** in the spec, even when the outcome is "refuted — checked X, Y, Z".
 
@@ -56,7 +56,7 @@ Your **final message is the report**. It is filed verbatim by the orchestrator a
 
 ```
 ## Review report — <owner/repo>#<n> — <batch-id>
-**Areas covered:** <A plus the areas named in the spec>
+**Axes covered:** <A plus the axes named in the spec>
 **Head SHAs reviewed:** <owner/repo>#<n> @ <sha>, plus siblings read for shared surfaces and consumers outside the batch read (repo @ branch)
 **Summary of what this PR actually does (as verified, not as described):** 2–4 sentences
 **Discrepancies between descriptions/brief and actual behaviour:** (or "none")
@@ -67,7 +67,7 @@ Your **final message is the report**. It is filed verbatim by the orchestrator a
 
 ### Findings
 For each:
-- **R-<repo>-<n>-<k>** [SEVERITY] <one-line title>  (area: <name>, confidence: High|Medium|Low)
+- **R-<repo>-<n>-<k>** [SEVERITY] <one-line title>  (axis: <name>, confidence: High|Medium|Low)
   - PR: <owner/repo>#<n>   Location: <file>:<line>   in-diff: yes|no
   - Fix-owner PR: <same PR | other PR#, why>   (omit if not cross-PR)
   - Evidence:
@@ -82,7 +82,7 @@ For each:
 ### Out-of-scope observations
 - <PR#> <file>:<line> — <one line: what looked wrong>. Not investigated.
 
-### Test coverage analysis   (include only if tests are among your areas, or if you found an untested critical path)
+### Test coverage analysis   (include only if tests are among your axes, or if you found an untested critical path)
 - Untested changed code: <specific functions/branches>
 - Weak tests: <which, why>
 

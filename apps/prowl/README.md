@@ -326,7 +326,7 @@ How each PR is reviewed and built, and what Prowl posts, are set by these files.
 
 | File | Sets |
 |---|---|
-| `review.md` | The reviewer's stance, what reviewers look for (Batch Coherence & Integration on every PR, and the other areas where a PR touches them), the severity definitions, and the verdict rules (highest severity → verdict → APPROVE / REQUEST_CHANGES / COMMENT) |
+| `review.md` | The reviewer's stance, what reviewers look for (Batch Coherence & Integration on every PR, and the other axes where a PR touches them), the severity definitions, and the verdict rules (highest severity → verdict → APPROVE / REQUEST_CHANGES / COMMENT) |
 | `output.md` | Templates for everything posted on GitHub: the *Review started* comment posted when a review starts (and *Quick review started*, for a quick review), the review banner, comment prefix, the short review body, the details file collapsed at its bottom (the full write-up of every finding, for a coding agent to fix from), inline comments, replies on existing threads, and the *No blocking issues* comment used when `approvals` is off. The Builder uses its *Fix reply*, *Dispute reply* and *Fix commit message* for its feedback rounds |
 | `build.md` | The Builder's rules: how a session investigates, plans and builds, which questions it asks you, and how it sorts review feedback (fix, dispute, ask, park). The `CLAUDE.md` files in your Projects Directory and each repo win over it |
 

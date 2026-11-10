@@ -44,13 +44,13 @@ gh pr view <number> --repo <owner/repo> --json number,title,body,state,url,autho
 ```
 
 - **Report unresolvable entries explicitly.** Never silently drop one — a missing row in the final table reads as "reviewed and clean".
-- **No PR list found → ask the user for one.** Never guess at open PRs.
+- **No PR list found → review nothing, and say so in the report.** Never guess at open PRs.
 - **Already approved** (the invocation lists the PR as approved earlier and unchanged since) → treat it exactly like a PR whose state is not OPEN, below. It gets no spec or reviewer, and nothing is posted on it.
 - **State not OPEN** (merged/closed) → keep the PR **as context** for the batch brief (its code has landed and the others depend on it) but mark it `no-post`: it gets no review comments. Findings against it go in the report's *Issues found* section, marked *no-post*.
 
-**Posting mode per PR.** Everything posts from the default `gh` identity; never set or override `GH_TOKEN`. GitHub rejects `APPROVE`/`REQUEST_CHANGES` on a PR authored by the authenticated user, so resolve the login once (`gh api user -q .login`) and set each PR to `formal` (author is someone else — verdict lands as a real review event) or `comment` (author is the user — verdict stated in the body of a `COMMENT` review). Tell the user which PRs are in comment mode.
+**Posting mode per PR.** Everything posts from the default `gh` identity; never set or override `GH_TOKEN`. GitHub rejects `APPROVE`/`REQUEST_CHANGES` on a PR authored by the authenticated user, so resolve the login once (`gh api user -q .login`) and set each PR to `formal` (author is someone else — verdict lands as a real review event) or `comment` (author is the user — verdict stated in the body of a `COMMENT` review). Note in the report which PRs are in comment mode.
 
-**Flags.** If the invocation says *comments only*, *no verdict*, or *don't request changes*, set **no-verdict mode**: every PR posts as a `COMMENT` event with the assessment in the body. If it says *don't post*, *report only*, or *dry run*, set **dry-run mode**: run everything through Step 7 and write the report, but skip Step 8. If it says *approvals off*, set **approvals-off mode**: no PR is approved (Step 8, *Verdict*); blocking verdicts post as usual. Echo the active mode back to the user in one line.
+**Flags.** If the invocation says *comments only*, *no verdict*, or *don't request changes*, set **no-verdict mode**: every PR posts as a `COMMENT` event with the assessment in the body. If it says *don't post*, *report only*, or *dry run*, set **dry-run mode**: run everything through Step 7 and write the report, but skip Step 8. If it says *approvals off*, set **approvals-off mode**: no PR is approved (Step 8, *Verdict*); blocking verdicts post as usual. Note the active mode in the report in one line.
 
 ## Step 2 — Build the batch brief (inspect the PRs)
 
@@ -99,13 +99,13 @@ Write them to `existing-comments.md`, per PR: each thread with its `id`, its fir
 
 Every open PR gets one spec and one reviewer. Merged and closed PRs get none: they are context in the brief, and the reviewers of the open PRs read them where they share a surface. For each open PR:
 
-- **Name the areas that apply to it.** Always **A. Batch Coherence & Integration**, scoped to this PR's side of each shared surface and dependency edge in the brief (the reviewer reads the other side in the sibling PR), plus the other areas this PR touches, from *What to look for* in `<CONFIG>/review.md`. Do not pad.
+- **Name the axes that apply to it.** Always **A. Batch Coherence & Integration**, scoped to this PR's side of each shared surface and dependency edge in the brief (the reviewer reads the other side in the sibling PR), plus the other axes this PR touches, from *What to look for* in `<CONFIG>/review.md`. Do not pad.
 - **Set the depth.** A large PR still gets one reviewer, so say which files to trace line by line and which to skim.
 - **Assign the hypotheses.** Each hypothesis from the brief goes to the spec of every PR it involves. A cross-PR finding may then come back from both reviewers; Step 5 dedupes it.
 - **List the consumers outside the batch.** Each consumer from the brief that reads a surface this PR changes goes in the spec's *Consumers outside the batch* field with its repo, path and default branch, and its hypothesis goes in *Hypotheses to test*. A PR whose surfaces have no outside readers gets "None found" and the searches that showed it.
 - **Point at project conventions.** If the PR's repo has review rules (a `CLAUDE.md`, convention docs, lint config), list the relevant files in the spec's *Conventions to apply* field so the reviewer reads them rather than inventing house style.
 
-Fill `<SKILL_DIR>/references/review-spec-template.md` once per open PR and save it to `specs/<repo>-<n>.md`. Every spec carries the batch brief verbatim (or its path plus the parts that matter for this PR), the PR and its head SHA, the areas, the sibling PRs it shares surfaces with, the consumers outside the batch that read its surfaces, and its hypotheses.
+Fill `<SKILL_DIR>/references/review-spec-template.md` once per open PR and save it to `specs/<repo>-<n>.md`. Every spec carries the batch brief verbatim (or its path plus the parts that matter for this PR), the PR and its head SHA, the axes, the sibling PRs it shares surfaces with, the consumers outside the batch that read its surfaces, and its hypotheses.
 
 ## Step 4 — Review fan-out (one reviewer subagent per PR, in parallel)
 
@@ -196,7 +196,7 @@ Write the report Prowl's context asks for, from the ledger and `posted.md`. Seve
 
 ## Failure handling
 
-If a reviewer, verifier, mapper, or poster subagent fails or returns something that is not a usable report: **say so in the report** — which PR, which step, what went wrong — and offer to re-run that piece. Never reconstruct a report for a subagent that did not deliver one, never treat "no report" as "no findings", and never post a finding whose verification did not complete.
+If a reviewer, verifier, mapper, or poster subagent fails or returns something that is not a usable report: **say so in the report** — which PR, which step, what went wrong. Never reconstruct a report for a subagent that did not deliver one, never treat "no report" as "no findings", and never post a finding whose verification did not complete.
 
 ## Hard rules (whole skill)
 

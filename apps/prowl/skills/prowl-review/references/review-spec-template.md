@@ -10,7 +10,7 @@ Fill every field. The reviewer sees only this document, the reviewer-instruction
 
 ## 2. Axes
 
-**Areas:** A. Batch Coherence & Integration, plus <the other areas in review.md's *What to look for* that this PR touches, e.g. "correctness, security, tests">
+**Axes:** A. Batch Coherence & Integration, plus <the other axes in review.md's *What to look for* that this PR touches, e.g. "correctness, security, tests">
 **Review config:** `<absolute path of review.md>`
 
 ## 3. Scope

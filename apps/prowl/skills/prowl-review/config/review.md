@@ -13,7 +13,7 @@ The stance each reviewer takes, what it looks for, how findings are rated, and h
 
 ## What to look for
 
-Axis A goes into every PR's review. The other areas are prompts, not checklists: a reviewer covers the ones its spec names, which are the ones its PR touches. Add your own checks, or cut what you don't need.
+Axis A goes into every PR's review. The other axes are prompts, not checklists: a reviewer covers the ones its spec names, which are the ones its PR touches. Add your own checks, or cut what you don't need.
 
 ### A. Batch Coherence & Integration — ALWAYS INCLUDED
 
@@ -33,7 +33,7 @@ The axis no single-PR review can perform. Every PR's reviewer covers it for that
 
 Findings on this axis are usually *cross-PR*: name **both PRs** and the **fix-owner PR** in every finding.
 
-### Other areas
+### Other axes
 
 Covered where a PR touches them, at the depth the change deserves:
 

@@ -2,6 +2,12 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.23.3
+- The review skill and its rules now say "axis" everywhere, where they mixed "axis" and "area". The default `review.md` changes with it (**Other areas** is now **Other axes**). If you've edited your copy in `~/.prowl/config/`, it is kept and still works: rename the heading if you want it to match.
+
+## 2.23.2
+- A review no longer tries to ask or tell you things mid-session, since nobody is watching it: a review with no PRs to review, the PRs posted in comment mode, and a subagent that failed are all noted in the report instead.
+
 ## 2.23.1
 - The review skill's instructions no longer point at things that don't exist (another skill, and report sections Prowl never asks for). Findings on a merged or closed PR now go under **Issues found** in the report, marked no-post. Nothing to do.
 
