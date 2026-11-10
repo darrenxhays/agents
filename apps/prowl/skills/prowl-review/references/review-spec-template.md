@@ -26,21 +26,29 @@ Every other open PR in the batch has its own reviewer. Read a sibling's code onl
 
 - <owner/repo>#<m> — `<headRefOid>` — OPEN/MERGED — shared surfaces: <what it produces or consumes from your PR>
 
-## 5. Hypotheses to test
+## 5. Consumers outside the batch
+
+Repos not under review that read a surface your PR changes, found by the orchestrator's code search. They are context: read the named file on the branch given, through `gh api repos/<o>/<r>/contents/<path>?ref=<branch>`, as the other side of the contract. Do not review the consumer's own code. A break posts on your PR, naming the consumer repo and path.
+
+- <owner/repo> — `<path>` — `<default branch>` — reads: <which field, route, event, symbol or key, and what it expects> — hypothesis: H<n>
+
+<Or: "None found — searched `<names>` across `<org>`.">
+
+## 6. Hypotheses to test
 
 Each came from the orchestrator's mapping pass. **Report an outcome for every one** in the *Hypotheses — outcome* section of your report: CONFIRMED (becomes a finding with full evidence), REFUTED (say what you checked), or PARTIAL.
 
 - H1 — <statement, where to look, why it looked wrong>
 - H2 — …
 
-## 6. Conventions to apply
+## 7. Conventions to apply
 
 <Absolute paths to CLAUDE.md files, convention docs, lint configs, or ADRs the reviewer must read before judging style/structure. "None known" is a valid value.>
 
-## 7. Batch-specific questions
+## 8. Batch-specific questions
 
 <Concrete questions about this PR's place in the batch, e.g. "Does the `startDate` this PR writes use the date format the sibling PR parses?", "What happens if this PR is released before the sibling PR's data change has run?">
 
-## 8. Output
+## 9. Output
 
 Return the report defined in `<SKILL_DIR>/references/reviewer-instructions.md` as your final message. Local finding IDs `R-<repo>-<n>-<k>`. Post nothing. Change nothing. Never mutate the user's clone.

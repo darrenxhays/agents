@@ -11,7 +11,7 @@ Three things you never do:
 ## Read first
 
 1. This file, in full.
-2. The review spec the orchestrator gave you, in full — especially *Areas*, *Sibling PRs*, and *Hypotheses*.
+2. The review spec the orchestrator gave you, in full — especially *Areas*, *Sibling PRs*, *Consumers outside the batch*, and *Hypotheses*.
 3. The review config (`review.md`) at the absolute path the orchestrator gave you: your stance, what to look for, and the severity definitions.
 4. Any convention files the spec lists.
 
@@ -25,7 +25,7 @@ gh api repos/<owner>/<repo>/contents/<path>?ref=<headRefOid> -q .content | base6
 
 Use the **head SHA from the spec**, not the branch name — the branch may move while you work, and your line numbers must match what the verifier and the orchestrator will see.
 
-**Read the surrounding code, not just the diff.** Callers, callees, existing tests, the code a changed signature reaches three files away. Most defects live where a new assumption meets an old one. For cross-PR surfaces named in the brief, read **both sides** even though only one is your PR — you cannot judge a producer without seeing its consumer.
+**Read the surrounding code, not just the diff.** Callers, callees, existing tests, the code a changed signature reaches three files away. Most defects live where a new assumption meets an old one. For cross-PR surfaces named in the brief, read **both sides** even though only one is your PR — you cannot judge a producer without seeing its consumer. The same goes for the *Consumers outside the batch* in your spec: a repo nobody linked that reads a response, event, export or key your PR changes is the other side of a contract too. Read the named file on its default branch through `gh api`, compare what it expects with what your PR now produces, and report a mismatch as a finding on your PR with the consumer's repo and path in the location and the fix. Do not review the consumer's own code beyond that surface.
 
 ## Stance
 
@@ -57,7 +57,7 @@ Your **final message is the report**. It is filed verbatim by the orchestrator a
 ```
 ## Review report — <owner/repo>#<n> — <batch-id>
 **Areas covered:** <A plus the areas named in the spec>
-**Head SHAs reviewed:** <owner/repo>#<n> @ <sha>, plus siblings read for shared surfaces
+**Head SHAs reviewed:** <owner/repo>#<n> @ <sha>, plus siblings read for shared surfaces and consumers outside the batch read (repo @ branch)
 **Summary of what this PR actually does (as verified, not as described):** 2–4 sentences
 **Discrepancies between descriptions/brief and actual behaviour:** (or "none")
 

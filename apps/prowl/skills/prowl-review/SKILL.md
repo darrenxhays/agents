@@ -65,8 +65,19 @@ Write `batch-brief.md` with:
 2. **PR roster** — one line per PR: repo, number, title, role in the batch, parts of the system touched, size, state, posting mode.
 3. **Dependency graph** — which PR produces what and which consumes it; required merge/deploy order; what breaks (or silently no-ops) if one merges without the other; feature toggles that gate the set.
 4. **Shared surfaces** — contracts, files, names that appear in more than one PR (the highest-value targets for the coherence axis).
-5. **Completeness questions** — what the goal implies should exist and you could not find (something new that nothing wires in or calls, an output with no consumer or a consumer with no producer, a data change with no way back, a setting that is never supplied). These become hypotheses in the specs.
-6. **Hypotheses** — anything that looked wrong while mapping. Each goes into a spec; none is a finding yet.
+5. **Consumers outside the batch** — see below. One line per consumer: repo, path, which surface it reads, and the hypothesis it raises.
+6. **Completeness questions** — what the goal implies should exist and you could not find (something new that nothing wires in or calls, an output with no consumer or a consumer with no producer, a data change with no way back, a setting that is never supplied). These become hypotheses in the specs.
+7. **Hypotheses** — anything that looked wrong while mapping. Each goes into a spec; none is a finding yet.
+
+**Consumers outside the batch.** A batch only shows the sibling side of a contract when the sibling is in it. When a PR changes a surface another service could depend on — an HTTP response or request shape, a published message or event, a package's exported API, a shared schema, a config key or flag another repo reads — the consumer is usually a repo nobody linked. Find it before writing specs: for each such surface, search the org's code for the names that would break (the route or endpoint path, the renamed or removed field, the event or message type, the exported symbol, the config key), and ignore hits in the PR's own repo:
+
+```bash
+gh search code "<name>" --owner <org> --limit 30 --json repository,path --jq '.[] | "\(.repository.nameWithOwner) \(.path)"'
+```
+
+Search the distinctive names, not the common words; three or four well-chosen searches per surface beat thirty. Skip surfaces only this repo can see (private functions, internal modules, tests). For every hit that reads the surface, record it in the brief's *Consumers outside the batch* section and write a hypothesis for the producing PR's spec: what the consumer expects, what the PR now produces, and the file and line to read on the consumer's default branch. A consumer that nothing in the batch updates, and that the PR's description does not mention, is the hypothesis: *this change breaks `<repo>` at `<path>` unless it is compatible*. No hits is a result too: write it down ("searched `foo`, `bar`, `baz` across `<org>`; no readers outside this repo") so the reviewers and the report know the org was searched rather than assumed clean. If `gh search code` is unavailable (no org access, a rate limit, search disabled), say so in the brief instead of leaving the section empty.
+
+These consumers are **context, not PRs under review**. They get no reviewer, no spec and no posts. Reviewers and verifiers read them the way they read a merged sibling: through `gh api repos/<o>/<r>/contents/<path>?ref=<default branch>`, never by cloning into the user's working tree. A confirmed break posts on the PR that makes the change, naming the consumer repo and path, like any other cross-PR finding whose fix-owner is the producer.
 
 **Comments already on the PRs.** For each open PR, fetch what other reviewers (people, Copilot, other bots) have already said, so the verified findings can be checked against it in Step 6:
 
@@ -90,9 +101,10 @@ Every open PR gets one spec and one reviewer. Merged and closed PRs get none: th
 - **Name the areas that apply to it.** Always **A. Batch Coherence & Integration**, scoped to this PR's side of each shared surface and dependency edge in the brief (the reviewer reads the other side in the sibling PR), plus the other areas this PR touches, from *What to look for* in `<CONFIG>/review.md`. Do not pad.
 - **Set the depth.** A large PR still gets one reviewer, so say which files to trace line by line and which to skim.
 - **Assign the hypotheses.** Each hypothesis from the brief goes to the spec of every PR it involves. A cross-PR finding may then come back from both reviewers; Step 5 dedupes it.
+- **List the consumers outside the batch.** Each consumer from the brief that reads a surface this PR changes goes in the spec's *Consumers outside the batch* field with its repo, path and default branch, and its hypothesis goes in *Hypotheses to test*. A PR whose surfaces have no outside readers gets "None found" and the searches that showed it.
 - **Point at project conventions.** If the PR's repo has review rules (a `CLAUDE.md`, convention docs, lint config), list the relevant files in the spec's *Conventions to apply* field so the reviewer reads them rather than inventing house style.
 
-Fill `<SKILL_DIR>/references/review-spec-template.md` once per open PR and save it to `specs/<repo>-<n>.md`. Every spec carries the batch brief verbatim (or its path plus the parts that matter for this PR), the PR and its head SHA, the areas, the sibling PRs it shares surfaces with, and its hypotheses.
+Fill `<SKILL_DIR>/references/review-spec-template.md` once per open PR and save it to `specs/<repo>-<n>.md`. Every spec carries the batch brief verbatim (or its path plus the parts that matter for this PR), the PR and its head SHA, the areas, the sibling PRs it shares surfaces with, the consumers outside the batch that read its surfaces, and its hypotheses.
 
 ## Step 4 — Review fan-out (one reviewer subagent per PR, in parallel)
 

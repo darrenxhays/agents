@@ -2,6 +2,10 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.23.0
+- Reviews now look for consumers outside the PRs under review. When a PR changes something another service could depend on (a response or request shape, a published event, a package's exported API, a shared schema, a config key), the review searches the org's code for repos that read it, reads them as the other side of the contract, and posts a confirmed break on the PR making the change, naming the consumer's repo and file. Before, a consumer only counted if its own PR was in the batch.
+- The default review rules (`review.md`) gain a **Consumers outside the batch** check. If you've edited your copy in `~/.prowl/config/`, it is kept: add the check from the new default if you want it.
+
 ## 2.22.0
 - Quick reviews take tickets as well as PRs: paste `AB#123` or `PROJ-123` (or their links) and Prowl reviews the ticket's open, ready PRs, under the ticket's key, so its earlier reviews count. Pasting on the Reviewer opens the quick review box. Other text in the paste is still an error.
 - A quick review without exactly one ticket is named for you by a short model call (new setting **Quick names**, `quickName`: `auto`, `ask` or `number`). `prowl --review` and `prowl --build` take `--as <ticket or name>`.
