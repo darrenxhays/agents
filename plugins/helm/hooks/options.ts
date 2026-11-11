@@ -39,9 +39,15 @@ async function localSettingsPath($: EngineInterface) {
   return `${await $.session.root()}/.claude/settings.local.json`
 }
 
+// The settings the project shares with the team, which apply where the local
+// file sets nothing. Read only: the panel writes the local file.
+async function sharedSettingsPath($: EngineInterface) {
+  return `${await $.session.root()}/.claude/settings.json`
+}
+
 // The file's settings; {} when there is none. Rejects on a file that isn't
 // a JSON object, so it is never written over.
-async function readLocalSettings($: EngineInterface, path: string): Promise<Record<string, unknown>> {
+async function readSettings($: EngineInterface, path: string): Promise<Record<string, unknown>> {
   if (!(await $.fs.exists(path))) {
     return {}
   }
@@ -73,16 +79,23 @@ export async function loadOptions($: EngineInterface) {
     }))
   const autoUse = all.find(isAutoUseRow)
   if (autoUse !== undefined) {
-    const here = await readLocalSettings($, await localSettingsPath($)).then(
+    const here = await readSettings($, await localSettingsPath($)).then(
       settings => choiceOf(envOf(settings)[VARIABLE]),
       () => undefined,
     )
+    // With no override in the local file, `default` means what the shared
+    // settings.json says, when it says anything: the label names it.
+    const shared = await readSettings($, await sharedSettingsPath($)).then(
+      settings => choiceOf(envOf(settings)[VARIABLE]),
+      () => 'default',
+    )
+    const label = here === 'default' && shared !== 'default' ? `This project (settings.json: ${shared})` : 'This project'
     rows.push(
       { key: autoUse.key, label: 'All projects', kind: autoUse.kind, value: autoUse.value, isLocked: autoUse.isLocked },
       // An unreadable settings.local.json is shown, not edited.
       here === undefined
         ? { key: PROJECT_AUTO_USE, label: 'This project', kind: 'text', value: 'settings.local.json unreadable', isLocked: true }
-        : { key: PROJECT_AUTO_USE, label: 'This project', kind: 'choice', value: here, choices: PROJECT_CHOICES, isLocked: false },
+        : { key: PROJECT_AUTO_USE, label, kind: 'choice', value: here, choices: PROJECT_CHOICES, isLocked: false },
     )
   }
   const message = all.find(isMessageRow)
@@ -97,7 +110,7 @@ export async function loadOptions($: EngineInterface) {
 async function setProjectAutoUse($: EngineInterface, choice: string): Promise<string | undefined> {
   const path = await localSettingsPath($)
   try {
-    const settings = await readLocalSettings($, path)
+    const settings = await readSettings($, path)
     const { env: _, ...rest } = settings
     const { [VARIABLE]: _old, ...env } = envOf(settings)
     const next = choice === 'default' ? env : { ...env, [VARIABLE]: choice === 'on' ? 'true' : 'false' }
@@ -131,7 +144,10 @@ export async function optionsSessionStart($: EngineInterface) {
 export async function setOption($: EngineInterface, key: string, value: ConfigValue) {
   const deny = key === PROJECT_AUTO_USE ? await setProjectAutoUse($, String(value)) : (await $.config.set({ key, value })).deny
   await update($, optionNote, () => (deny === undefined ? '' : `✗ ${deny}`))
-  if (deny === undefined) {
+  if (deny === undefined && key === PROJECT_AUTO_USE) {
+    // Its label depends on the value: read the files again.
+    await loadOptions($)
+  } else if (deny === undefined) {
     await update($, optionRows, rows => rows.map(row => (row.key === key ? { ...row, value } : row)))
   }
 }

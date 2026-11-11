@@ -36,6 +36,7 @@ const BAND = {
   component: 'AbovePrompt',
   props: {
     hasSurvey: false,
+    isCollapsed: false,
     isWorking: false,
     maxRows: 30,
     bodyColumns: 100,
@@ -151,6 +152,7 @@ test('the result line under the row is hidden', async ($, on) => {
 
 test('the step after the steps are shown ends the turn without asking the model', async ($, on) => {
   engineBand(on)
+  mock.clock(on)
   const asked: number[] = []
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.step', async function* (_$, e) {
@@ -176,6 +178,34 @@ test('the step after the steps are shown ends the turn without asking the model'
   expect(asked).toEqual([0])
 })
 
+test('a prompt typed over the turn still reaches the model after the steps are shown', async ($, on) => {
+  engineBand(on)
+  mock.clock(on)
+  prompt(on, '')
+  const asked: number[] = []
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('turn.step', async function* (_$, e) {
+    asked.push(e.index)
+    return { turnId: e.turnId, index: e.index, answer: 'on it', toolUses: [], stopReason: 'end_turn' as const, usage: null }
+  })
+
+  const step = async (index: number) => {
+    const it = $.turn.step({ turnId: 't1', index, model: 'claude-opus-5-5', messageCount: 1 })
+    let at = await it.next()
+    while (at.done !== true) at = await it.next()
+
+    return at.value
+  }
+
+  // Typed while the summary streams: queued, then delivered into the turn at
+  // the suggestion's tool result, where only the model can answer it.
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+  await $.prompt.submit({ text: 'also bump the version', origin: { kind: 'composer' }, wait: false, turnId: 't1' })
+  await suggest($)
+  expect((await step(1)).answer).toBe('on it')
+  expect(asked).toEqual([1])
+})
+
 test('show full prompts expands each step', async ($, on) => {
   engineBand(on)
   const id = await suggest($)
@@ -199,6 +229,17 @@ test('a typed draft is added to the picked step and cleared', async ($, on) => {
   expect(box.submitted).toEqual([
     'Run npm test and report failures.\n\nAdditional instructions: skip the e2e suite',
   ])
+  await ui.unmount()
+})
+
+test('pressing a step twice before the redraw runs it once', async ($, on) => {
+  engineBand(on)
+  const box = prompt(on, '')
+  const id = await suggest($)
+
+  const ui = await $.ui.mount({ ...row(id), surface: 'terminal' })
+  await Promise.all([ui.press({ key: 'step-1' }), ui.press({ key: 'step-1' })])
+  expect(box.submitted).toEqual(['Run npm test and report failures.'])
   await ui.unmount()
 })
 
@@ -347,6 +388,40 @@ test('autoFallback suggests after a turn that changed things without suggesting'
   expect(forks).toBe(1)
 })
 
+test('an autoFallback fork that answers late leaves newer steps in place', { options: { autoFallback: true } }, async ($, on) => {
+  engineBand(on)
+  const clock = mock.clock(on)
+  let answer = () => {}
+  const held = new Promise<void>(resolve => (answer = resolve))
+  on('model.fork', async () => {
+    await held
+
+    return { value: { isAnswered: true, text: '[{"title": "Old idea", "prompt": "Do the old thing."}]', usage: USAGE } }
+  })
+  on('tool.call', { tool: 'Edit' }, () => ({ result: 'edited' }))
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: 'done' }))
+
+  const turn = { answer: 'done', durationMs: 5, isAborted: false, reason: 'answer' } as const
+
+  // A turn that changed things without suggesting: the fork starts.
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+  await $.tool.call({ tool: 'Edit', file_path: '/x.ts', old_string: 'a', new_string: 'b' })
+  await $.turn.complete({ ...turn, turnId: 't1' })
+  await clock.settle()
+
+  // The next turn suggests its own before the fork answers.
+  await $.turn.start({ text: 'and the rest', turnId: 't2' })
+  const id = await suggest($)
+  await $.turn.complete({ ...turn, turnId: 't2' })
+  answer()
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...row(id), surface: 'terminal' })
+  expect((await ui.find({ key: 'step-1' }))?.text).toContain('Run the unit tests')
+  await ui.unmount()
+})
+
 test('/next-steps off writes the /config row', async ($, on) => {
   engineBand(on)
   const sets: { key: string; value: unknown }[] = []
@@ -378,6 +453,17 @@ test('/clear forgets the steps', async ($, on) => {
   await suggest($)
 
   await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+  const ran = await $.command.run({ ...COMMAND, args: '' })
+  expect(ran.text).toContain('No next steps yet')
+})
+
+test('/resume forgets the steps of the conversation it leaves', async ($, on) => {
+  engineBand(on)
+  mock.clock(on)
+  on('session.end', () => ({ sessionId: 's1' }))
+  await suggest($)
+
+  await $.session.end({ reason: 'resume', sessionId: 's1', resume: { id: 's1' } })
   const ran = await $.command.run({ ...COMMAND, args: '' })
   expect(ran.text).toContain('No next steps yet')
 })

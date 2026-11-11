@@ -18,6 +18,7 @@ const BAND = {
   surface: 'terminal',
   props: {
     hasSurvey: false,
+    isCollapsed: false,
     isWorking: false,
     maxRows: 20,
     bodyColumns: 120,
@@ -52,7 +53,17 @@ const world = (on: On) => {
   const forks: string[] = []
   const submitted: string[] = []
   const compacts: string[] = []
+  const tools: string[] = []
+  const slash: string[] = []
   mock.store(on)
+  on('tool.register', (_$, e) => {
+    tools.push(e.name)
+    return { value: { tool: `mcp__helm__${e.name}` } }
+  })
+  on('command.register', (_$, e) => {
+    slash.push(e.name)
+    return { value: { command: e.name } }
+  })
   on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
     const { Text } = $.ui.resolve(e)
     return <Text>engine band</Text>
@@ -100,7 +111,7 @@ const world = (on: On) => {
     return { messages: [{ role: 'user' as const, text: 'Summary.', toolUses: [] }], tokensBefore: 20_000, tokensAfter: 8_000, usage: zero }
   })
 
-  return { forks, submitted, compacts, owner: () => owner }
+  return { forks, submitted, compacts, tools, slash, owner: () => owner }
 }
 
 const respond = async ($: Engine) => {
@@ -282,6 +293,15 @@ test('CONFIG shows the pragmatic-engineer and message switches and writes this p
   await ui.press({ key: 'config' })
   expect((await ui.find({ key: 'opt-autoUseHere' }))?.props.value).toBe('on')
 
+  // With no override here, the label says what the shared settings.json sets.
+  files['/proj/.claude/settings.json'] = JSON.stringify({ env: { PRAGMATIC_ENGINEER_AUTO_USE: 'false' } })
+  await ui.select({ key: 'opt-autoUseHere', value: 'default' })
+  expect((await ui.find({ key: 'opt-autoUseHere' }))?.props.value).toBe('default')
+  expect(await ui.find({ text: /This project \(settings\.json: off\)/ })).toBeDefined()
+  await ui.select({ key: 'opt-autoUseHere', value: 'on' })
+  expect(await ui.find({ text: /settings\.json: off/ })).toBeUndefined()
+  expect(JSON.parse(files['/proj/.claude/settings.json'] ?? '').env.PRAGMATIC_ENGINEER_AUTO_USE).toBe('false')
+
   // A settings.local.json that isn't JSON is left alone.
   files['/proj/.claude/settings.local.json'] = '{ broken'
   await ui.press({ key: 'config' })
@@ -310,6 +330,42 @@ test('picking a step resets the keep-warm budget, as a typed prompt does', { opt
   await clock.advance(181_000)
   expect(w.forks).toEqual(['ping', 'ping'])
   expect(w.compacts).toEqual([])
+})
+
+test('a prompt from Remote Control or an SDK host resets the keep-warm budget too', { options: { ...FIVE_MIN, keepWarmCount: 1 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await $.session.start(START)
+  await respond($)
+
+  for (const [n, kind] of (['bridge', 'sdk'] as const).entries()) {
+    await clock.advance(181_000)
+    expect(w.forks).toEqual(Array(n + 1).fill('ping'))
+    await $.prompt.submit({ text: 'next thing', origin: { kind }, wait: false })
+    await respond($)
+  }
+
+  await clock.advance(181_000)
+  expect(w.forks).toEqual(['ping', 'ping', 'ping'])
+  expect(w.compacts).toEqual([])
+})
+
+test('next steps off: the suggest tool is not offered, the command still is', { options: { ...FIVE_MIN, nextSteps: false } }, async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await $.session.start(START)
+
+  expect(w.tools).toEqual([])
+  expect(w.slash).toEqual(['next-steps'])
+})
+
+test('next steps on: session start registers the tool and the command', { options: FIVE_MIN }, async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await $.session.start(START)
+
+  expect(w.tools).toEqual(['suggest'])
+  expect(w.slash).toEqual(['next-steps'])
 })
 
 test('/next-steps suggest refreshes the cache countdown, since its fork reads the cache', { options: { ...FIVE_MIN, autoKeepWarm: false } }, async ($, on) => {

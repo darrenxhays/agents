@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, EventName, Hook, ModelUsage, On, StreamNext } from 'claude-code'
+import type { EngineInterface, EventName, Hook, On, PromptOrigin, StreamNext } from 'claude-code'
 
-import type { Cache, Handoff, KeepWarm, Limit, Meter } from '../types'
+import type { Action, Handoff, KeepWarm, Limit, Meter } from '../types'
 import type { Settings } from './settings'
 
 type In<E extends EventName> = Parameters<Hook<E>>[1]
@@ -10,7 +10,7 @@ const meter = atom({ plugin: 'helm', key: 'meter' } as const, null)
 const cache = atom({ plugin: 'helm', key: 'cache' } as const, null)
 const now = atom({ plugin: 'helm', key: 'now' } as const, 0)
 const handoff = atom({ plugin: 'helm', key: 'handoff' } as const, { phase: 'idle' } as Handoff)
-const keep = atom({ plugin: 'helm', key: 'keep' } as const, { count: 0, isRefreshing: false } as KeepWarm)
+const keep = atom({ plugin: 'helm', key: 'keep' } as const, { count: 0 } as KeepWarm)
 const busy = atom({ plugin: 'helm', key: 'busy' } as const, false)
 const limits = atom({ plugin: 'helm', key: 'limits' } as const, [] as Limit[])
 const showUsage = atom({ plugin: 'helm', key: 'showUsage' } as const, false)
@@ -193,9 +193,22 @@ export async function toggleUsage($: EngineInterface) {
 
 // ── actions ─────────────────────────────────────────────────────────────────
 
+// Starts a compact or handoff unless one is already being written: two
+// presses before the redraw both land, and only the first may run.
+async function claim($: EngineInterface, action: Action, isAuto: boolean) {
+  let isMine = false
+  await update($, handoff, job => {
+    isMine = job.phase !== 'writing'
+    return isMine ? { phase: 'writing' as const, action, isAuto } : job
+  })
+
+  return isMine
+}
+
 export async function writeHandoff($: EngineInterface, isAuto: boolean) {
-  await update($, handoff, () => ({ phase: 'writing' as const, action: 'handoff' as const, isAuto }))
+  if (!(await claim($, 'handoff', isAuto))) return
   try {
+    const heldAt = (await read($, cache))?.lastAt
     const reply = await $.model.fork({ prompt: HANDOFF_PROMPT })
     if (!reply.isAnswered) {
       await update($, handoff, () => ({ phase: 'failed' as const, action: 'handoff' as const, reason: reply.reason }))
@@ -203,16 +216,32 @@ export async function writeHandoff($: EngineInterface, isAuto: boolean) {
       return
     }
     const text = reply.text.trim()
-    const at = await $.clock.now()
-    await $.store.set('lastHandoff', { at, text })
+    // The person came back while the fork ran (a turn, a response, a draft):
+    // an auto-handoff leaves their conversation alone.
+    const isBack = async () =>
+      (await read($, busy)) || (await read($, cache))?.lastAt !== heldAt || (await $.prompt.read()).text.trim() !== ''
+    if (isAuto && (await isBack())) {
+      await update($, handoff, () => ({ phase: 'idle' as const }))
+      await update($, keep, k => ({ ...k, note: 'Auto-handoff cancelled: you came back while it was being written' }))
+      return
+    }
+    // Nothing is cleared unless the prompt box can take the text.
+    const probe = await $.prompt.fill({ text })
+    if (!probe.isFilled) {
+      const reason = `the prompt box can't take it (${probe.refusal ?? 'unknown'}); nothing was cleared`
+      await update($, handoff, () => ({ phase: 'failed' as const, action: 'handoff' as const, reason }))
+      $.ui.toast(`Handoff failed: ${reason}`)
+      return
+    }
     await $.command.run({ command: 'clear' })
     const filled = await $.prompt.fill({ text })
+    const at = await $.clock.now()
     await update($, handoff, () => ({ phase: 'idle' as const }))
     const how = isAuto ? 'Auto-handoff' : 'Handoff'
     const note = filled.isFilled
       ? `${how} at ${timeOfDay(at)} — review the prompt, then press Enter`
-      : `${how} at ${timeOfDay(at)} — the prompt box refused it (${filled.refusal ?? 'unknown'}); text saved in the mod's store`
-    await update($, keep, () => ({ count: 0, isRefreshing: false, note }))
+      : `${how} at ${timeOfDay(at)} — cleared, but the prompt box then refused the prompt (${filled.refusal ?? 'unknown'})`
+    await update($, keep, () => ({ count: 0, note }))
     $.ui.toast(note)
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err)
@@ -232,7 +261,7 @@ async function afterCompact($: EngineInterface, tokensAfter: number | undefined,
         ? { window: m.window }
         : { window: m.window, tokens: tokensAfter, percent: Math.round((tokensAfter / m.window) * 100) },
   )
-  await update($, keep, () => ({ count: 0, isRefreshing: false, note }))
+  await update($, keep, () => ({ count: 0, note }))
 }
 
 const compactNote = (isAuto: boolean, at: number, before?: number, after?: number, read?: number) => {
@@ -244,7 +273,7 @@ const compactNote = (isAuto: boolean, at: number, before?: number, after?: numbe
 }
 
 export async function compactNow($: EngineInterface, isAuto: boolean) {
-  await update($, handoff, () => ({ phase: 'writing' as const, action: 'compact' as const, isAuto }))
+  if (!(await claim($, 'compact', isAuto))) return
   try {
     const result = await $.session.compact()
     if (result.skip !== undefined) {
@@ -266,32 +295,34 @@ export async function compactNow($: EngineInterface, isAuto: boolean) {
 
 // A fork over the conversation (a keep-warm ping, a next-steps suggestion)
 // reads the main thread's cache, so its TTL counts again from when it started.
-export async function forkRefreshed($: EngineInterface, startedAt: number, usage: ModelUsage) {
-  await update($, cache, () => ({
-    lastAt: startedAt,
-    readTokens: usage.cache_read_input_tokens,
-    writeTokens: usage.cache_creation_input_tokens,
-  }))
+export async function forkRefreshed($: EngineInterface, startedAt: number) {
+  await update($, cache, () => ({ lastAt: startedAt }))
   await update($, now, () => startedAt)
 }
 
 async function keepWarm($: EngineInterface) {
-  await update($, keep, k => ({ ...k, isRefreshing: true }))
   const startedAt = await $.clock.now()
   const reply = await $.model.fork({ prompt: PING_PROMPT })
   if (!reply.isAnswered && reply.reason !== 'empty-reply') {
-    await update($, keep, k => ({ ...k, isRefreshing: false, note: `Keep-warm failed (${reply.reason})` }))
+    await update($, keep, k => ({ ...k, note: `Keep-warm failed (${reply.reason})` }))
     return
   }
-  const usage = reply.usage
-  const fill = await read($, meter)
-  await forkRefreshed($, startedAt, usage)
+  const served = reply.usage.cache_read_input_tokens
+  const tokens = (await read($, meter))?.tokens
+  // A ping that read under half the context found the cache already gone and
+  // paid for the prefix: no countdown and no more pings until the next response.
+  if (tokens !== undefined && served < tokens / 2) {
+    await update($, cache, () => null)
+    await update($, keep, k => ({
+      ...k,
+      note: `Keep-warm at ${timeOfDay(startedAt)} read ${kilo(served)} from cache: it had already expired (check Prompt cache TTL)`,
+    }))
+    return
+  }
+  await forkRefreshed($, startedAt)
   await update($, keep, k => ({
     count: k.count + 1,
-    isRefreshing: false,
-    lastRead: usage.cache_read_input_tokens,
-    lastContext: fill?.tokens,
-    note: `Keep-warm ${k.count + 1} at ${timeOfDay(startedAt)}: read ${kilo(usage.cache_read_input_tokens)} from cache`,
+    note: `Keep-warm ${k.count + 1} at ${timeOfDay(startedAt)}: read ${kilo(served)} from cache`,
   }))
 }
 
@@ -343,11 +374,10 @@ async function transcriptPath($: EngineInterface, cwd: string): Promise<string |
 async function seedResume($: EngineInterface, lastAt: number, tokens: number | undefined) {
   const at = await $.clock.now()
   seededAt = at
-  await update($, cache, () => ({ lastAt, readTokens: 0, writeTokens: 0, isEstimate: true }))
+  await update($, cache, () => ({ lastAt, isEstimate: true }))
   await update($, now, () => at)
   await update($, keep, () => ({
     count: 0,
-    isRefreshing: false,
     note: 'Resumed: cache time estimated from the last response — keep-warm starts after your next prompt',
   }))
   if (tokens === undefined) return
@@ -408,8 +438,7 @@ export async function cacheSessionStart($: EngineInterface, e: In<'session.start
   const usage = await $.session.usage()
   const { context } = usage
   await update($, meter, m => keepFill(m, context))
-  await update($, now, () => 0)
-  await update($, busy, () => false)
+  // `now` and `busy` stand as they were: a reload mid-turn is still mid-turn.
   await update($, handoff, () => ({ phase: 'idle' as const }))
   await update($, limits, () => usage.rateLimits.map(r => ({ kind: r.kind, percentUsed: r.percentUsed, resetsAt: r.resetsAt })))
 
@@ -429,28 +458,40 @@ export async function cacheSessionStart($: EngineInterface, e: In<'session.start
     const at = await $.clock.now()
     const held = await read($, cache)
     const job = await read($, handoff)
-    if ((held !== null && at - held.lastAt <= plan.ttlMs + 1000) || job.phase === 'writing') {
+    // While the band still shows time left, not while the clock says there is
+    // some: after a sleep the next tick is past the expiry, and must show it.
+    if ((held !== null && (await read($, now)) <= held.lastAt + plan.ttlMs) || job.phase === 'writing') {
       await update($, now, () => at)
     }
     await autopilot($, at, plan)
   })
 }
 
+// A prompt the person sent themselves: at the terminal, from Remote Control,
+// or through an SDK host.
+export const isTyped = (origin: PromptOrigin | undefined) =>
+  origin?.kind === 'composer' || origin?.kind === 'bridge' || origin?.kind === 'sdk'
+
 // A prompt the person typed resets the keep-warm budget.
 export async function cachePromptSubmit($: EngineInterface, e: In<'prompt.submit'>) {
-  if (e.origin.kind === 'composer') {
+  if (isTyped(e.origin)) {
     await resetKeepWarm($)
   }
 }
 
 // So does a next step they picked, which helm submits itself: a plugin's own
-// prompt.submit hook does not see the prompts it submits.
+// prompt.submit hook does not see the prompts it submits. Either retires the
+// last compact or handoff failure, which is about the conversation before it.
 export async function resetKeepWarm($: EngineInterface) {
-  await update($, keep, () => ({ count: 0, isRefreshing: false }))
+  await update($, handoff, job => (job.phase === 'failed' ? { phase: 'idle' as const } : job))
+  await update($, keep, () => ({ count: 0 }))
 }
 
-export async function cacheTurnStart($: EngineInterface) {
-  await update($, busy, () => true)
+// The main loop's turns alone: a subagent's start has no end that clears it.
+export async function cacheTurnStart($: EngineInterface, e: In<'turn.start'>) {
+  if (e.agentId === undefined) {
+    await update($, busy, () => true)
+  }
 }
 
 export async function cacheTurnComplete($: EngineInterface, e: In<'turn.complete'>) {
@@ -466,7 +507,7 @@ export async function cacheSessionEnd($: EngineInterface, e: In<'session.end'>) 
   if ((e.reason === 'clear' || e.reason === 'resume') && !isJustSeeded) {
     await update($, cache, () => null)
     await update($, meter, m => (m === null ? m : { window: m.window }))
-    await update($, keep, () => ({ count: 0, isRefreshing: false }))
+    await update($, keep, () => ({ count: 0 }))
   }
 }
 
@@ -477,11 +518,7 @@ export async function* cacheTurnStep($: EngineInterface, e: In<'turn.step'>, nex
   const result = yield* next(e)
   if (e.agentId === undefined && result.usage !== null) {
     const u = result.usage
-    await update($, cache, () => ({
-      lastAt: startedAt,
-      readTokens: u.cache_read_input_tokens,
-      writeTokens: u.cache_creation_input_tokens,
-    }))
+    await update($, cache, () => ({ lastAt: startedAt }))
     const endedAt = await $.clock.now()
     await update($, now, () => endedAt)
     const tokens = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens

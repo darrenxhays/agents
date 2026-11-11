@@ -25,7 +25,7 @@ const meter = atom({ plugin: 'helm', key: 'meter' } as const, null)
 const cache = atom({ plugin: 'helm', key: 'cache' } as const, null)
 const now = atom({ plugin: 'helm', key: 'now' } as const, 0)
 const handoff = atom({ plugin: 'helm', key: 'handoff' } as const, { phase: 'idle' } as Handoff)
-const keep = atom({ plugin: 'helm', key: 'keep' } as const, { count: 0, isRefreshing: false } as KeepWarm)
+const keep = atom({ plugin: 'helm', key: 'keep' } as const, { count: 0 } as KeepWarm)
 const limits = atom({ plugin: 'helm', key: 'limits' } as const, [] as Limit[])
 const showUsage = atom({ plugin: 'helm', key: 'showUsage' } as const, false)
 const showConfig = atom({ plugin: 'helm', key: 'showConfig' } as const, false)
@@ -77,13 +77,11 @@ export async function drawBand($: EngineInterface, e: Band, config: Settings, be
 
   // Context bar, with the cache countdown right-aligned inside it.
   const ttlMs = config.ttlMs
-  const pct = fill?.percent
+  const pct = fill.percent
   const contextLabel =
-    fill === null
-      ? ''
-      : pct === undefined
-        ? `◆ CONTEXT – / ${kilo(fill.window)} · waiting for first response`
-        : `◆ CONTEXT ${pct}% · ${kilo(fill.tokens ?? 0)} / ${kilo(fill.window)}`
+    pct === undefined
+      ? `◆ CONTEXT – / ${kilo(fill.window)} · waiting for first response`
+      : `◆ CONTEXT ${pct}% · ${kilo(fill.tokens ?? 0)} / ${kilo(fill.window)}`
   const left = held === null ? 0 : held.lastAt + ttlMs - Math.max(at, held.lastAt)
   const isWarm = held !== null && left > 0
   const fraction = isWarm ? left / ttlMs : 0
@@ -94,7 +92,7 @@ export async function drawBand($: EngineInterface, e: Band, config: Settings, be
 
   const isFree = !e.props.isWorking && !isWriting
   const canHandoff = isFree && held !== null
-  const canCompact = isFree && (held !== null || fill?.tokens !== undefined)
+  const canCompact = isFree && (held !== null || fill.tokens !== undefined)
 
   // COMPACT, HANDOFF, USAGE and CONFIG: four buttons that never change place.
   const quarter = Math.floor((width - 3) / 4)

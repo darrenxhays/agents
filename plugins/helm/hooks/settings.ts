@@ -25,7 +25,9 @@ export function settings(options: PluginOptions): Settings {
     isAuto: options.autoKeepWarm !== false,
     keepWarmCount: typeof options.keepWarmCount === 'number' ? options.keepWarmCount : 3,
     handoffPercent: typeof options.handoffPercent === 'number' ? options.handoffPercent : 50,
-    leadMs: Math.min(ttlMs / 2, (typeof options.leadSeconds === 'number' ? options.leadSeconds : 120) * 1000),
+    // At least 5 seconds, so a once-a-second tick cannot step over the window
+    // (0 or less would never act at all); at most half the TTL.
+    leadMs: Math.min(ttlMs / 2, Math.max(5, typeof options.leadSeconds === 'number' ? options.leadSeconds : 120) * 1000),
     idleAction: options.idleAction === 'handoff' ? 'handoff' : 'compact',
     isNextSteps: options.nextSteps !== false,
     isFillOnPick: options.clickAction === 'fill',

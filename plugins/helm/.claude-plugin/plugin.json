@@ -1,6 +1,6 @@
 {
   "name": "helm",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "author": {
     "name": "darrenxhays"
   },
@@ -10,7 +10,7 @@
     "contextBand": {
       "type": "boolean",
       "title": "Show the context and cache band",
-      "description": "The context bar, cache countdown and COMPACT, HANDOFF and USAGE buttons above the prompt. Keep-warm and next steps work either way.",
+      "description": "The context bar, cache countdown and COMPACT, HANDOFF, USAGE and CONFIG buttons above the prompt. Keep-warm and next steps work either way.",
       "default": true
     },
     "cacheTtl": {
@@ -54,13 +54,13 @@
     "leadSeconds": {
       "type": "number",
       "title": "Act this many seconds before expiry",
-      "description": "When to refresh or hand off, measured back from the cache expiring",
+      "description": "When to refresh, compact or hand off, measured back from the cache expiring (at least 5, at most half the TTL)",
       "default": 120
     },
     "nextSteps": {
       "type": "boolean",
       "title": "Suggest next steps",
-      "description": "Show numbered next-step buttons above the prompt when Claude finishes a task.",
+      "description": "Show numbered next-step buttons in a card in the conversation when Claude finishes a task.",
       "default": true
     },
     "clickAction": {

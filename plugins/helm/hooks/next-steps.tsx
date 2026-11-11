@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { ConfigRow, EngineInterface, EventName, Hook, On, ResolveInput, TurnStepResult } from 'claude-code'
 
 import type { NextStep } from '../types'
-import { forkRefreshed, resetKeepWarm } from './cache'
+import { forkRefreshed, isTyped, resetKeepWarm } from './cache'
 import { isOwnRow } from './options'
 import type { Settings } from './settings'
 
@@ -145,9 +145,10 @@ async function suggestFromConversation($: EngineInterface): Promise<{ text: stri
   $.ui.status('helm: suggesting next steps…')
   try {
     const startedAt = await $.clock.now()
+    const shownBefore = await read($, generation)
     const reply = await $.model.fork({ prompt: FORK_PROMPT })
     if (reply.isAnswered || reply.reason === 'empty-reply') {
-      await forkRefreshed($, startedAt, reply.usage)
+      await forkRefreshed($, startedAt)
     }
     if (!reply.isAnswered) {
       const text =
@@ -160,6 +161,10 @@ async function suggestFromConversation($: EngineInterface): Promise<{ text: stri
 
     const list = parseSteps(parseJsonArray(reply.text))
     if (list.length === 0) return { text: 'The model found no next steps to suggest.', count: 0 }
+    // Steps shown while the fork ran are newer than what it was asked over.
+    if ((await read($, generation)) !== shownBefore) {
+      return { text: 'Newer next steps were shown while these were being written; kept those.', count: 0 }
+    }
 
     const set = await show($, list, '')
 
@@ -181,11 +186,20 @@ async function pick($: EngineInterface, chosen: NextStep[], isFill: boolean): Pr
     return
   }
 
+  // Hides the list, and runs only if this press was the one that hid it: two
+  // presses before the redraw both land.
+  let isFirst = false
+  await update($, isShown, shown => {
+    isFirst = shown
+    return false
+  })
+  if (!isFirst) return
+  await update($, selected, () => [])
+
   const note = text.trim()
   if (note !== '') {
     await $.prompt.fill({ text: '', mode: 'replace' })
   }
-  await hide($)
   await $.prompt.submit({ text: withNote(stepsText(chosen), note), asUser: true })
   await resetKeepWarm($)
 }
@@ -315,19 +329,25 @@ function drawSummary($: EngineInterface, e: ResolveInput, list: NextStep[]) {
 // a reload mid-turn only skips that one turn's fallback.
 let changesInTurn = 0
 let isSuggestedInTurn = false
+// A prompt or notification came in over the running turn: the model must get
+// its next step, or what was delivered into the turn goes unanswered.
+let isPromptedInTurn = false
 
 // Next steps' part of the events the cache hooks too: register.tsx runs these
 // after the cache's part.
 export async function stepsSessionStart($: EngineInterface, config: Settings) {
-  if (!config.isNextSteps) {
+  // Turned off, the tool is not offered: its description alone tells the model
+  // to call it after every task.
+  if (config.isNextSteps) {
+    await $.tool.register({
+      name: 'suggest',
+      description: TOOL_DESCRIPTION,
+      inputSchema: INPUT_SCHEMA,
+      isDeferred: false,
+    })
+  } else {
     await hide($)
   }
-  await $.tool.register({
-    name: 'suggest',
-    description: TOOL_DESCRIPTION,
-    inputSchema: INPUT_SCHEMA,
-    isDeferred: false,
-  })
   await $.command.register({
     name: 'next-steps',
     description: 'Show the last next steps, ask for new ones (suggest), or turn them on/off (also in /config)',
@@ -335,8 +355,9 @@ export async function stepsSessionStart($: EngineInterface, config: Settings) {
   })
 }
 
+// /clear and /resume both leave this conversation, and its steps with it.
 export async function stepsSessionEnd($: EngineInterface, e: In<'session.end'>) {
-  if (e.reason === 'clear') {
+  if (e.reason === 'clear' || e.reason === 'resume') {
     await hide($)
     await update($, steps, () => [])
   }
@@ -346,14 +367,16 @@ export function stepsTurnStart(e: In<'turn.start'>) {
   if (e.agentId === undefined) {
     changesInTurn = 0
     isSuggestedInTurn = false
+    isPromptedInTurn = false
   }
 }
 
 // The step after the steps went on screen, answered without asking the model:
 // asked, it ends with an empty reply, the engine nudges it for visible output,
-// and it writes its summary a second time.
+// and it writes its summary a second time. Not when something was delivered
+// into the turn, which only the model can answer.
 export function stepsTurnStep(e: In<'turn.step'>): TurnStepResult | undefined {
-  if (e.agentId !== undefined || !isSuggestedInTurn) return undefined
+  if (e.agentId !== undefined || !isSuggestedInTurn || isPromptedInTurn) return undefined
 
   return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: null }
 }
@@ -385,16 +408,17 @@ export async function stepsPromptSubmit(
   e: In<'prompt.submit'>,
   config: Settings,
 ): Promise<In<'prompt.submit'>> {
+  if (e.turnId !== undefined && e.command === undefined) {
+    isPromptedInTurn = true
+  }
   if (!config.isNextSteps || e.command !== undefined || e.isMeta === true || !(await read($, isShown))) {
     return e
   }
 
   const origin = e.origin
   const isOurs = origin?.kind === 'plugin' && origin.name === $.plugin.name
-  const isTyped =
-    origin?.kind === 'composer' || origin?.kind === 'bridge' || origin?.kind === 'sdk'
 
-  if (!isOurs && !isTyped) {
+  if (!isOurs && !isTyped(origin)) {
     return e
   }
 
@@ -453,16 +477,20 @@ export function registerNextSteps(on: On, config: Settings) {
     }
   })
 
-  on('tool.call', async ($, e, next) => {
-    const ran = await next(e)
-    const isChange = ran.deny === undefined && ran.isError !== true && ran.isReadOnly !== true
+  // Counting the turn's changes is for autoFallback alone: without it no
+  // other tool call passes through helm.
+  if (isEnabled && config.hasAutoFallback) {
+    on('tool.call', async ($, e, next) => {
+      const ran = await next(e)
+      const isChange = ran.deny === undefined && ran.isError !== true && ran.isReadOnly !== true
 
-    if (e.agentId === undefined && e.tool !== TOOL && isChange) {
-      changesInTurn += 1
-    }
+      if (e.agentId === undefined && e.tool !== TOOL && isChange) {
+        changesInTurn += 1
+      }
 
-    return ran
-  })
+      return ran
+    })
+  }
 
   on('command.run', { command: 'next-steps' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()

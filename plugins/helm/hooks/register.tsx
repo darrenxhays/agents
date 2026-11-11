@@ -56,7 +56,7 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.start', async ($, e, next) => {
-    await cacheTurnStart($)
+    await cacheTurnStart($, e)
     stepsTurnStart(e)
 
     return next(e)

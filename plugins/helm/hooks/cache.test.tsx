@@ -7,6 +7,7 @@ const BAND = {
   component: 'AbovePrompt',
   props: {
     hasSurvey: false,
+    isCollapsed: false,
     isWorking: false,
     maxRows: 10,
     bodyColumns: 100,
@@ -19,14 +20,30 @@ const SUMMARY = { role: 'user' as const, text: 'Summary of the conversation so f
 const PING = 'Cache keep-alive ping. Reply with only: ok'
 const zero = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 
+type World = {
+  tokens: number
+  draft?: string
+  // What a fork reads from cache; all but 1k of the context unless given.
+  forkRead?: number
+  // What the prompt box answers a fill with. (The engine's own `refusal` is
+  // not a test hook's to give: the site strips a cause a hook writes itself.)
+  fill?: { isFilled: boolean }
+  // Runs while a fork is in flight.
+  onFork?: () => Promise<unknown>
+  // Why a hook beneath vetoes every compaction.
+  compactSkip?: string
+}
+
 // The world beneath the plugin: a 200k window, a main-thread response of
 // `tokens` (all but 2k read from cache), forks recorded, a draft of `draft`.
-const world = (on: On, { tokens, draft = '' }: { tokens: number; draft?: string }) => {
+const world = (on: On, { tokens, draft = '', forkRead = tokens - 1_000, fill = { isFilled: true }, onFork, compactSkip }: World) => {
   const forks: string[] = []
   const commands: string[] = []
   const pasted: string[] = []
   const compacts: string[] = []
   mock.store(on)
+  on('tool.register', (_$, e) => ({ value: { tool: `mcp__helm__${e.name}` } }))
+  on('command.register', (_$, e) => ({ value: { command: e.name } }))
   // The engine's own band beneath helm's, and its toasts.
   on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
     const { Text } = $.ui.resolve(e)
@@ -58,13 +75,14 @@ const world = (on: On, { tokens, draft = '' }: { tokens: number; draft?: string 
       usage: { ...zero, model: 'claude-opus-5-5', input_tokens: 2_000, cache_read_input_tokens: tokens - 2_000 },
     }
   })
-  on('model.fork', (_$, e) => {
+  on('model.fork', async (_$, e) => {
     forks.push(e.prompt === PING ? 'ping' : 'handoff')
+    await onFork?.()
     return {
       value: {
         isAnswered: true as const,
         text: e.prompt === PING ? 'ok' : '  Continue the work.  ',
-        usage: { ...zero, cache_read_input_tokens: tokens - 1_000 },
+        usage: { ...zero, cache_read_input_tokens: forkRead },
       },
     }
   })
@@ -74,10 +92,11 @@ const world = (on: On, { tokens, draft = '' }: { tokens: number; draft?: string 
   })
   on('prompt.fill', (_$, e) => {
     pasted.push(e.text)
-    return { isFilled: true }
+    return fill
   })
   on('session.compact', (_$, e) => {
     compacts.push(e.trigger)
+    if (compactSkip !== undefined) return { skip: compactSkip }
     return { messages: [SUMMARY], tokensBefore: tokens, tokensAfter: 8_000, usage: { ...zero, cache_read_input_tokens: tokens - 1_000 } }
   })
 
@@ -126,6 +145,8 @@ test('draws the bars and counts the cache down', { options: { ...FIVE_MIN, autoK
   await gone.unmount()
 })
 
+// The prompt is pasted twice: once to learn the box takes it, before anything
+// is cleared, and again after the clear.
 test('the button forks a handoff, clears and pastes it', { options: FIVE_MIN }, async ($, on) => {
   mock.clock(on, { now: 1_000_000 })
   const w = world(on, { tokens: 20_000 })
@@ -136,7 +157,33 @@ test('the button forks a handoff, clears and pastes it', { options: FIVE_MIN }, 
   await ui.press({ key: 'handoff' })
   expect(w.forks).toEqual(['handoff'])
   expect(w.commands).toEqual(['clear'])
-  expect(w.pasted).toEqual(['Continue the work.'])
+  expect(w.pasted).toEqual(['Continue the work.', 'Continue the work.'])
+  await ui.unmount()
+})
+
+test('a handoff the prompt box cannot take clears nothing', { options: FIVE_MIN }, async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { tokens: 20_000, fill: { isFilled: false } })
+  await $.session.start(START)
+  await respond($)
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await ui.press({ key: 'handoff' })
+  expect(w.forks).toEqual(['handoff'])
+  expect(w.commands).toEqual([])
+  expect(await ui.find({ text: /handoff failed: the prompt box can't take it .*nothing was cleared/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('pressing COMPACT twice before the redraw compacts once', { options: FIVE_MIN }, async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { tokens: 20_000 })
+  await $.session.start(START)
+  await respond($)
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await Promise.all([ui.press({ key: 'compact' }), ui.press({ key: 'compact' })])
+  expect(w.compacts).toHaveLength(1)
   await ui.unmount()
 })
 
@@ -159,7 +206,7 @@ test('handoff mode: keeps warm three times, then hands off', { options: HANDOFF_
   await clock.advance(11_000)
   expect(w.forks).toEqual(['ping', 'ping', 'ping', 'handoff'])
   expect(w.commands).toEqual(['clear'])
-  expect(w.pasted).toEqual(['Continue the work.'])
+  expect(w.pasted).toEqual(['Continue the work.', 'Continue the work.'])
 })
 
 test('handoff mode: past the threshold, hands off at the first expiry point', { options: HANDOFF_MODE }, async ($, on) => {
@@ -182,6 +229,121 @@ test('handoff mode: a draft in the prompt box blocks the auto-handoff', { option
   await clock.advance(181_000)
   expect(w.forks).toEqual(['ping'])
   expect(w.commands).toEqual([])
+})
+
+test('handoff mode: coming back while the auto-handoff is written cancels it', { options: HANDOFF_MODE }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  const w = world(on, { tokens: 120_000, onFork: () => $.turn.start({ text: 'I am back', turnId: 't2' }) })
+  await $.session.start(START)
+  await respond($)
+
+  await clock.advance(181_000)
+  expect(w.forks).toEqual(['handoff'])
+  expect(w.commands).toEqual([])
+  expect(w.pasted).toEqual([])
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ text: /Auto-handoff cancelled/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a subagent turn starting while the main loop is idle does not stop keep-warm', { options: FIVE_MIN }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: 'done' }))
+  const w = world(on, { tokens: 20_000 })
+  const done = { answer: 'done', durationMs: 5, isAborted: false, reason: 'answer' } as const
+  await $.session.start(START)
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+  await respond($)
+  await $.turn.complete({ ...done, turnId: 't1' })
+
+  // A background agent's own subagent, or a teammate's loop woken by a message.
+  await $.turn.start({ text: 'woken', turnId: 'a1-t1', agentId: 'a1' })
+  await $.turn.complete({ ...done, turnId: 'a1-t1', agentId: 'a1' })
+
+  await clock.advance(181_000)
+  expect(w.forks).toEqual(['ping'])
+})
+
+test('a ping that read nothing from cache stops the countdown and the pings', { options: FIVE_MIN }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { tokens: 20_000, forkRead: 0 })
+  await $.session.start(START)
+  await respond($)
+
+  await clock.advance(181_000)
+  expect(w.forks).toEqual(['ping'])
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ text: /CACHE --:--/ })).toBeDefined()
+  expect(await ui.find({ text: /read 0 from cache: it had already expired/ })).toBeDefined()
+  await ui.unmount()
+
+  await clock.advance(20 * 60_000)
+  expect(w.forks).toEqual(['ping'])
+  expect(w.compacts).toEqual([])
+})
+
+test('a reload after the cache expired still shows it expired', { options: { ...FIVE_MIN, autoKeepWarm: false } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  world(on, { tokens: 20_000 })
+  await $.session.start(START)
+  await respond($)
+  await clock.advance(10 * 60_000)
+
+  // A CONFIG change or /reload-plugins: the module loads and starts again.
+  await $.session.start(START)
+  await clock.advance(5_000)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ text: 'CACHE EXPIRED' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a clock that jumps past the expiry (sleep, then wake) shows the cache expired', { options: { ...FIVE_MIN, autoKeepWarm: false } }, async ($, on) => {
+  // A clock of the test's own, so a period can end hours after the last one.
+  let at = 1_000_000
+  let waiting: (() => void)[] = []
+  on('clock.now', () => ({ value: at }))
+  on('clock.every', () => new Promise<{ value: undefined }>(resolve => waiting.push(() => resolve({ value: undefined }))))
+  const shown = async () => {
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    const found = await ui.find({ text: /CACHE/ })
+    await ui.unmount()
+    return found?.text
+  }
+  const tick = async (to: number) => {
+    at = to
+    const due = waiting
+    waiting = []
+    for (const go of due) go()
+    // Round trips through the engine, for the timer's callback to finish.
+    for (let i = 0; i < 6; i++) await shown()
+  }
+  world(on, { tokens: 20_000 })
+  await $.session.start(START)
+  await respond($)
+
+  await tick(1_000_000 + 60_000)
+  expect(await shown()).toContain('CACHE 04:00')
+
+  await tick(1_000_000 + 60_000 + 2 * 3600_000)
+  expect(await shown()).toContain('CACHE EXPIRED')
+})
+
+test('the next typed prompt takes a failed compact off the band', { options: FIVE_MIN }, async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  on('prompt.submit', (_$, e) => ({ text: e.text }))
+  world(on, { tokens: 20_000, compactSkip: 'vetoed' })
+  await $.session.start(START)
+  await respond($)
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await ui.press({ key: 'compact' })
+  expect(await ui.find({ text: /compact failed: vetoed/ })).toBeDefined()
+
+  await $.prompt.submit({ text: 'carry on', origin: { kind: 'composer' }, wait: false })
+  expect(await ui.find({ text: /compact failed/ })).toBeUndefined()
+  await ui.unmount()
 })
 
 test('the usage button toggles stacked 5-hour and weekly bars', { options: FIVE_MIN }, async ($, on) => {
