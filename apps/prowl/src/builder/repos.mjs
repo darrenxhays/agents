@@ -8,7 +8,7 @@ import { run } from '../proc.mjs';
 /** Where a ticket's worktrees go: <Projects Directory>/.prowl-worktrees/work-<id>. */
 export const worktreeRoot = (cfg, w) => path.join(cfg.workDir, '.prowl-worktrees', `work-${w.id}${w.n > 1 ? `-${w.n}` : ''}`);
 
-export const ghClone = (repo, target) => run('gh', ['repo', 'clone', repo, target]);
+export const ghClone = (repo, target) => run('gh', ['repo', 'clone', repo, target], { timeoutMs: 3_600_000 }); // a big repo on a slow line: an hour, not the usual 10 minutes
 
 /** The clone of `repo` in the Projects Directory, cloned with `clone` if it is missing. Throws if the folder holds another repo. */
 export async function ensureClone(cfg, repo, clone = ghClone) {

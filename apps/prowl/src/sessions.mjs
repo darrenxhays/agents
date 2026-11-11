@@ -20,6 +20,7 @@ export function alive(run) {
 
 /** Follows a detached session this process spawned for `run`, so alive() knows when it exits. */
 export function track(run, child, cfg) {
+  exited.delete(child.pid); // the system hands pids out again, Windows quickly: this one is running now
   run.pid = child.pid;
   run._spawned = true;
   if (cfg.caffeinate) keepAwake(child.pid); // a sleeping Mac stalls the session's streams and stretches it out
@@ -28,9 +29,13 @@ export function track(run, child, cfg) {
   child.unref();
 }
 
-/** The environment for a session. */
+const TRACKER_TOKENS = ['JIRA_API_TOKEN', 'AZURE_DEVOPS_EXT_PAT', 'SYSTEM_ACCESSTOKEN'];
+/** `env` without the trackers' tokens: only Prowl's own code signs in to the tracker, never a session or a command it wrote. */
+export const withoutTokens = env => Object.fromEntries(Object.entries(env).filter(([k]) => !TRACKER_TOKENS.includes(k)));
+
+/** The environment for a session: Prowl's own, without the trackers' tokens. */
 export const sessionEnv = (cfg, env = process.env) => ({
-  ...env,
+  ...withoutTokens(env),
   // prowl-review runs its reviewers as background subagents and ends its turn while they work. `claude -p`
   // stops background tasks still running 10 minutes after the last turn, which kills a large batch's
   // reviewers before anything is posted. Each finished subagent starts a new turn, so this is the longest

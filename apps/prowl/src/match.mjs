@@ -16,11 +16,17 @@ export function typos(a, b) {
   return d[a.length][b.length];
 }
 
-/** True when `tag` is `wanted`, ignoring case/spacing/punctuation, with at most `maxTypos` typos (fewer for short tags). */
+const words = s => String(s).match(/[a-z0-9]+/gi)?.length || 0;
+
+/**
+ * True when `tag` is `wanted`, ignoring case/spacing/punctuation, with at most `maxTypos` typos (fewer for short tags).
+ * An extra word is not a typo: "Ready for QA Review" is another tag, not a misspelt "Ready for Review".
+ */
 export function tagMatches(tag, wanted, maxTypos) {
   const a = norm(tag);
   const b = norm(wanted);
   if (a === b) return true;
+  if (words(tag) > words(wanted)) return false;
   const allowed = Math.min(maxTypos, Math.floor(b.length / 5)); // "Ready for Review" allows 2, "Review" allows 1
   return allowed > 0 && Math.abs(a.length - b.length) <= allowed && typos(a, b) <= allowed;
 }

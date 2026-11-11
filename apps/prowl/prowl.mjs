@@ -39,10 +39,10 @@ if (args.has('--reviewer-only') && args.has('--builder-only')) {
   process.exit(1);
 }
 
-const { HOME, loadConfig, saveConfig, seedChecks } = await import('./src/config.mjs');
+const { HOME, configChanged, loadConfig, saveConfig, seedChecks } = await import('./src/config.mjs');
 const TRACKERS = { ado: await import('./src/ado.mjs'), jira: await import('./src/jira.mjs') };
 const secrets = await import('./src/secrets.mjs');
-const { isAlive } = await import('./src/proc.mjs');
+const { lockHolder } = await import('./src/proc.mjs');
 const { createReviewer } = await import('./src/reviewer/reviewer.mjs');
 const { saveState } = await import('./src/reviewer/reviews.mjs');
 const { createBuilder } = await import('./src/builder/builder.mjs');
@@ -74,8 +74,15 @@ if ((reviewPaste != null && !reviewPaste.trim()) || (buildPaste != null && !buil
 }
 let tui = null; // set once the TUI is up; until then (and with --once) logs go to stdout
 
+let cfg;
+try {
+  cfg = loadConfig();
+} catch (e) { // config.json doesn't parse, or a setting in it can't be used: the message names it
+  console.error(`${e.message}\nFix it there, then start Prowl again.`);
+  process.exit(1);
+}
 const app = {
-  cfg: loadConfig(),
+  cfg,
   me: '',
   log: [],
   said: [], // what Hoot has to say: { text, mood, until }, oldest first
@@ -134,16 +141,14 @@ const sideDeps = name => ({ log: (...a) => log(name, ...a), forget: key => forge
 const reviewer = createReviewer(app, sideDeps('reviewer'));
 const builder = createBuilder(app, sideDeps('builder'));
 const sides = [reviewer, builder];
-const shell = createShell(app, sides, { log, reload: () => { app.cfg = loadConfig(); } });
+const shell = createShell(app, sides, { log, reload: () => { app.cfg = loadConfig(); }, changed: configChanged });
 
 // One instance per user: two would both finish the same sessions.
-try {
-  const pid = Number(fs.readFileSync(LOCK, 'utf8'));
-  if (pid && pid !== process.pid && isAlive(pid)) {
-    console.error(`prowl is already running (pid ${pid}).`);
-    process.exit(1);
-  }
-} catch { /* no lock */ }
+const holder = lockHolder(LOCK);
+if (holder) {
+  console.error(`prowl is already running (pid ${holder}). If it isn't, delete ${LOCK} and start it again.`);
+  process.exit(1);
+}
 
 // Updates run before taking the lock, which the installer checks. A session still running from an earlier launch
 // reads the skills' files as it goes, so the update waits for a launch with none running.

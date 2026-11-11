@@ -33,6 +33,6 @@ Then these sections:
 3. Issues found: per PR, every verified finding with severity, title, file:line, a link to its posted comment (or to the review when it is in the review body; for a point someone else raised first, a link to their comment and to the reply, if any), the problem, the failure scenario and the suggested fix.
 4. What was fixed: every prior finding verified fixed, with the fixing commit and a link to its comment thread, or "No earlier findings."
 5. Still open from the previous review: each prior finding still open, with a link to its comment thread, or "No earlier findings."
-6. Not posted: refuted, disputed and unverifiable findings, one line each with the reason.
+6. Not posted: refuted, duplicate, already-addressed and unverifiable findings, one line each with the reason.
 
 Every link must be a full https:// URL.

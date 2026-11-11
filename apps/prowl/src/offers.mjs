@@ -42,7 +42,7 @@ export async function acceptOffer(app, tracker, offer, { tag, busyTag, isTag, ad
     if (has(item.tags, busyTag)) { log('info', `${t.key}: left alone: it is '${busyTag}' now`); continue; }
     now.push({ ...t, item, tagged: item.tags.some(isTag) });
   }
-  const boards = cfg[cfg.taskBoard].boards;
+  const boards = app.cfg[app.cfg.taskBoard].boards; // read now: config.json may have been re-read during the reads above
   const adding = addBoards ? now.filter(t => !t.polled && !boards.some(b => sameBoard(b, t.board))).map(t => t.board)
     .filter((b, i, all) => all.findIndex(x => sameBoard(x, b)) === i) : [];
   if (adding.length) {

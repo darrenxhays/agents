@@ -64,24 +64,38 @@ export const fetchBranch = (clone, branch) => serial(clone, async () => {
   return (await git(clone, 'rev-parse', 'FETCH_HEAD')).trim();
 });
 
-/** Pushes HEAD of `dir` to origin's `branch`. Never forced: a push that isn't a fast-forward is rejected by git. */
-export const push = (dir, branch) => git(dir, 'push', 'origin', `HEAD:refs/heads/${branch}`);
+/**
+ * Pushes commit `sha` (the one the guards checked) from `dir` to origin's `branch`. Never forced: a push that isn't a
+ * fast-forward is rejected by git. And only that commit: whatever the clone's config says (a session can write it),
+ * no tags or submodules go along.
+ */
+export const push = (dir, branch, sha) => git(dir, 'push', '--no-follow-tags', '--recurse-submodules=no', 'origin', `${sha}:refs/heads/${branch}`);
+
+let readsAttrsFromCommit; // whether this git has --attr-source (2.40 and later)
+/**
+ * The git option that reads .gitattributes as they were at commit `sha`, for the guards' diffs: a session's own
+ * `* -diff` would otherwise turn its files binary there, hiding their lines and anything in them. [] on a git too old for it.
+ */
+export async function attrSource(sha) {
+  readsAttrsFromCommit ??= run('git', ['--version']).then(v => { const [, major, minor] = /(\d+)\.(\d+)/.exec(v) || []; return Number(major) > 2 || (Number(major) === 2 && Number(minor) >= 40); }, () => false);
+  return (await readsAttrsFromCommit) ? [`--attr-source=${sha}`] : [];
+}
 
 /**
  * `git diff --numstat -z` of what the commits in from..HEAD change themselves, leaving out what a merge of the base
  * (`exclude`) brought in: each of their own commits, and each merge's own lines (its conflict resolutions). With no
- * merge in the range, from..HEAD as it is.
+ * merge in the range, from..HEAD as it is. `attrs`: attrSource()'s option, before each diff.
  */
-export async function ownNumstat(dir, from, exclude) {
+export async function ownNumstat(dir, from, exclude, attrs = []) {
   const list = async kind => (await git(dir, 'rev-list', kind, `${from}..HEAD`, `^${exclude}`)).split('\n').filter(Boolean);
   const merges = await list('--merges');
-  if (!merges.length) return git(dir, 'diff', '--numstat', '-z', `${from}..HEAD`);
+  if (!merges.length) return git(dir, ...attrs, 'diff', '--numstat', '-z', `${from}..HEAD`);
   let out = '';
-  for (const c of await list('--no-merges')) out += await git(dir, 'diff', '--numstat', '-z', `${c}^`, c);
+  for (const c of await list('--no-merges')) out += await git(dir, ...attrs, 'diff', '--numstat', '-z', `${c}^`, c);
   for (const m of merges) {
     const lines = {};
     let file = '';
-    for (const line of (await git(dir, 'show', '--cc', '--format=', '-U0', m)).split('\n')) {
+    for (const line of (await git(dir, ...attrs, 'show', '--cc', '--format=', '-U0', m)).split('\n')) {
       const head = /^diff --cc (.+)$/.exec(line);
       if (head) { file = head[1]; continue; }
       if (!file || /^(\+\+\+|---) |^@@@/.test(line)) continue;

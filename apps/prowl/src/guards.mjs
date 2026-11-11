@@ -53,8 +53,10 @@ export const SECRET_PATTERNS = [
  * there, or '' for a branch that doesn't exist yet) drops the push; any other failure goes to Needs you.
  * `ancestor`: `base` is an ancestor of HEAD. `onBranch`: HEAD is the tip of the branch being pushed. `numstat` (-z)
  * covers everything from `base`, and `diff` (-U0) each commit since it, so a secret a later commit removes still counts.
+ * `attrsPinned`: false when git couldn't read .gitattributes from `base` for them (older than 2.40), so a changed
+ * .gitattributes could have hidden lines from both.
  */
-export function guardFailures({ base, head, ancestor, onBranch = true, remote, expected = base, numstat, diff }, { maxChangedLines, protectedPaths = [] }) {
+export function guardFailures({ base, head, ancestor, onBranch = true, remote, expected = base, numstat, diff, attrsPinned = true }, { maxChangedLines, protectedPaths = [] }) {
   const out = [];
   if ((remote || '') !== (expected || '')) {
     const now = remote ? `moved to ${short(remote)}` : 'was deleted';
@@ -69,6 +71,7 @@ export function guardFailures({ base, head, ancestor, onBranch = true, remote, e
     files.push(...paths);
   }
   if (lines > maxChangedLines) out.push({ kind: 'guard', text: `it changes ${lines} lines, over Max lines changed (${maxChangedLines})` });
+  if (!attrsPinned && files.some(f => /(?:^|\/)\.gitattributes$/.test(f))) out.push({ kind: 'guard', text: 'it changes .gitattributes, which can hide changes from these checks on a git older than 2.40 (update git, or push it yourself)' });
   const hit = files.filter(f => protectedPaths.some(g => globRe(g).test(f)));
   if (hit.length) out.push({ kind: 'guard', text: `it changes ${hit.slice(0, 3).join(', ')}, which match Paths that need a person` });
   // Added lines: "+…", or in a merge's combined diff (--cc) "++…" or " +…", without the markers. "+++ b/file" is a header.

@@ -5,6 +5,7 @@ import { cleanName, notARef, parsePaste } from './paste.mjs';
 import { createMascot, wrap } from './mascot.mjs';
 import { copyText, openExternal } from './proc.mjs';
 import { awaitingHuman, isOwn } from './reviewer/reviews.mjs';
+import { spendText } from './builder/rules.mjs';
 
 const ST = {
   reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m', title: '\x1b[1;38;5;220m', yellow: '\x1b[38;5;220m',
@@ -129,7 +130,19 @@ function windowed(list, sel, h) {
   return list.slice(start, start + h).map((item, k) => ({ item, i: start + k }));
 }
 
-function* keys(data) {
+/**
+ * Input as it arrived, split into what can be read now and the tail to hold until more comes: a paste whose end
+ * hasn't arrived, or an escape sequence cut short (a mouse report or an arrow key split across two reads, which
+ * would otherwise be read as esc and the keys after it).
+ */
+export function holdBack(data) {
+  const open = data.lastIndexOf('\x1b[200~');
+  const at = open >= 0 && data.indexOf('\x1b[201~', open) < 0 ? open : /\x1b(\[[<0-9;]*|O)?$/.exec(data)?.index ?? data.length;
+  return [data.slice(0, at), data.slice(at)];
+}
+
+/** The keys, pastes and mouse events in `data`, as onKey, onPaste and onMouse take them. */
+export function* keys(data) {
   const paste = /\x1b\[200~([\s\S]*?)\x1b\[201~/g; // bracketed paste: the text pasted, in one piece
   let at = 0;
   for (let m; (m = paste.exec(data));) {
@@ -208,9 +221,23 @@ export function startTui(app, actions, io = {}) {
 
   // Running sessions, per side.
   const live = name => (name === 'reviewer' ? reviewer.running() : builder.running());
+  // While a frame is drawn, the finished reviews are read once and each ticket's latest is looked up, not searched
+  // for: History runs to thousands of reviews, and reading it again for every row took most of a frame.
+  let drawn = null; // what the frame being drawn has read so far
+  const once = (key, read) => (drawn ? (drawn[key] ??= read()) : read());
+  const finished = () => once('finished', () => reviewer.finished()); // newest first
+  /** Each ticket's latest finished review (`any`), and its latest one that is done (`done`). */
+  const latest = () => once('latest', () => {
+    const [any, done] = [new Map(), new Map()];
+    for (const r of finished()) {
+      if (!any.has(r.ticket)) any.set(r.ticket, r);
+      if (r.status === 'done' && !done.has(r.ticket)) done.set(r.ticket, r);
+    }
+    return { any, done };
+  });
   // The Reviewer's finished reviews and, from before 2.12.0, Fix my PRs' fixes, newest first.
-  const reviewHistory = () => [...reviewer.finished(), ...(reviewer.state.fixes || []).filter(f => !['fixing', 'stopping'].includes(f.status))]
-    .sort((a, b) => (b.endedAt || b.startedAt || b.createdAt) - (a.endedAt || a.startedAt || a.createdAt));
+  const reviewHistory = () => once('history', () => [...finished(), ...(reviewer.state.fixes || []).filter(f => !['fixing', 'stopping'].includes(f.status))]
+    .sort((a, b) => (b.endedAt || b.startedAt || b.createdAt) - (a.endedAt || a.startedAt || a.createdAt)));
   const history = name => (name === 'reviewer' ? reviewHistory() : builder.history());
   const needs = name => sides[name].needs();
   const allLive = () => SIDES.reduce((n, s) => n + live(s).length, 0);
@@ -413,7 +440,7 @@ export function startTui(app, actions, io = {}) {
     const at = clampSel(RUNNING, items.length);
     const rows = windowed(items, at, Math.min(items.length, Math.max(3, Math.floor(H / 3)))).map(({ item: w, i }) => {
       const left = [cursor(i === at), [w.stopRequested ? ST.red : acc().fg, `${w.stopRequested ? '■' : spin()} `], [ST.bold, `${w.key}  `], ...(w.quick ? [[ST.cyan, 'quick  ']] : [])];
-      const right = [[ST.grey, `  ${w.stopRequested ? 'stopping' : STEP_NAMES[w.step] || 'waiting'} · ${plural(w.turns?.length || 0, 'turn')} · $${(w.costUsd || 0).toFixed(2)} · ${dur(Date.now() - (w.claimedRoundAt || w.claimedAt || w.createdAt))} `]];
+      const right = [[ST.grey, `  ${w.stopRequested ? 'stopping' : STEP_NAMES[w.step] || 'waiting'} · ${plural(w.turns?.length || 0, 'turn')} · ${spendText(w)} · ${dur(Date.now() - (w.claimedRoundAt || w.claimedAt || w.createdAt))} `]];
       return onClick(spread([...left, ['', trunc(w.title, W - width(left) - width(right) - 1)]], right, W), pick(RUNNING, i));
     });
     const w = items[at];
@@ -429,7 +456,7 @@ export function startTui(app, actions, io = {}) {
   }
 
   // PRs given Prowl's stamp with Approve PRs off or on your own PR, flagged on the ticket's latest review until it is reviewed again.
-  const waiting = r => (reviewer.finished().find(x => x.ticket === r.ticket && x.status === 'done') === r ? awaitingHuman(r, app.cfg.approvals) : []);
+  const waiting = r => (latest().done.get(r.ticket) === r ? awaitingHuman(r, app.cfg.approvals) : []);
   // The review's PRs, plus earlier-approved ones it carried over that still await a human; an old fix's one PR.
   const prsOf = r => (r.pr ? [r.pr] : [...r.prs, ...(r.contextPrs || []).filter(p => waiting(r).includes(p.url))]);
 
@@ -478,7 +505,7 @@ export function startTui(app, actions, io = {}) {
       ...prs.slice(0, 4).map((p, i) => [label(i ? '' : 'PRs'), [ST.link, p.url, p.url], [ST.grey, `  ${p.title || ''}`]]),
       ...(w.plan ? [[label('Plan'), [ST.link, w.plan, pathToFileURL(w.plan).href]]] : []),
     ];
-    rows.push([label('Status'), workStatus(w), [ST.grey, `  · $${(w.costUsd || 0).toFixed(2)}${w.note ? ` · ${w.note}` : ''}${w.summary ? ` · ${w.summary}` : ''}`]]);
+    rows.push([label('Status'), workStatus(w), [ST.grey, `  · ${spendText(w)}${w.note ? ` · ${w.note}` : ''}${w.summary ? ` · ${w.summary}` : ''}`]]);
     return rows;
   }
 
@@ -492,7 +519,7 @@ export function startTui(app, actions, io = {}) {
       if (ui.side === 'builder') {
         const prs = r.prs?.length || 0;
         const head = [cursor(i === at), [ST.grey, `${stamp(r.updatedAt || r.createdAt)}  `], [ST.bold, r.key.padEnd(11)], [workStatus(r)[0], workStatus(r)[1].padEnd(18)],
-          [ST.grey, `${r.quick ? 'quick · ' : ''}${prs ? `${plural(prs, 'PR')} · ` : ''}$${(r.costUsd || 0).toFixed(2)}  `]];
+          [ST.grey, `${r.quick ? 'quick · ' : ''}${prs ? `${plural(prs, 'PR')} · ` : ''}${spendText(r)}  `]];
         return onClick([...head, ['', trunc(r.title, W - width(head))]], pick(HISTORY, i));
       }
       if (r.pr) {
@@ -509,7 +536,7 @@ export function startTui(app, actions, io = {}) {
         cursor(i === at), [ST.grey, `${stamp(r.endedAt)}  `], [ST.bold, r.ticket.padEnd(11)], [vs, vt.padEnd(18)], ...counts,
         [ST.grey, `${r.reviewNo > 1 || Number(s.fixed) > 0 ? `· fixed ${s.fixed ?? '?'} ` : ''}${r.reviewNo > 1 ? `· re-review #${r.reviewNo}` : ''}  `],
         ...(waiting(r).length ? [[ST.yellow, `⚑ ${plural(waiting(r).length, 'PR')} to approve  `]] : []),
-        ...(reviewer.state.capped?.[r.ticket] && reviewer.finished().find(x => x.ticket === r.ticket) === r ? [[ST.yellow, '⚑ round cap reached  ']] : []),
+        ...(reviewer.state.capped?.[r.ticket] && latest().any.get(r.ticket) === r ? [[ST.yellow, '⚑ round cap reached  ']] : []),
       ];
       return onClick([...head, ['', trunc(r.title, W - width(head))]], pick(HISTORY, i));
     });
@@ -970,6 +997,11 @@ export function startTui(app, actions, io = {}) {
   }
 
   function rows(advance, W, H) {
+    drawn = {};
+    try { return frameRows(advance, W, H); } finally { drawn = null; }
+  }
+
+  function frameRows(advance, W, H) {
     if (!visible(ui.side)) ui.side = 'reviewer'; // the Builder was switched off with nothing left to show
     if (!hasView(view())) ui.view[ui.side] = RUNNING;
     if (ui.edit?.form && currentItem()?.id !== ui.edit.item) ui.edit = null; // left Needs you, or the item went
@@ -1009,12 +1041,13 @@ export function startTui(app, actions, io = {}) {
     return cut < 0 || !project || !team ? 'Write it as Project / Team, e.g. My Project / My Team' : { project, team };
   }
 
+  // app.cfg is read when an edit is saved, not when it starts: config.json is re-read while you type, into a new object.
   function editBoard(index) {
-    const boards = app.boards();
     if (index == null) sel()[CONFIG] = configRows().findIndex(f => f.addBoard);
-    startEdit(index == null ? '' : app.tracker().boardLabel(boards[index]), v => {
+    startEdit(index == null ? '' : app.tracker().boardLabel(app.boards()[index]), v => {
       const b = parseBoard(v);
       if (typeof b === 'string') return b;
+      const boards = app.boards();
       if (index == null) boards.push(b);
       else boards[index] = b;
       saved('Board saved. r polls now.');
@@ -1085,6 +1118,8 @@ export function startTui(app, actions, io = {}) {
       const t = e.build ? text.replace(/\r\n?/g, '\n') : text.replace(/\s+/g, ' ');
       e.value = e.value.slice(0, e.cursor) + t + e.value.slice(e.cursor);
       e.cursor += t.length;
+      const it = e.form && currentItem();
+      if (it) setText(formOf(it), e.field, e.value); // pasting is typing: Submit sends the form's text, not the box's
       return undefined;
     }
     if (ui.notes || ui.confirm || ui.keys || offerOpen()) return undefined;
@@ -1093,20 +1128,18 @@ export function startTui(app, actions, io = {}) {
 
   function configKey(k) {
     const f = configRows()[sel()[CONFIG]];
-    const c = app.cfg;
     if (k === 'a') return editBoard(null);
     if (f.switch) return k === 'enter' ? toggleSide(f.switch) : undefined;
     if (f.file) return k === 'enter' ? openExternal(f.file) : undefined;
     if (k === 'd' && f.board != null) {
-      const boards = app.boards();
-      ui.confirm = { text: `Remove board ${app.tracker().boardLabel(boards[f.board])}?`, yes: () => { boards.splice(f.board, 1); saved('Board removed.'); } };
+      ui.confirm = { text: `Remove board ${app.tracker().boardLabel(app.boards()[f.board])}?`, yes: () => { app.boards().splice(f.board, 1); saved('Board removed.'); } };
       return undefined;
     }
     if (k !== 'enter') return undefined;
     if (f.addBoard) return editBoard(null);
     if (f.board != null) return editBoard(f.board);
     if (f.type === 'secret') {
-      if (!c.jira.email) return flash('Fill in the Jira email first.');
+      if (!app.cfg.jira.email) return flash('Fill in the Jira email first.');
       return startEdit('', v => {
         if (!v) return 'Paste the token, or esc to keep the saved one';
         const err = actions.saveToken(v);
@@ -1115,20 +1148,20 @@ export function startTui(app, actions, io = {}) {
         return '';
       }, true);
     }
-    const cur = getPath(c, f.key);
+    const cur = getPath(app.cfg, f.key);
     if (f.type === 'list') return openExternal(CONFIG_PATH);
-    if (f.type === 'bool') { setPath(c, f.key, !cur); return saved(); }
-    if (f.type === 'enum') { setPath(c, f.key, f.values[(f.values.indexOf(cur) + 1) % f.values.length]); return saved(); }
+    if (f.type === 'bool') { setPath(app.cfg, f.key, !cur); return saved(); }
+    if (f.type === 'enum') { setPath(app.cfg, f.key, f.values[(f.values.indexOf(cur) + 1) % f.values.length]); return saved(); }
     return startEdit(String(cur ?? ''), v => {
       if (!v && !f.empty) return 'Cannot be empty';
       if (f.type === 'int') {
         const n = Number(v);
         if (!Number.isInteger(n) || n < f.min || n > f.max) return `Enter a whole number from ${f.min} to ${f.max}`;
-        setPath(c, f.key, n);
+        setPath(app.cfg, f.key, n);
       } else {
         const ok = f.valid ? f.valid(v) : true;
         if (ok !== true) return ok;
-        setPath(c, f.key, v);
+        setPath(app.cfg, f.key, v);
       }
       saved();
       return '';
@@ -1264,7 +1297,6 @@ export function startTui(app, actions, io = {}) {
     return ui.side === 'reviewer' ? reviewerKey(k, r) : builderKey(k, r);
   }
 
-  /** A mouse event: the wheel moves like ↑↓, and a left click does what's under it (hitAt). */
   /**
    * A mouse event. The wheel moves like ↑↓, and the pointer lights up what's clickable under it (hovered). With the
    * left button, a press and release in place is a click (what's under it, hitAt), and a drag selects text,
@@ -1348,16 +1380,18 @@ export function startTui(app, actions, io = {}) {
   stdin.setRawMode(true);
   stdin.setEncoding('utf8');
   stdin.resume();
-  let held = ''; // the start of a paste whose end hasn't arrived yet
-  stdin.on('data', chunk => {
-    let data = held + chunk;
-    held = '';
-    const open = data.lastIndexOf('\x1b[200~');
-    if (open >= 0 && data.indexOf('\x1b[201~', open) < 0) { held = data.slice(open); data = data.slice(0, open); }
+  let held = ''; // the start of a paste or of an escape sequence whose end hasn't arrived yet
+  let lone; // the timer that reads a held escape as it is: esc alone is the key, with nothing to follow
+  const read = (chunk, asIs = false) => {
+    clearTimeout(lone);
+    const [data, rest] = asIs ? [held + chunk, ''] : holdBack(held + chunk);
+    held = rest;
+    if (held && !held.startsWith('\x1b[200~')) lone = setTimeout(() => read('', true), 50);
     let moved = true; // only the pointer moving: repainted at most every 30ms, so a quick sweep can't flood the terminal
     for (const k of keys(data)) { input(k); if (!(k.mouse & 32)) moved = false; }
     if (!moved || Date.now() - painted > 30) paint(false);
-  });
+  };
+  stdin.on('data', chunk => read(chunk));
   out.on('resize', () => paint(false));
   const timer = setInterval(() => paint(true), 100);
   paint(true);
@@ -1365,6 +1399,7 @@ export function startTui(app, actions, io = {}) {
   return {
     restore() {
       clearInterval(timer);
+      clearTimeout(lone);
       out.write('\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[?2026l\x1b[?25h\x1b[?1049l\x1b[23;0t'); // …and restore the tab title
       try { stdin.setRawMode(false); } catch { /* not a TTY any more */ }
       stdin.pause();

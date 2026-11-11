@@ -7,7 +7,7 @@ import path from 'node:path';
 import { HOME, readChecks, writeJson } from '../config.mjs';
 import { matchChecks, runChecks, TAIL } from '../checks.mjs';
 import { actionable, appendAnswer, parkedUrls, pastAnswers, readAnswers, repliesToPost, stripParked, validateFeedback } from '../feedback.mjs';
-import { addWorktree, fetchBranch, git, ownNumstat, push, remoteSha, removeWorktree, short, succeeds } from '../git.mjs';
+import { addWorktree, attrSource, fetchBranch, git, ownNumstat, push, remoteSha, removeWorktree, short, succeeds } from '../git.mjs';
 import * as github from '../github.mjs';
 import { branchRefusal, guardFailures, prRefusal } from '../guards.mjs';
 import { createLabels, matching } from '../labels.mjs';
@@ -118,21 +118,34 @@ export function createBuilder(app, deps) {
     return item;
   }
 
-  /** Runs one async step of `w`, one at a time. NeedsYou goes to Needs you; anything else is retried in a minute. */
+  /**
+   * Runs one async step of `w`, one at a time. NeedsYou goes to Needs you; anything else is retried in a minute, and
+   * a step that fails several times running is left to you.
+   */
   function step(w, fn) {
     w._busy = true;
-    const p = fn(w).catch(e => {
+    const p = fn(w).then(() => { w.failures = 0; }, e => {
       if (e instanceof Stopped) return stopNow(w);
       if (e instanceof NeedsYou) return raise(w, e.kind, e.message, e.fields);
-      // Before its first session a ticket is retried three times, then left to you instead of holding a slot quietly.
-      if (!w.sessionStarted && w.turnKind !== 'round') {
-        w.preFailures = (w.preFailures || 0) + 1;
-        if (w.preFailures >= 3) return raise(w, 'failed', `Prowl couldn't get ${w.key} ready to build: ${e.message}`, { retry: w.step });
+      // Three tries before its first session, five after, then it is yours: not a slot held quietly, or your checks run again every minute.
+      const early = !w.sessionStarted && w.turnKind !== 'round';
+      w.failures = (w.failures || 0) + 1;
+      if (w.failures >= (early ? 3 : 5)) {
+        return raise(w, 'failed', early ? `Prowl couldn't get ${w.key} ready to build: ${e.message}` : `Prowl keeps failing on ${w.key} (${w.failures} tries): ${e.message}`, { retry: w.step });
       }
       w._retryAt = Date.now() + 60_000;
       log('error', `${w.key}: ${e.message}; retrying in a minute`, `work:${w.uid}`);
       return undefined;
-    }).finally(() => { w._busy = false; });
+    }).finally(() => {
+      w._busy = false;
+      // s while this step was finishing, and nothing is left to stop before: work waiting on you ends as asked; work
+      // that got done stays done, rather than the stop hitting whatever the ticket does next.
+      if (!w.stopRequested || w.step) return undefined;
+      if (w.status === 'needs-you') return stopNow(w);
+      w.stopRequested = false;
+      touch(w);
+      return log('info', `${w.key}: finished before the stop reached it`);
+    });
     (side._inflight ??= new Set()).add(p);
     p.finally(() => side._inflight.delete(p));
     return p;
@@ -161,7 +174,9 @@ export function createBuilder(app, deps) {
       const where = tracker.boardLabel(board);
       let tickets;
       try {
-        ({ tickets } = await tracker.findTickets(cfg(), board, isStart, { assignedToMe: b().assignedToMe }));
+        let unread;
+        ({ tickets, unread } = await tracker.findTickets(cfg(), board, isStart, { assignedToMe: b().assignedToMe }));
+        if (unread) log('warn', `${where}: only its first 2000 open labelled issues are read, and it has ${unread} more: a ticket tagged among those isn't seen`, `unread:${where}`);
       } catch (e) {
         side.lastError = e.message;
         log('error', `${where}: ${e.message}`, `board:${where}`);
@@ -314,7 +329,7 @@ export function createBuilder(app, deps) {
   function labelPrs(w, prs, add) {
     const mine = [b().tags.inProgress, cfg().tags.trigger];
     labels.own('builder', w.uid, prs.map(p => p.url));
-    for (const p of prs) labels.set('builder', w.uid, p, add, mine.filter(t => t !== add), cfg().tagMatchMaxTypos);
+    for (const p of prs) labels.set('builder', w.uid, p, add, mine.filter(t => t !== add), cfg().tagMatchMaxTypos, [cfg().tags.trigger]);
   }
 
   /** Why a ticketless build's round waits (a PR labelled In Review or Ready for Review, or a label write still queued), or ''. */
@@ -340,7 +355,7 @@ export function createBuilder(app, deps) {
     }
     try {
       if (byLabels(w)) labelPrs(w, w.prs || [], ''); // the queue retries a write that fails
-      else await trackerOf(w).retag(cfg(), w.ref, tags().owned, add);
+      else await trackerOf(w).retag(cfg(), w.ref, tags().mine, add); // never the Reviewer's tags: a review asked for or under way is someone else's
     } catch (e) {
       Object.assign(w, { step: 'retag', retagTo: add, _retryAt: Date.now() + 60_000 });
       touch(w);
@@ -496,13 +511,17 @@ export function createBuilder(app, deps) {
       if (taken.has(id)) continue;
       taken.add(id);
       if (await gh.branchHadPr(repo, branch)) continue; // it has (or had) a PR: not a branch with no PR
-      const base = await gh.defaultBranch(repo);
-      if (branch === base) continue;
+      // Its base, as for a build: the Base branches rule for the repo, else the default branch. Its PR opens against it.
+      const defaultBranch = await gh.defaultBranch(repo);
+      const pick = rules.pickBase(b().base, repo, { remote: lists[repo] ??= await gh.repoBranches(repo).catch(() => []), defaultBranch });
+      if (pick.error) throw new NeedsYou('conflict', `${w.key}: ${pick.error}.`, { retry: 'adopt' });
+      const { base } = pick;
+      if (branch === base || branch === defaultBranch) continue;
       const vs = await gh.branchVsBase(repo, base, branch);
       if (!vs?.ahead) continue;
-      const entry = { repo, branch, head: vs.head, base, defaultBranch: base, stat: { files: vs.files, additions: vs.additions, deletions: vs.deletions } };
+      const entry = { repo, branch, head: vs.head, base, defaultBranch, stat: { files: vs.files, additions: vs.additions, deletions: vs.deletions } };
       const theirs = !vs.authors.some(a => a && a.toLowerCase() === app.me.toLowerCase());
-      const why = theirs ? `${repo} ${branch} has no commits of yours ahead of ${base}` : branchRefusal(branch, base, b().protectedBranches) && `${repo}'s ${branchRefusal(branch, base, b().protectedBranches)}`;
+      const why = theirs ? `${repo} ${branch} has no commits of yours ahead of ${base}` : branchRefusal(branch, defaultBranch, b().protectedBranches) && `${repo}'s ${branchRefusal(branch, defaultBranch, b().protectedBranches)}`;
       if (why) {
         found.context.push({ ...entry, why });
         log('info', `${w.key}: ${why}; it is context only`);
@@ -566,7 +585,7 @@ export function createBuilder(app, deps) {
     const answers = pastAnswers(readAnswers(answersPath), [w.title, w.instructions || ''].join('\n'), repos.map(r => r.repo));
     if (answers.length) fs.writeFileSync(path.join(w.briefDir, 'answers.md'), brief.answersMd(answers));
     Object.assign(w, {
-      repos, sessionId: randomUUID(), sessionStarted: false, sessionCostUsd: 0, turnKind: 'finish', step: 'turn',
+      repos, sessionId: randomUUID(), sessionStarted: false, sessionCostUsd: 0, turnKind: 'finish', step: 'turn', planApproved: false,
       prompt: brief.finishPrompt({ briefDir: w.briefDir, ticket: w, repos, existing, listed: s.listed, context: s.context, unavailable, answers: answers.length > 0, instructions: w.ref ? w.instructions || '' : '' }), // without a ticket, they are in quick.md
     });
     touch(w);
@@ -672,10 +691,13 @@ export function createBuilder(app, deps) {
   /** Settles a turn whose session has ended: cost and caps, then what its result.json asks for. */
   async function settle(w) {
     const r = w._result;
-    const cost = r?.total_cost_usd || 0;
+    // No result event from a turn that got as far as the model (killed by a cap or a stop, or crashed): what it spent
+    // isn't reported, so the caps count the whole of what it was allowed, and History says the cost isn't known.
+    const unknown = !r && (w._activity || []).some(a => !a.error);
+    const cost = unknown ? w.turnBudgetUsd || 0 : r?.total_cost_usd || 0;
     const t = w.turns.at(-1);
     if (t && t.endedAt == null) { // once per turn, even if this step runs again after a restart
-      Object.assign(t, { endedAt: Date.now(), costUsd: cost });
+      Object.assign(t, { endedAt: Date.now(), costUsd: cost, ...(unknown && { costUnknown: true }) });
       w.costUsd = (w.costUsd || 0) + cost;
       w.sessionCostUsd = (w.sessionCostUsd || 0) + cost;
     }
@@ -686,7 +708,10 @@ export function createBuilder(app, deps) {
     const file = path.join(w.briefDir, 'result.json');
     const result = readJson(file);
     const why = w.spawnError || (!result ? (fs.existsSync(file) ? 'it is not valid JSON' : 'it wrote no result.json')
-      : w.turnKind === 'round' ? validateFeedback(result) : rules.validateBuild(result, w.briefDir));
+      : w.turnKind === 'round' ? validateFeedback(result) : rules.validateBuild(result, w.briefDir))
+      // A build can't push before approve() made its branches. A finish session's branches are there from the start,
+      // so its plan is held to the same step here.
+      || (w.turnKind === 'finish' && result.status === 'done' && !w.planApproved && 'it says done before its plan was approved: end with needs-approval first');
     if (why) {
       if (w.invalidAsked) throw new NeedsYou('failed', `The session for ${w.key} ended without a usable result twice: ${why}.`, { retry: 'continue' });
       w.invalidAsked = true;
@@ -760,7 +785,7 @@ export function createBuilder(app, deps) {
   }
 
   /** Whether `sha` is a commit Prowl pushed for some ticket, so a rebuild may step past the branch it is on. */
-  const pushedByProwl = sha => records().some(r => r.repos?.some(x => x.pushedSha === sha));
+  const pushedByProwl = sha => records().some(r => r.repos?.some(x => x.pushedSha === sha) || r.pushedShas?.includes(sha));
 
   async function approve(w) {
     checkStop(w);
@@ -791,6 +816,7 @@ export function createBuilder(app, deps) {
       branches.push(rec);
       touch(w);
     }
+    w.planApproved = true;
     log('ok', `${w.key}: plan approved; building on ${branches.map(r => `${r.repo} ${r.branch} (from ${r.base})`).join(', ')}`);
     next(w, 'turn', brief.resume.approve(branches));
   }
@@ -822,16 +848,20 @@ export function createBuilder(app, deps) {
     }
     for (const rec of recs) {
       const head = (await git(rec.worktree, 'rev-parse', 'HEAD')).trim();
+      const attrs = await attrSource(base(rec)); // .gitattributes as they were before the session: its own can't turn its files binary
       const failed = guardFailures({
         base: base(rec), head, remote: await remoteSha(rec.worktree, rec.branch), expected: expected(rec),
         ancestor: await succeeds(rec.worktree, 'merge-base', '--is-ancestor', base(rec), 'HEAD'),
         onBranch: (typeof onBranch === 'function' ? onBranch(rec) : onBranch) ? (await git(rec.worktree, 'symbolic-ref', '--short', 'HEAD').catch(() => '')).trim() === rec.branch : true,
         // With the base merged in, only the session's own changes count: not what the merge brought from the base.
-        numstat: rec.mergeBase ? await ownNumstat(rec.worktree, base(rec), rec.mergeBase)
-          : await git(rec.worktree, 'diff', '--numstat', '-z', `${base(rec)}..HEAD`), // -z: paths unquoted
+        numstat: rec.mergeBase ? await ownNumstat(rec.worktree, base(rec), rec.mergeBase, attrs)
+          : await git(rec.worktree, ...attrs, 'diff', '--numstat', '-z', `${base(rec)}..${head}`), // -z: paths unquoted
         // Every commit pushed, not just the end state, and what a merge adds itself (--cc: a conflict's resolution).
-        diff: await git(rec.worktree, 'log', '-p', '--cc', '-U0', '--format=', `${base(rec)}..HEAD`, ...(rec.mergeBase ? [`^${rec.mergeBase}`] : [])),
+        // --text and --no-textconv: every file's lines as they are, whatever git or the clone's config takes it for.
+        diff: await git(rec.worktree, ...attrs, 'log', '-p', '--cc', '-U0', '--text', '--no-textconv', '--format=', `${base(rec)}..${head}`, ...(rec.mergeBase ? [`^${rec.mergeBase}`] : [])),
+        attrsPinned: attrs.length > 0,
       }, b());
+      rec._checked = head; // the commit these guards saw: the one that is pushed
       if (failed[0]?.kind === 'moved') return { moved: `${rec.repo}: ${failed[0].text}` };
       if (failed.length) throw new NeedsYou('guard', `Prowl didn't push ${w.key} to ${rec.repo}: ${failed.map(x => x.text).join('; ')}.`, { retry: 'continue' });
     }
@@ -860,10 +890,16 @@ export function createBuilder(app, deps) {
       checkStop(w);
       const refused = branchRefusal(rec.branch, rec.defaultBranch, b().protectedBranches);
       if (refused) throw new NeedsYou('guard', `Prowl won't push to ${rec.repo}'s ${refused}.`, { retry: 'publish' });
-      const head = (await git(rec.worktree, 'rev-parse', 'HEAD')).trim();
+      const head = rec._checked;
       if (rec.pushedSha !== head) {
         await ensureClone(cfg(), rec.repo, clone); // its push URL still leads to the repo
-        await push(rec.worktree, rec.branch); // never forced
+        try {
+          await push(rec.worktree, rec.branch, head); // never forced
+        } catch (e) {
+          // The remote answers, so it refused the push (a rule, push protection, no access): trying again won't change that.
+          if ((await remoteSha(rec.worktree, rec.branch).catch(() => null)) === null) throw e; // not reachable: retried in a minute
+          throw new NeedsYou('failed', `${rec.repo} refused Prowl's push of ${w.key} to ${rec.branch}: ${e.message.split('\n')[0]}.`, { retry: 'publish' });
+        }
         rec.pushedSha = head;
         touch(w);
         log('ok', `${w.key}: pushed ${short(head)} to ${rec.repo} ${rec.branch}`);
@@ -1117,7 +1153,7 @@ export function createBuilder(app, deps) {
     // Its feedback stays due (lastActivityAt as it was): the next round starts from the new head.
     const drop = async why => {
       if (byLabels(w)) labelPrs(w, w.round.prs, '');
-      else await trackerOf(w).retag(cfg(), w.ref, tags().owned, '');
+      else await trackerOf(w).retag(cfg(), w.ref, tags().mine, '');
       await tidy(w, [], w.round.prs);
       Object.assign(w, { status: 'following', step: null, round: null, roundPrs: [] });
       touch(w);
@@ -1140,20 +1176,21 @@ export function createBuilder(app, deps) {
         checkStop(w);
         const refused = branchRefusal(p.branch, p.defaultBranch, b().protectedBranches);
         if (refused) throw new NeedsYou('guard', `Prowl won't push to ${p.repo}'s ${refused}.`);
-        const head = (await git(p.worktree, 'rev-parse', 'HEAD')).trim();
+        const head = p._checked;
         try {
           await ensureClone(cfg(), p.repo, clone); // its push URL still leads to the repo
         } catch (e) {
           throw new NeedsYou('guard', `Prowl didn't push ${w.key} to ${prName(p)}: ${e.message}.`, { retry: 'push-round' });
         }
         try {
-          await push(p.worktree, p.branch); // never forced
+          await push(p.worktree, p.branch, head); // never forced
         } catch (e) {
           const now = await remoteSha(p.worktree, p.branch).catch(() => null);
           if (now === null || now === (p.pushedSha || p.headSha)) throw e; // not a moved branch: retried in a minute
           return drop(`the push to ${prName(p)} was rejected (${e.message.split('\n')[0]})`);
         }
         p.pushedSha = head;
+        (w.pushedShas ??= []).push(head); // kept once the round is over: a rebuild steps past a branch Prowl pushed to
         w.lastPushAt = Date.now();
         const surveyed = w.survey?.prs.find(x => x.url === p.url);
         if (surveyed) surveyed.head = head; // the finish session that follows a pick-up's round starts from here
@@ -1228,8 +1265,16 @@ export function createBuilder(app, deps) {
 
   // ---- Stopping, and Needs you ----
 
-  /** Stops `w` where it is: removes In Development (unless `untag` is false) and its worktrees, and records the cost. */
+  // Whether `w` holds its ticket's In Development now: from its claim until its PRs open, and for a round it claimed.
+  // A ticket still waiting to be claimed, or only followed, carries nobody's tags of this run's.
+  const holdsClaim = w => Boolean((w.claimedAt && !w.prsOpenedAt) || w.roundClaimed || w.round);
+
+  /**
+   * Stops `w` where it is: removes the In Development it holds (unless `untag` is false) and its worktrees, and
+   * records the cost.
+   */
   async function stopNow(w, why = 'stopped by you', untag = true) {
+    untag &&= holdsClaim(w);
     if (w.step === 'session' && session.alive(w)) session.kill(w);
     if (w.discussion) { session.kill(w.discussion); delete w.discussion; }
     side.state.needs = side.state.needs.filter(n => n.recordId !== w.uid);
@@ -1254,7 +1299,7 @@ export function createBuilder(app, deps) {
     side.state.needs = side.state.needs.filter(n => n.id !== item.id);
     if (!w) return save();
     if (item.kind === 'question' || item.kind === 'blocked') {
-      w.collected.answers.push({ id: item.qid || 'Q1', answer: text || (item.kind === 'blocked' ? 'go on as you think best' : `use your default${item.recommended ? ` (${item.recommended})` : ''}`) });
+      w.collected.answers.push({ id: item.qid || 'Q1', answer: text || (item.kind === 'blocked' ? 'go on as you think best' : `use your default${[item.recommended].flat().filter(Boolean).length ? ` (${[item.recommended].flat().filter(Boolean).join('; ')})` : ''}`) });
       if (text) appendAnswer(answersPath, { ticket: w.key, repos: (w.turnKind === 'round' ? w.round?.prs : w.repos || [])?.map(r => r.repo) || [], question: item.question, answer: text });
     } else if (item.kind === 'repos') {
       w.collected.unavailable.push({ repo: item.repo, why: text || "not available; do without it" });
@@ -1267,7 +1312,7 @@ export function createBuilder(app, deps) {
       w.invalidAsked = false;
       w.checkFails = 0;
       w.ciFails = 0;
-      w.preFailures = 0;
+      w.failures = 0;
       if (!item.retry || item.retry === 'continue') next(w, 'turn', brief.resume.continue(text));
       else next(w, item.retry);
       if (item.retry === 'ci') { w.ciSince = Date.now(); touch(w); } // checks again, with the wait from now

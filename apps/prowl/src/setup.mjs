@@ -78,7 +78,7 @@ async function github(cfg) {
   if (await works('gh', ['auth', 'status']) === null) await interactive('gh', ['auth', 'login', '--hostname', 'github.com', '--git-protocol', 'https', '--web']);
   const login = (await works('gh', ['api', 'user', '--jq', '.login']))?.trim();
   if (!login) { bad('not signed in to GitHub: run gh auth login'); return false; }
-  ok(`signed in as ${login}. Reviews post from this account; your own PRs are skipped unless you turn on Review my own PRs (Config, 3).`);
+  ok(`signed in as ${login}. Reviews post from this account; your own PRs are skipped unless you turn on Review my own PRs (Config, 4).`);
   const orgs = (await works('gh', ['api', 'user/orgs', '--paginate', '--jq', '.[].login']))?.split('\n').filter(Boolean) || [];
   const owners = [...orgs, login];
   owners.forEach((o, i) => console.log(`    ${i + 1} = ${o}${o === login ? ' (your own repos)' : ''}`));
@@ -177,7 +177,13 @@ async function firstBoard(cfg) {
 }
 
 export async function setup(argv) {
-  const cfg = loadConfig();
+  let cfg;
+  try {
+    cfg = loadConfig();
+  } catch (e) { // config.json doesn't parse, or a setting in it can't be used: the message names it
+    console.error(`${e.message}\nFix it there, then run prowl --setup again.`);
+    return 1;
+  }
   console.log(`${B('Prowl setup')}: signs you in and saves your settings to ${CONFIG_PATH}.`);
   const preset = argv[argv.indexOf('--task-board') + 1];
   step('Task board');

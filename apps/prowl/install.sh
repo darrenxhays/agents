@@ -64,7 +64,7 @@ fi
 
 # Replacing Prowl's files under a running copy would break the reviews it starts.
 if [ -f "$PROWL_DATA/lock" ] && kill -0 "$(cat "$PROWL_DATA/lock")" 2>/dev/null; then
-  die "Prowl is running. Quit it (press q) first, then run the installer again."
+  die "Prowl is running. Quit it (press q) first, then run the installer again. If it isn't running, delete $PROWL_DATA/lock."
 fi
 
 if [ -z "$TASK_BOARD" ]; then
@@ -190,9 +190,14 @@ fi
 say "Installing Prowl into $APP"
 if [ "$SRC" != "$APP" ]; then
   case "$APP" in */prowl) ;; *) die "unexpected install folder: $APP" ;; esac
-  rm -rf "$APP"
-  mkdir -p "$APP"
-  cp -R "$SRC/." "$APP/"
+  # The new copy is made beside the old one and takes its place by rename, so a copy that fails or is interrupted
+  # leaves the Prowl that was there.
+  rm -rf "$APP.new" "$APP.old"
+  mkdir -p "$APP.new"
+  cp -R "$SRC/." "$APP.new/"
+  if [ -e "$APP" ]; then mv "$APP" "$APP.old"; fi
+  mv "$APP.new" "$APP"
+  rm -rf "$APP.old"
 fi
 mkdir -p "$BIN"
 cat >"$BIN/prowl" <<EOF

@@ -20,13 +20,13 @@ export const CONFIG_FIELDS = [
   { file: CONFIG_PATH, label: 'Settings file', help: `Every setting on this page, as JSON, each with a comment saying what it does. ${opens}` },
   { switch: 'reviewer', label: 'Reviewer', help: 'Reviews the PRs of tickets tagged for review. enter turns it on or off, at once. Off: nothing new is claimed or started, and running reviews finish.' },
   { switch: 'builder', label: 'Builder', help: 'Builds tickets tagged to start, opens their PRs and follows them through review. Its tab shows once it is on. enter turns it on or off, at once. Off: nothing new is claimed or started, and running sessions finish.' },
-  { key: 'pollSeconds', label: 'Poll interval (sec)', type: 'int', min: 30, max: 86400, help: 'How often the boards are checked, and config.json re-read. r polls the side in view now.' },
+  { key: 'pollSeconds', label: 'Poll interval (sec)', type: 'int', min: 30, max: 86400, help: 'How often the boards are checked. r polls the side in view now.' },
   { key: 'dryRun', label: 'Dry run', type: 'bool', help: 'Log what would be reviewed or built, without changing tags or starting sessions.' },
 
   { heading: 'Upkeep and display' },
   { key: 'autoUpdate', label: 'Auto-update', type: 'bool', help: 'Install a newer Prowl release before launching. It waits while sessions from an earlier launch are still running.' },
   { key: 'logRetentionDays', label: 'Keep logs (days)', type: 'int', min: 0, max: 3650, help: 'Session logs older than this are deleted, and poller.log rolls over to poller.log.1 past 5 MB. Reports are always kept. 0 = keep everything.' },
-  { key: 'hoot', label: 'Hoot', type: 'bool', help: 'on: Hoot the owl walks along the top of the screen (in a window 27 rows or taller) and says what Prowl is doing. off: no owl, and the Boards and Needs you cards take the full width of his strip.' },
+  { key: 'hoot', label: 'Hoot', type: 'bool', help: 'on: Hoot the owl sits at the top of the screen (in a window 27 rows or taller) and says what Prowl is doing. off: no owl, and the Boards and Needs you cards take the full width of his strip.' },
 
   { heading: 'Boards' },
   { key: 'taskBoard', label: 'Task board', type: 'enum', values: ['ado', 'jira'], names: { ado: 'Azure DevOps', jira: 'Jira' }, help: 'Where tickets are watched, for both sides: Azure DevOps or Jira Cloud. enter switches. Each keeps its own boards.' },

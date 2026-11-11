@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import { globRe } from '../checks.mjs';
 import { actionable, questionShape } from '../feedback.mjs';
 import { checksState } from '../github.mjs';
+import { insideRoots } from '../fence.mjs';
 import { norm, tagMatches } from '../match.mjs';
 
 /**
@@ -16,7 +17,8 @@ export function builderTags(cfg) {
   const { trigger: done, inProgress: reviewing } = cfg.tags;
   const ours = t => [inProgress, done, reviewing].some(x => norm(x) === norm(t));
   const isStart = t => !ours(t) && tagMatches(t, start, cfg.tagMatchMaxTypos);
-  return { isStart, ours, owned: t => isStart(t) || ours(t), has: (tags, tag) => tags.some(t => norm(t) === norm(tag)) };
+  // `owned`: every tag a claim swaps for In Development. `mine`: the Builder's own two, all that a stop or a dropped round takes off.
+  return { isStart, ours, owned: t => isStart(t) || ours(t), mine: t => isStart(t) || norm(t) === norm(inProgress), has: (tags, tag) => tags.some(t => norm(t) === norm(tag)) };
 }
 
 /** A branch-name slug of a ticket title: lowercase words joined by dashes, at most 40 characters. */
@@ -51,12 +53,18 @@ export function branchForTicket(branch, key) {
   return Boolean(jira) && new RegExp(`(?<![a-z0-9])${jira[1]}[-_]?${jira[2]}(?!\\d)`, 'i').test(branch);
 }
 
-/** Compares branch names as versions: release/1.10 sorts after release/1.9. */
+/**
+ * Compares branch names as versions: release/1.10 sorts after release/1.9, and release/1.10.1 after release/1.10. A
+ * suffix sorts before the plain name: release/2.0-rc1 (or -hotfix) comes before release/2.0.
+ */
 export function versionCompare(a, b) {
   const parts = s => String(s).split(/(\d+)/).filter(Boolean);
   const [x, y] = [parts(a), parts(b)];
   for (let i = 0; i < Math.max(x.length, y.length); i++) {
-    if (x[i] === undefined || y[i] === undefined) return x[i] === undefined ? -1 : 1;
+    if (x[i] === undefined || y[i] === undefined) {
+      const [more, longer] = x[i] === undefined ? [y, -1] : [x, 1]; // which name goes on, and the result if it sorts after
+      return /^\d+$/.test(more[i]) || (more[i] === '.' && /^\d+$/.test(more[i + 1] || '')) ? longer : -longer;
+    }
     const [m, n] = [/^\d+$/.test(x[i]), /^\d+$/.test(y[i])];
     const c = m && n ? Number(x[i]) - Number(y[i]) : x[i].localeCompare(y[i]);
     if (c) return c;
@@ -114,6 +122,8 @@ export function validateBuild(r, briefDir) {
   if (badRepo) return `"${badRepo?.repo || ''}" isn't a repo, as owner/name`;
   const notText = ['plan', 'investigation', 'summary', 'reason'].find(k => r[k] != null && typeof r[k] !== 'string');
   if (notText) return `${notText} must be text`;
+  const outside = ['plan', 'investigation'].find(k => r[k] && !insideRoots(path.resolve(briefDir, r[k]), [briefDir]));
+  if (outside) return `the ${outside} file ${r[outside]} isn't in the brief folder`;
   const fields = [...(r.repos || []).map(x => [x, 'why']), ...(r.changes || []).map(x => [x, 'base']), ...(r.commits || []).map(x => [x, 'sha']),
     ...(r.prs || []).flatMap(x => [[x, 'title'], [x, 'body']])].find(([x, k]) => x[k] != null && typeof x[k] !== 'string');
   if (fields) return `${fields[0].repo}'s ${fields[1]} must be text`;
@@ -157,6 +167,17 @@ export const daySpend = (records, now = Date.now()) => {
   const midnight = new Date(now).setHours(0, 0, 0, 0);
   return records.flatMap(r => r.turns || []).filter(t => (t.startedAt || 0) >= midnight).reduce((n, t) => n + (t.costUsd || 0), 0);
 };
+
+/**
+ * A record's spend as History shows it: what its turns reported. A turn that reported nothing (killed by a cap or a
+ * stop, or crashed) counts as all it was allowed toward the caps, but isn't shown as money spent: it is named instead.
+ */
+export function spendText(w) {
+  const unknown = (w.turns || []).filter(t => t.costUnknown);
+  const known = (w.costUsd || 0) - unknown.reduce((n, t) => n + (t.costUsd || 0), 0);
+  if (!unknown.length) return `$${(w.costUsd || 0).toFixed(2)}`;
+  return known >= 0.005 ? `$${known.toFixed(2)} + cost not reported` : 'cost not reported';
+}
 
 /** 'over' at a cap, 'warn' from 70% of it, else ''. No cap (0) is never either. */
 export const spendLevel = (spent, cap) => (!(cap > 0) ? '' : spent >= cap ? 'over' : spent >= cap * 0.7 ? 'warn' : '');

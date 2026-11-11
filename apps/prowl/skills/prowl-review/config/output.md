@@ -164,7 +164,7 @@ On an earlier thread (someone else's, resolved or outdated) whose problem is sti
 
 ## Re-review replies
 
-On each open thread from an earlier Prowl review, whoever's Prowl posted it. **Verified fixed** (the thread is then resolved):
+On each thread from an earlier Prowl review, whoever's Prowl posted it. **Verified fixed** (the thread is then resolved):
 
 ```text
 <comment prefix> Verified fixed in <sha>
@@ -174,6 +174,12 @@ On each open thread from an earlier Prowl review, whoever's Prowl posted it. **V
 
 ```text
 <comment prefix> Still open as of <sha>: <one line why>
+```
+
+**No longer applies** (the code is gone, or the author's reply shows there is nothing to fix; the thread is then resolved):
+
+```text
+<comment prefix> No longer applies as of <sha>: <one line why>
 ```
 
 ## Fix reply
@@ -186,7 +192,7 @@ After a Builder feedback round, Prowl posts this on each thread the round fixed,
 
 ## Dispute reply
 
-On each thread a feedback round disputed instead of changing the code, with `<note>` its evidence:
+On each thread a feedback round disputed instead of changing the code, with `<note>` its evidence. The next review weighs it, and resolves the thread if it holds:
 
 ```text
 <comment prefix> Not changed: <note>

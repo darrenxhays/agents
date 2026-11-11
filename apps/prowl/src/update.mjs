@@ -39,10 +39,10 @@ export function installUpdate() {
 
 export const SEEN_PATH = path.join(HOME, 'seen.json'); // the version last launched, and the defaults the user's config files match
 export const hash = s => crypto.createHash('sha256').update(s).digest('hex');
-// Config files a release folded into another (axis-catalog.md is the catalog's name before 2.3): the user's copy
-// goes, or is kept as <name>.old when they had edited it.
 // Config files renamed by a release: the user's copy, edited or not, moves to the new name.
 const RENAMED = { 'work.md': 'build.md' };
+// Config files a release folded into another (axis-catalog.md is the catalog's name before 2.3): the user's copy
+// goes, or is kept as <name>.old when they had edited it.
 const RETIRED = { 'review-axis-catalog.md': 'review.md', 'axis-catalog.md': 'review.md' };
 const read = file => { try { return fs.readFileSync(file, 'utf8'); } catch { return null; } };
 

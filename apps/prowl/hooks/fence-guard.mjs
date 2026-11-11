@@ -28,7 +28,7 @@ process.stdin.setEncoding('utf8');
 process.stdin.on('data', d => (input += d));
 process.stdin.on('end', () => {
   let call = null;
-  try { call = JSON.parse(input); } catch { /* not a tool call: allow */ }
+  try { call = JSON.parse(input); } catch { /* not a tool call: a fenced session denies it */ }
   const decision = fenceDecision(call, process.env, alias);
   if (decision) process.stdout.write(JSON.stringify(decision));
 });

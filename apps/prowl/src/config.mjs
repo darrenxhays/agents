@@ -91,7 +91,7 @@ const NOTES = {
   'tags.done': 'Set when a review finishes. Re-add the trigger tag to ask for a re-review.',
   tagMatchMaxTypos: 'Typos still treated as the review trigger or build start tag. Case, spaces and punctuation are always ignored. 0 = exact.',
   githubOwner: 'GitHub org (or user) whose PRs are searched for the ticket key, and whose repos the Builder works in.',
-  pollSeconds: 'How often the boards are checked and this file re-read, in seconds (30 or more).',
+  pollSeconds: 'How often the boards are checked, in seconds (30 or more).',
   maxConcurrentReviews: 'Reviews running at once. Extra tickets stay tagged until a slot frees.',
   workDir: 'Projects directory: sessions run here and load its CLAUDE.md. Missing repos are cloned here; worktrees go in its .prowl-worktrees folder.',
   claude: 'Review sessions (and build sessions, where the Builder leaves its own setting empty).',
@@ -150,7 +150,7 @@ const NOTES = {
   'builder.waitForChecksMinutes': 'After a round\'s push, how long to wait for the required checks. 0 = don\'t wait.',
   dryRun: 'true: log what would be reviewed or built, without changing tags or starting sessions.',
   autoUpdate: 'true: install a newer Prowl release before launching.',
-  hoot: 'true: Hoot the owl walks along the top of the screen and says what Prowl is doing. false: no owl, and the Boards and Needs you cards take the full width of his strip.',
+  hoot: 'true: Hoot the owl sits at the top of the screen and says what Prowl is doing. false: no owl, and the Boards and Needs you cards take the full width of his strip.',
 };
 
 const isObj = v => v && typeof v === 'object' && !Array.isArray(v);
@@ -159,13 +159,29 @@ const merge = (base, over) => {
   return base;
 };
 
+// What a setting's value has to be, going by its default: a typo in config.json is named, not run with.
+const KINDS = { number: 'a number', string: 'text in quotes', boolean: 'true or false', array: 'a list ([ ... ])', object: 'a section ({ ... })' };
+const kind = v => (Array.isArray(v) ? 'array' : v === null ? 'null' : typeof v);
+/** What is wrong with `cfg`'s values, each as '<dotted key> must be <what>'. */
+const mistakes = (def, cfg, at = '') => Object.entries(def).flatMap(([k, v]) => (kind(cfg[k]) !== kind(v) ? [`${at}${k} must be ${KINDS[kind(v)]}`]
+  : isObj(v) ? mistakes(v, cfg[k], `${at}${k}.`) : []));
+
+// config.json as this process last read or wrote it (its modified time and size), so a change made elsewhere shows.
+let known = '';
+const stamp = () => { try { const s = fs.statSync(CONFIG_PATH); return `${s.mtimeMs} ${s.size}`; } catch { return ''; } };
+/** True when config.json has changed since this process last read or wrote it: edited by hand, or by prowl --setup. */
+export const configChanged = () => stamp() !== known;
+
+/** The settings: config.json over the defaults. Throws, naming the setting, when the file can't be read or a value can't be used. */
 export function loadConfig() {
   let saved = {};
+  known = stamp(); // before the read: a file that doesn't load is tried again only once it changes
   try {
     saved = parseJsonc(fs.readFileSync(CONFIG_PATH, 'utf8'));
   } catch (e) {
     if (e.code !== 'ENOENT') throw new Error(`Can't read ${CONFIG_PATH}: ${e.message}`);
   }
+  if (!isObj(saved)) throw new Error(`Can't use ${CONFIG_PATH}: it must hold the settings in { ... }`);
   const old = 'boards' in saved || 'org' in saved; // settings from before Jira support
   if (old) {
     saved.ado = { ...saved.ado, ...('org' in saved && { org: saved.org }), ...('boards' in saved && { boards: saved.boards }) };
@@ -173,15 +189,19 @@ export function loadConfig() {
     delete saved.boards;
   }
   // Before 2.13.0 the Builder had its own done and reviewing tags; it now uses the Reviewer's trigger and in-progress tags.
-  const ownTags = saved.builder?.tags && ('done' in saved.builder.tags || 'reviewing' in saved.builder.tags);
+  const ownTags = isObj(saved.builder?.tags) && ('done' in saved.builder.tags || 'reviewing' in saved.builder.tags);
   if (ownTags) {
     delete saved.builder.tags.done;
     delete saved.builder.tags.reviewing;
   }
   // 2.14.0 removed builder.command: Prowl always builds with its own skill, shaped by build.md.
-  const command = saved.builder && 'command' in saved.builder;
+  const command = isObj(saved.builder) && 'command' in saved.builder;
   if (command) delete saved.builder.command;
   const cfg = merge(structuredClone(DEFAULTS), saved);
+  const wrong = mistakes(DEFAULTS, cfg);
+  if (!wrong.length && !['ado', 'jira'].includes(cfg.taskBoard)) wrong.push('taskBoard must be "ado" or "jira"');
+  if (!wrong.length && cfg.pollSeconds < 30) wrong.push('pollSeconds must be 30 or more');
+  if (wrong.length) throw new Error(`Can't use ${CONFIG_PATH}: ${wrong.join('; ')}`);
   if (old || ownTags || command || !fs.existsSync(CONFIG_PATH)) saveConfig(cfg);
   return cfg;
 }
@@ -206,10 +226,13 @@ function commented(obj, at = '', pad = '  ') {
 }
 
 const CONFIG_HEADER = [
-  '// Prowl settings. The Config view (4) edits this file, and so can you: Prowl re-reads it every poll interval.',
+  '// Prowl settings. The Config view (4) edits this file, and so can you: Prowl re-reads it when it changes.',
   "// Prowl rewrites it when a setting changes in Config, with these comments, so comments you add aren't kept.",
 ];
-export const saveConfig = cfg => writeText(CONFIG_PATH, `${CONFIG_HEADER.join('\n')}\n${commented(cfg)}\n`);
+export function saveConfig(cfg) {
+  writeText(CONFIG_PATH, `${CONFIG_HEADER.join('\n')}\n${commented(cfg)}\n`);
+  known = stamp();
+}
 
 /** JSON that may have line and block comments and trailing commas, as in config.json and checks.json. */
 export function parseJsonc(text) {

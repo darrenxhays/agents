@@ -73,12 +73,14 @@ const ticketOf = (cfg, issue) => ({
 
 /**
  * Open issues on the board carrying a label `isTrigger` accepts; with `assignedToMe`, only yours. Labels are matched
- * loosely, so every open labelled issue on the board is read and filtered here.
+ * loosely, so every open labelled issue on the board is read and filtered here: the first 2000 of them, and `unread`
+ * is how many the board has beyond those (0 on a board read whole).
  */
 export async function findTickets(cfg, board, isTrigger, { assignedToMe = false } = {}) {
   const id = await boardId(cfg, board.board);
   const jql = enc(`labels is not EMPTY AND statusCategory != Done${assignedToMe ? ' AND assignee = currentUser()' : ''}`);
   const issues = [];
+  let unread = 0;
   // optimization-note: reads every open labelled issue on the board each poll; fine for a team board
   // (hundreds of issues). If boards get much bigger, list the site's labels and query the matching ones.
   for (let at = 0; at < 2000;) {
@@ -86,9 +88,10 @@ export async function findTickets(cfg, board, isTrigger, { assignedToMe = false 
     issues.push(...page.issues);
     at += page.issues.length;
     if (!page.issues.length || at >= page.total) break;
+    if (at >= 2000) unread = page.total - at;
   }
   const tickets = issues.filter(i => (i.fields.labels || []).some(isTrigger)).map(i => ticketOf(cfg, i));
-  return { tickets, variants: [...new Set(tickets.flatMap(t => t.tags.filter(isTrigger)))] };
+  return { tickets, variants: [...new Set(tickets.flatMap(t => t.tags.filter(isTrigger)))], unread };
 }
 
 // `add`: a label, a list of them, or ''.
@@ -140,13 +143,18 @@ export async function readItem(cfg, ref) {
   return { ...ticketOf(cfg, issue), rev };
 }
 
-/** The board holding the issue: the first of its project's boards whose filter takes it in. { board } (its name, or its id when names repeat), or null. */
+/**
+ * The board holding the issue: of its project's boards whose filter takes it in, one the config watches already, named
+ * as config.json names it (by name or id), else the first. { board } (its name, or its id when names repeat), or null.
+ */
 export async function boardOf(cfg, ticket) {
   const project = String(ticket.key).split('-')[0];
   const boards = (await api(cfg, `/rest/agile/1.0/board?projectKeyOrId=${enc(project)}&maxResults=50`)).values || [];
-  for (const b of boards) {
+  const watched = b => (cfg.jira.boards || []).find(w => String(w.board) === String(b.id) || String(w.board).toLowerCase() === b.name.toLowerCase());
+  for (const b of [...boards.filter(watched), ...boards.filter(x => !watched(x))]) {
     const page = await api(cfg, `/rest/agile/1.0/board/${b.id}/issue?jql=${enc(`key = ${ticket.key}`)}&fields=summary&maxResults=1`).catch(() => null);
     if (!page?.issues?.length) continue;
+    if (watched(b)) return { board: watched(b).board };
     const unique = boards.filter(x => x.name.toLowerCase() === b.name.toLowerCase()).length === 1;
     return { board: unique ? b.name : String(b.id) };
   }

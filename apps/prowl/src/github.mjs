@@ -16,6 +16,8 @@ export const openPrs = (owner, key) => prsMentioning(owner, key, 'open');
 
 /** PRs in `owner` whose title or body mentions the ticket key; `state` 'open', 'closed' or '' for both. */
 export async function prsMentioning(owner, key, state = '') {
+  // gh drops an empty --owner, and the search would then run over all of GitHub.
+  if (!owner) throw new Error('no GitHub org is set to search for PRs in: set it in Config (4)');
   const out = await run('gh', ['search', 'prs', `"${key}"`, '--owner', owner, ...(state ? ['--state', state] : []), '--limit', '100',
     '--json', 'url,title,body,author,number,repository,isDraft,state']);
   return JSON.parse(out)
@@ -139,7 +141,7 @@ export async function cloneMissing(prs, dir) {
   for (const repo of new Set(prs.map(p => p.repo))) {
     const target = path.join(dir, repo.split('/')[1]);
     if (fs.existsSync(target)) continue;
-    await run('gh', ['repo', 'clone', repo, target]);
+    await run('gh', ['repo', 'clone', repo, target], { timeoutMs: 3_600_000 }); // a big repo on a slow line: an hour, not the usual 10 minutes
     cloned.push(repo);
   }
   return cloned;

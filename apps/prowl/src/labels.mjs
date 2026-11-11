@@ -18,7 +18,8 @@ export const matching = (labels, name, typos = 0) => labels.filter(l => norm(l) 
 
 /**
  * The queue. `gh`: { prLabels(pr), addLabel(pr, name), removeLabel(pr, name) }; `log(side, level, msg, key)`. Each write
- * is { side, owner, url, repo, number, add, remove: [names], typos }: `owner` the review or build that asked (its id).
+ * is { side, owner, url, repo, number, add, remove: [names], typos, loose: [names] }: `owner` the review or build that
+ * asked (its id).
  */
 export function createLabels({ gh, log, file = LABELS_PATH, now = Date.now }) {
   let state;
@@ -37,10 +38,13 @@ export function createLabels({ gh, log, file = LABELS_PATH, now = Date.now }) {
       save();
     },
     owner: (side, url) => state.owners[`${side} ${url}`] || '',
-    /** Queues a write: `add` ('' for none) after taking off each of `remove`. */
-    set(side, owner, pr, add, remove, typos = 0) {
+    /**
+     * Queues a write: `add` ('' for none) after taking off each of `remove`. Only the names in `loose` (the trigger
+     * tag) are taken off within `typos`; the labels Prowl sets itself are matched exactly.
+     */
+    set(side, owner, pr, add, remove, typos = 0, loose = []) {
       if (q.refused(owner, pr.url)) return;
-      state.ops.push({ side, owner, url: pr.url, repo: pr.repo, number: pr.number, add: add || '', remove: remove.filter(Boolean), typos, at: now() });
+      state.ops.push({ side, owner, url: pr.url, repo: pr.repo, number: pr.number, add: add || '', remove: remove.filter(Boolean), typos, loose: loose.filter(Boolean), at: now() });
       save();
     },
     /** True while a write to `url` is queued (by `owner`, or by anyone). */
@@ -82,7 +86,7 @@ export function createLabels({ gh, log, file = LABELS_PATH, now = Date.now }) {
     if (q.owner(o.side, o.url) && q.owner(o.side, o.url) !== o.owner) return done(); // a newer review or build has these labels now
     try {
       const on = await gh.prLabels(pr);
-      const off = [...new Set(o.remove.flatMap(name => matching(on, name, o.typos)))]
+      const off = [...new Set(o.remove.flatMap(name => matching(on, name, o.loose?.includes(name) ? o.typos : 0)))] // a write queued before 2.23.5 has no `loose`: exact
         .filter(l => !(o.add && norm(l) === norm(o.add)));
       for (const l of off) await gh.removeLabel(pr, l); // one already gone counts as removed
       if (o.add && !matching(on, o.add).length) await gh.addLabel(pr, o.add);

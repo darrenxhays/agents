@@ -4,9 +4,13 @@ import fs from 'node:fs';
 import { replyMarker } from './templates.mjs';
 
 const isText = v => v == null || typeof v === 'string';
-/** Why a question's optional fields can't be shown in Needs you, or '': its options a list of text, `defaultKey` and context text. */
+const isTexts = v => isText(v) || (Array.isArray(v) && v.every(x => typeof x === 'string'));
+/**
+ * Why a question's optional fields can't be shown in Needs you, or '': its options a list of text, `defaultKey` and
+ * context text, or a list of it (several defaults, for a question that lets you pick several).
+ */
 export const questionShape = (q, defaultKey) => ((q.options != null && !(Array.isArray(q.options) && q.options.every(o => typeof o === 'string'))) ? 'options must be a list of text'
-  : !isText(q[defaultKey]) || !(isText(q.context) || (Array.isArray(q.context) && q.context.every(c => typeof c === 'string'))) ? `${defaultKey} and context must be text` : '');
+  : !isTexts(q[defaultKey]) || !isTexts(q.context) ? `${defaultKey} and context must be text` : '');
 
 /** The comment-thread URLs listed in a details file's *Parked* section: those findings are left to a person. */
 export function parkedUrls(details) {

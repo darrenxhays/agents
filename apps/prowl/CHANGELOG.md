@@ -2,6 +2,54 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.23.6
+- An answer pasted into a Needs-you form is now what Submit sends. Before, pasting into **Other**, **Send it back with a note** or **Ask about this** and pressing enter sent the option that was already picked: the recommended answer, or an approval of the plan.
+- A setting or board saved in Config is no longer lost when Prowl re-read `config.json` while you were typing it. It said "Saved." and kept the old value. The same went for a board added by accepting an offer.
+- `config.json` is read again within a second of you saving it, not at the next poll interval. Before, a change made in Config before that re-read wrote over your edit.
+- A value in `config.json` that can't be used is now named and left out of use: text where a number goes, a `pollSeconds` under 30, a `taskBoard` other than `ado` or `jira`. While Prowl runs, the Log says which setting and Prowl keeps the settings it had; at launch it prints the problem and exits. Before, a wrong `pollSeconds` stopped polling until a restart, and a wrong `taskBoard` closed Prowl when Config was opened. If Prowl now refuses to start, fix the setting it names.
+- A session that starts with the process id an earlier session had is no longer taken for one that has ended (this happened mostly on Windows), which had the review or build started a second time while the first was still running.
+- Windows: the installer adds the folder Claude Code installs to (`%USERPROFILE%\.local\bin`) to your PATH, as its own installer leaves that to you. Before, a fresh install worked until you opened a new terminal, where Prowl couldn't start `claude`. Run the installer again if your reviews fail with "'claude' is not recognized".
+- Prowl's own `gh`, `git` and `az` calls no longer wait for good. Git fails rather than ask for a password underneath the UI, and a call with no answer after 10 minutes (an hour for a clone) is stopped with an error in the Log. Before, one stalled call left a side on "checking boards" until you restarted Prowl.
+- Moving the mouse while you type no longer cancels what you typed or switches views: a mouse report or arrow key that arrives in two pieces (over SSH, mostly) is read whole. The esc key now takes effect a twentieth of a second after you press it.
+- "prowl is already running" no longer shows when it isn't: a lock left by a crash or a power cut is ignored once another program has its process id. The message now names the lock file, in case you ever need to delete it.
+- Updating is safer: the installer copies the new version in beside the old one and swaps them at the end, so a copy that fails or is interrupted leaves the Prowl you had. To update by hand, wait for running sessions to finish first.
+- History stays quick with thousands of finished reviews: drawing the screen no longer reads them again for every row.
+- Jira: pasting a ticket no longer offers to add a board you already watch, when your config names it by id, or when the issue is on another board as well.
+- Windows, with `claude` installed through npm: quick reviews and builds are named by the model again (an empty argument was dropped on the way to it).
+- Small corrections: setup says Config is `4` (it said 3), and the Hoot setting no longer says he walks along the top of the screen.
+
+## 2.23.5
+- A ticket tagged **Ready for Review** again while it is still **In Review** now waits for that review to end, whoever's Prowl is running it. Before, a teammate's Prowl claimed it and reviewed the same PRs at the same time. If an **In Review** was left behind by a Prowl that died, take it off by hand and the ticket is picked up.
+- The typo tolerance no longer takes a tag with an extra word for the trigger or start tag: `Ready for QA Review`, `Ready for Review 2` and `Ready to Start QA` are left alone, where before Prowl claimed the ticket and took the tag off. Misspellings still match (`ready-for-reveiw`, `ReadyForReview`).
+- Quick reviews and ticketless builds take their own labels off a PR only by name (**In Review**, **Reviewed**, **In Development**; case and punctuation aside); only **Ready for Review** is matched with the typo tolerance. A label like `Reviewer` or `In Preview` is no longer removed.
+- Quitting Prowl while it prepares a ticket's review no longer leaves the ticket **In Review** with nothing running: repos are cloned and the ticket's text read before the claim, not after.
+- A claim that fails for any reason other than a teammate getting there first is now an error in the Log that says the tag may have landed and what to check. Before, it read "claimed by someone else".
+- Re-reviews close out more threads. An earlier Prowl finding that no longer applies (the code is gone, or the author's "Not changed" reply shows there is nothing to fix) gets a one-line reply and its thread is resolved, so it stops holding the ticket back from READY TO MERGE. One someone resolved while its problem is still in the code is reopened.
+- The default `output.md` gains a **No longer applies** template under *Re-review replies*, and a line under *Dispute reply*. If you've edited your copy in `~/.prowl/config/`, it is kept and reviews use the default's wording for the new reply: copy the template in if you want to change it.
+- Reviews post their replies on existing threads from a file, like the review itself, instead of putting the text on the command line, where a permission check could block it or the shell could misread code quoted in it.
+- The review skill no longer has modes Prowl never uses (dry run, no verdict), so text in a ticket can't switch one on. With **Approve PRs** off, your own PR with nothing blocking now gets the *No blocking issues* note like anyone else's, as `output.md` says.
+- A ticket's text or title can no longer break out of the part of the review's brief marked as data.
+- Pasting a ticket into a quick review or quick build with no GitHub org set is now an error that says so. Before, the search for its PRs could run across all of GitHub.
+- A review that fails within seconds and is started again in the same minute no longer picks up the first one's log and fails at once. Review logs and reports now carry the time to the second in their names.
+- On Jira, a board with more than 2000 open labelled issues now gets a warning in the Log: Prowl reads the first 2000, and a ticket tagged beyond them isn't seen. Use a board with fewer issues.
+- Reviews wait out GitHub's code-search rate limit instead of skipping the search for other repos that read what a PR changes.
+
+## 2.23.4
+- Builder sessions can only read with `gh` now: `view`, `list`, `diff`, `checks`, `status`, `watch`, `download`, `clone`, `search` and `gh api` reads. Every other `gh` command is denied, where before only a list of `gh pr`, `gh repo` and `gh issue` writes was (so `gh release create`, `gh workflow run` or `gh pr -R owner/repo create` got through). Nothing to do.
+- The fence around Builder sessions denies more of what it couldn't read before: a command or git subcommand held in a variable, git config set through the environment or an included file, `git config` on a remote or on what a push sends, `~user` paths, `pushd`, `ln`, `rm` behind `timeout`, `nice` or `xargs`, and `az rest` writes. A command that broke the fence's own reading used to be let through; it is denied now. The `Monitor` tool is off in these sessions.
+- A second layer under the fence: in a Builder session, a `git push` to GitHub from anything the session runs (a script, a build tool) goes nowhere. Prowl's own push is unaffected.
+- The checks before a push can't be blinded by the session: a `.gitattributes` it commits no longer keeps a file out of Max lines changed or the secret scan. This needs git 2.40 or later; on an older git, a push that changes `.gitattributes` waits in Needs you.
+- Prowl pushes exactly the commit its checks saw, and never tags or submodules along with it, whatever the clone's git config says.
+- A finish session (work picked up) can no longer push before its plan is approved. With **Approve plans** on `ask`, its plan waits in Needs you like any other.
+- `s` on a ticket still waiting to be claimed no longer takes tags off it, and a stop never removes **Ready for Review** or **In Review**: only the **In Development** that run holds. A stop that arrives just as the last step finishes is dropped (the Log says so) instead of stopping the ticket's next feedback round.
+- A push the remote refuses (a ruleset, push protection, no access) goes to Needs you at once, and any step that keeps failing goes there after five tries. Before, Prowl retried every minute for good, running your `checks.json` commands each time. Enter in Needs you tries again.
+- A branch of yours picked up with no PR gets its PR opened against the branch your **Base branches** rule names, not always the default branch.
+- A turn that is stopped or killed part-way reports no cost. It now counts as all it was allowed toward your spend caps, and History shows "cost not reported" instead of $0.
+- A question that lets you pick several options may default to several, as the build skill has always said; such a result was rejected before. The plan and investigation files a session names must be in its brief folder.
+- A rebuild after a feedback round uses the `-2` branch, instead of stopping on "commits Prowl didn't make".
+- A base rule like `release/*` picks `release/2.0` over `release/2.0-rc1` or `release/2.0-hotfix`. If you relied on the suffixed branch winning, name it in `builder.base`.
+- No session, and no `checks.json` command, gets `JIRA_API_TOKEN`, `AZURE_DEVOPS_EXT_PAT` or `SYSTEM_ACCESSTOKEN` in its environment any more; before, only Builder sessions had them removed. If a check of yours needs one, set it under `env` in `checks.json`.
+
 ## 2.23.3
 - The review skill and its rules now say "axis" everywhere, where they mixed "axis" and "area". The default `review.md` changes with it (**Other areas** is now **Other axes**). If you've edited your copy in `~/.prowl/config/`, it is kept and still works: rename the heading if you want it to match.
 

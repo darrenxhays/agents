@@ -50,7 +50,7 @@ if (-not $src) {
 $lock = Join-Path $prowlData 'lock'
 if (Test-Path $lock) {
   $running = Get-Process -Id ([int](Get-Content $lock -Raw)) -ErrorAction SilentlyContinue
-  if ($running -and $running.ProcessName -eq 'node') { throw 'Prowl is running. Quit it (press q) first, then run the installer again.' }
+  if ($running -and $running.ProcessName -eq 'node') { throw "Prowl is running. Quit it (press q) first, then run the installer again. If it isn't running, delete $lock." }
 }
 
 if (-not $TaskBoard) {
@@ -83,10 +83,15 @@ if (-not (Have node)) { throw 'Node.js still is not available: open a new termin
 
 Say "Installing Prowl into $app"
 if ((Resolve-Path $src).Path.TrimEnd('\') -ne $app) {
-  if (Test-Path $app) { Remove-Item $app -Recurse -Force }
+  # The new copy is made beside the old one and takes its place by rename, so a copy that fails or is interrupted
+  # leaves the Prowl that was there.
   New-Item -ItemType Directory -Force $root | Out-Null
-  Copy-Item -LiteralPath $src -Destination $app -Recurse -Force
-  Get-ChildItem $app -Recurse -File | Unblock-File
+  foreach ($dir in "$app.new", "$app.old") { if (Test-Path $dir) { Remove-Item $dir -Recurse -Force } }
+  Copy-Item -LiteralPath $src -Destination "$app.new" -Recurse -Force
+  Get-ChildItem "$app.new" -Recurse -File | Unblock-File
+  if (Test-Path $app) { Rename-Item -LiteralPath $app -NewName 'app.old' }
+  Rename-Item -LiteralPath "$app.new" -NewName 'app'
+  Remove-Item "$app.old" -Recurse -Force -ErrorAction SilentlyContinue
 }
 New-Item -ItemType Directory -Force $bin | Out-Null
 # %LOCALAPPDATA% rather than the expanded path keeps this file plain ASCII whatever the user name is.
@@ -96,12 +101,20 @@ $launch = "@echo off`r`nnode `"%LOCALAPPDATA%\Prowl\app\prowl.mjs`" %*"
 if (-not (Test-Path $launcher) -or (Get-Content $launcher -Raw).TrimEnd() -ne $launch) { Set-Content -Path $launcher -Encoding ASCII -Value $launch }
 Ok "prowl command: $bin\prowl.cmd"
 
-$userPath = "$([Environment]::GetEnvironmentVariable('Path', 'User'))"
+# Claude Code's installer puts claude.exe in ~\.local\bin and leaves PATH alone: without that folder on it, Prowl
+# couldn't start a session from a new terminal.
+$onPath = @($bin)
+$claudeBin = Join-Path $HOME '.local\bin'
+$machinePath = "$([Environment]::GetEnvironmentVariable('Path', 'Machine'))"
+if ((Test-Path (Join-Path $claudeBin 'claude.exe')) -and (($machinePath -split ';') -notcontains $claudeBin)) { $onPath += $claudeBin }
 $newTerminal = ''
-if (($userPath -split ';') -notcontains $bin) {
-  [Environment]::SetEnvironmentVariable('Path', (@($userPath.TrimEnd(';'), $bin) | Where-Object { $_ }) -join ';', 'User')
-  Ok "added $bin to your PATH"
-  $newTerminal = ' (open a new terminal first)'
+foreach ($dir in $onPath) {
+  $userPath = "$([Environment]::GetEnvironmentVariable('Path', 'User'))"
+  if (($userPath -split ';') -notcontains $dir) {
+    [Environment]::SetEnvironmentVariable('Path', (@($userPath.TrimEnd(';'), $dir) | Where-Object { $_ }) -join ';', 'User')
+    Ok "added $dir to your PATH"
+    $newTerminal = ' (open a new terminal first)'
+  }
 }
 
 if ($download) { Remove-Item $download -Recurse -Force -ErrorAction SilentlyContinue }

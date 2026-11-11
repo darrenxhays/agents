@@ -1,6 +1,7 @@
 // checks.json: the user's own commands, run in a worktree before Prowl pushes anything. Covered by the self-test.
 import { spawn } from 'node:child_process';
 import { killTree, WIN } from './proc.mjs';
+import { withoutTokens } from './sessions.mjs';
 
 export const TAIL = 4000; // characters of check output kept for a session's brief
 
@@ -23,13 +24,13 @@ export function globRe(glob, anywhere = false) {
 /** The first checks.json entry whose repo glob (owner/name, * wildcards) matches `repo`, or null. */
 export const matchChecks = (checks, repo) => Object.entries(checks || {}).find(([glob]) => globRe(glob, true).test(repo))?.[1] || null;
 
-/** Runs one command through the platform shell in `cwd`; resolves { ok, tail, timedOut }. */
+/** Runs one command through the platform shell in `cwd`, without the trackers' tokens (it runs code a session wrote); resolves { ok, tail, timedOut }. */
 export function runCommand(command, cwd, env, timeoutMs) {
   return new Promise(resolve => {
     let tail = '';
     let timedOut = false;
     const keep = d => { tail = (tail + d).slice(-TAIL); };
-    const p = spawn(command, { cwd, env: { ...process.env, ...env }, shell: true, detached: !WIN, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const p = spawn(command, { cwd, env: { ...withoutTokens(process.env), ...env }, shell: true, detached: !WIN, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     p.stdout.on('data', keep);
     p.stderr.on('data', keep);
     const timer = setTimeout(() => { timedOut = true; killTree(p.pid); }, timeoutMs);

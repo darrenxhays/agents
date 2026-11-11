@@ -13,7 +13,7 @@ Prowl has already:
 
 - read the ticket with its own sign-in into `ticket.md` (build and finish modes; for a quick build without a ticket, `quick.md` holds what the user asked for, in their own words), or collected each PR's review details file, its reviews requesting changes and its unresolved threads into `feedback.md` (feedback mode), in the brief folder (`PROWL_BRIEF_DIR`);
 - checked out a git worktree per repo or PR, listed in your invocation;
-- fenced this session: pushing, changing git remotes, posting on GitHub, writing to the tracker, MCP tools outside the user's allow list, and writing outside the worktrees and the brief folder are all blocked.
+- fenced this session: pushing, changing git remotes, posting on GitHub, writing to the tracker, MCP tools outside the user's allow list, and writing outside the worktrees and the brief folder are all blocked. `gh` is for reading only (`gh pr view`, `gh pr diff`, `gh run view`, `gh api` GETs and the like), and a command line the fence can't read (a command name or git subcommand in a variable, say) is denied: write it out plainly.
 
 After you finish, Prowl's code runs the user's checks, checks your commits, pushes them, opens the PRs (build mode) or replies on each thread you fixed or disputed (feedback mode), and tags the ticket.
 

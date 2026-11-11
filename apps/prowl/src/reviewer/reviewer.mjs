@@ -67,8 +67,9 @@ export function createReviewer(app, deps) {
     for (const board of boards) {
       const where = tracker.boardLabel(board);
       try {
-        const { tickets, variants } = await tracker.findTickets(cfg(), board, isTrigger);
+        const { tickets, variants, unread } = await tracker.findTickets(cfg(), board, isTrigger);
         side.tagVariants[where] = variants;
+        if (unread) log('warn', `${where}: only its first 2000 open labelled issues are read, and it has ${unread} more: a ticket tagged among those isn't seen`, `unread:${where}`);
         if (!variants.length) log('info', `${where}: no ticket is tagged like '${cfg().tags.trigger}'`, `tags:${where}`);
         for (const ticket of tickets) {
           if (seen.has(ticket.key)) continue;
@@ -91,6 +92,11 @@ export function createReviewer(app, deps) {
     const c = cfg();
     const key = `ticket:${ticket.key}`;
     if (side.running().some(r => r.ticket === ticket.key)) return; // re-tagged mid-review: re-reviewed once this one ends
+    // ...and so is a ticket someone else's Prowl is reviewing: claiming it now would review its PRs twice at once.
+    if ((ticket.tags || []).some(t => norm(t) === norm(c.tags.inProgress))) {
+      log('info', `${ticket.key}: tagged '${c.tags.trigger}' while it is '${c.tags.inProgress}'; reviewed once that review ends (if none is running, take '${c.tags.inProgress}' off)`, key);
+      return;
+    }
     if (busy() >= c.maxConcurrentReviews) {
       log('info', `${ticket.key}: waiting, ${c.maxConcurrentReviews} reviews already running`, key);
       return;
@@ -143,11 +149,32 @@ export function createReviewer(app, deps) {
     if (app.dryRun()) return log('info', `${ticket.key}: would review ${toReview.map(p => p.url).join(' ') || 'nothing'}${skipped}`, key);
     if (!on()) return undefined; // switched off while this poll ran
 
+    // Everything slow comes before the claim, so nothing is awaited between the claim and the session's start: a
+    // quit or crash while a repo clones then leaves the ticket tagged, not In Review with no review running.
+    let ticketText = '';
+    if (toReview.length) {
+      try {
+        const cloned = await gh.cloneMissing(toReview, c.workDir);
+        if (cloned.length) log('info', `${ticket.key}: cloned ${cloned.join(', ')} into ${c.workDir}`);
+      } catch (e) {
+        log('warn', `${ticket.key}: ${e.message}; reviewing from GitHub without a local clone`);
+      }
+      if (c.ticketContext) {
+        try {
+          ticketText = await tracker.ticketText(c, ticket);
+        } catch (e) {
+          log('warn', `${ticket.key}: couldn't read the ticket's text (${e.message}); reviewing without it`);
+        }
+      }
+      if (!on()) return undefined; // switched off meanwhile: nothing is claimed yet
+    }
+    const to = toReview.length ? c.tags.inProgress : c.tags.done; // nothing to re-review: straight to done, in one write a teammate's poller can't race
     try {
-      // Nothing to re-review: straight to done, in one write a teammate's poller can't race.
-      await tracker.claim(c, ticket, t => isTrigger(t) || ours(t), toReview.length ? c.tags.inProgress : c.tags.done);
+      await tracker.claim(c, ticket, t => isTrigger(t) || ours(t), to);
     } catch (e) {
-      return log('warn', `${ticket.key}: not claimed (changed or claimed by someone else): ${e.message}`, key);
+      if (e.lost) return log('warn', `${ticket.key}: not claimed (changed or claimed by someone else): ${e.message}`, key);
+      // Any other failure may have come after the write landed: the ticket may carry the tag with nobody reviewing it.
+      return log('error', `${ticket.key}: the claim failed (${e.message}) and may still have reached the ticket: if it is '${to}' now, put '${c.tags.trigger}' back`, key);
     }
     // Puts the trigger tag back. One the tracker refuses is kept in state.releases, which tick() retries each minute.
     const release = async () => {
@@ -164,24 +191,6 @@ export function createReviewer(app, deps) {
       return release();
     }
     hoot(`Starting reviews for ${ticket.title}, marking as '${c.tags.inProgress}'`);
-    try {
-      const cloned = await gh.cloneMissing(toReview, c.workDir);
-      if (cloned.length) log('info', `${ticket.key}: cloned ${cloned.join(', ')} into ${c.workDir}`);
-    } catch (e) {
-      log('warn', `${ticket.key}: ${e.message}; reviewing from GitHub without a local clone`);
-    }
-    let ticketText = '';
-    if (c.ticketContext) {
-      try {
-        ticketText = await tracker.ticketText(c, ticket);
-      } catch (e) {
-        log('warn', `${ticket.key}: couldn't read the ticket's text (${e.message}); reviewing without it`);
-      }
-    }
-    if (!on()) {
-      log('info', `${ticket.key}: the Reviewer was switched off before the review started; putting '${c.tags.trigger}' back`);
-      return release();
-    }
     let run;
     try {
       if (prior && c.reReviewScope === 'delta' && !prior.reviewedHeads) log('info', `${ticket.key}: re-reviewing in full, as the last review is from before Prowl recorded the commits it reviewed`, `scope:${ticket.key}`);
@@ -352,8 +361,8 @@ export function createReviewer(app, deps) {
     if (run.labels) {
       // This review has these PRs' labels now: an older quick review's writes to them are dropped.
       labels.own('reviewer', run.id, [...toReview, ...approved].map(p => p.url));
-      for (const p of toReview) labels.set('reviewer', run.id, p, c.tags.inProgress, [c.tags.trigger, c.tags.done], c.tagMatchMaxTypos);
-      for (const p of approved) labels.set('reviewer', run.id, p, '', [c.tags.trigger], c.tagMatchMaxTypos); // context: Ready for Review comes off
+      for (const p of toReview) labels.set('reviewer', run.id, p, c.tags.inProgress, [c.tags.trigger, c.tags.done], c.tagMatchMaxTypos, [c.tags.trigger]);
+      for (const p of approved) labels.set('reviewer', run.id, p, '', [c.tags.trigger], c.tagMatchMaxTypos, [c.tags.trigger]); // context: Ready for Review comes off
     }
     hoot(toReview.length > 1 ? `Starting a quick review of ${toReview.length} PRs` : `Starting a quick review of ${toReview[0].title}`);
     log('ok', `${spec.key}: quick ${prior ? `re-review #${run.reviewNo}` : 'review'} started on ${names(toReview)}${approved.length ? ` (already approved, unchanged: ${names(approved)})` : ''}`);
@@ -457,7 +466,7 @@ export function createReviewer(app, deps) {
   /** The PR's labels after a quick review: `add` on each of `prs`, the Reviewer's other labels off. */
   function relabel(run, prs, add) {
     const { tags } = cfg();
-    for (const p of prs) labels.set('reviewer', run.id, p, add, [tags.inProgress, tags.done, tags.trigger].filter(t => t !== add), cfg().tagMatchMaxTypos);
+    for (const p of prs) labels.set('reviewer', run.id, p, add, [tags.inProgress, tags.done, tags.trigger].filter(t => t !== add), cfg().tagMatchMaxTypos, [tags.trigger]);
   }
 
   /**

@@ -4,15 +4,17 @@ import fs from 'node:fs';
 export const WIN = process.platform === 'win32';
 const QUIET = { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] };
 
-// On Windows, az and claude are often .cmd shims, which only start through a shell. Arguments passed
-// here are fixed flags, paths and config values, never free text: prompts go in through stdin.
-// An .exe is started directly: a detached review started through cmd.exe can get a visible console
-// window, and closing that window kills the review.
+/** `a` as one argument on a cmd.exe command line: in quotes when it is empty or has a space or a character cmd reads, a " inside it doubled. */
+export const cmdArg = a => (a === '' || /[\s"&|<>^()]/.test(a) ? `"${a.replace(/"/g, '""')}"` : a);
+
+// On Windows, az and claude are often .cmd shims, which only start through a shell, so each argument is quoted for
+// cmd.exe (cmdArg). Prompts go in through stdin, never as an argument. An .exe is started directly, its arguments
+// as they are (gh's search terms and jq programs rely on that): a detached review started through cmd.exe can get
+// a visible console window, and closing that window kills the review.
 export function spawnCli(cmd, args, opts = {}) {
   const exe = WIN && windowsExe(cmd);
   const shell = WIN && !exe;
-  const argv = shell ? args.map(a => (/[\s"&|<>^()]/.test(a) ? `"${a}"` : a)) : args;
-  return spawn(exe || cmd, argv, { shell, windowsHide: true, ...opts });
+  return spawn(exe || cmd, shell ? args.map(cmdArg) : args, { shell, windowsHide: true, ...opts });
 }
 
 const exes = new Map();
@@ -26,24 +28,32 @@ function windowsExe(cmd) {
   return exes.get(cmd);
 }
 
-/** Runs a CLI to completion and resolves with its stdout. */
-export async function run(cmd, args) {
-  const { code, out, err } = await runFull(cmd, args);
+/** Runs a CLI to completion and resolves with its stdout. `opts`: as runFull's. */
+export async function run(cmd, args, opts) {
+  const { code, out, err } = await runFull(cmd, args, opts);
   if (code === 0) return out;
   const why = (err || out).trim().split('\n')[0].slice(0, 240);
   throw new Error(`${cmd} ${args.slice(0, 2).join(' ')} failed: ${why}`);
 }
 
-/** Runs a CLI to completion and resolves with its exit code, stdout and stderr, whatever the code. */
-export function runFull(cmd, args) {
+/**
+ * Runs a CLI to completion and resolves with its exit code, stdout and stderr, whatever the code. Nobody is there to
+ * answer it: git fails rather than ask for a password on the terminal, under the UI, and a command still going after
+ * `timeoutMs` (10 minutes) is stopped and rejects, so one stalled call can't hold a poll for good.
+ */
+export function runFull(cmd, args, { timeoutMs = 600_000 } = {}) {
   return new Promise((resolve, reject) => {
-    const p = spawnCli(cmd, args);
+    const p = spawnCli(cmd, args, { env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
     let out = '';
     let err = '';
+    const timer = setTimeout(() => {
+      killTree(p.pid);
+      reject(new Error(`${cmd} ${args.slice(0, 2).join(' ')} was stopped: no answer in ${Math.round(timeoutMs / 60_000) || 1} minutes`));
+    }, timeoutMs);
     p.stdout.on('data', d => (out += d));
     p.stderr.on('data', d => (err += d));
-    p.on('error', e => reject(new Error(e.code === 'ENOENT' ? `${cmd} is not installed or not on PATH` : e.message)));
-    p.on('close', code => resolve({ code, out, err }));
+    p.on('error', e => { clearTimeout(timer); reject(new Error(e.code === 'ENOENT' ? `${cmd} is not installed or not on PATH` : e.message)); });
+    p.on('close', code => { clearTimeout(timer); resolve({ code, out, err }); });
     p.stdin.end();
   });
 }
@@ -69,6 +79,22 @@ export function isAlive(pid) {
     return true;
   } catch (e) {
     return e.code === 'EPERM';
+  }
+}
+
+/**
+ * The pid in lock file `file` while the Prowl that wrote it is still running, else 0. A lock left by a crash or a
+ * power cut can hold a pid that another program has by now: it is that Prowl only if it started before the lock
+ * was written.
+ */
+export function lockHolder(file) {
+  try {
+    const pid = Number(fs.readFileSync(file, 'utf8'));
+    if (!pid || pid === process.pid || !isAlive(pid)) return 0;
+    const started = processStart(pid);
+    return started === null || started < fs.statSync(file).mtimeMs + 10_000 ? pid : 0; // unreadable: trust the pid
+  } catch {
+    return 0; // no lock
   }
 }
 

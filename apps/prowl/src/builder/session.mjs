@@ -32,21 +32,35 @@ export function workArgs(cfg, appDir, w, settingsPath, budget, readOnly = false)
   ];
 }
 
-/** The environment for a turn: a session's, fenced as kind 'work', with no tracker token in it. */
+// What a push to GitHub starts with. In a session's environment each is rewritten, for pushes only, to an address git can't reach.
+const PUSH_PREFIXES = ['https://github.com/', 'git@github.com:', 'ssh://git@github.com/'];
+
+/**
+ * Git config, passed in the environment, that makes every push to GitHub from the session's process tree go nowhere:
+ * a second layer under the fence's hook, for a push it can't see (a script, an interpreter, a build tool). Fetches
+ * are untouched, and Prowl's own push runs in Prowl's environment, not this one.
+ */
+function noPushEnv(env) {
+  const n = Number(env.GIT_CONFIG_COUNT) || 0;
+  const out = { GIT_CONFIG_COUNT: String(n + PUSH_PREFIXES.length) };
+  PUSH_PREFIXES.forEach((prefix, i) => Object.assign(out, { [`GIT_CONFIG_KEY_${n + i}`]: 'url.prowl-fence-no-push://session/.pushInsteadOf', [`GIT_CONFIG_VALUE_${n + i}`]: prefix }));
+  return out;
+}
+
+/** The environment for a turn: a session's (no tracker token in it), fenced as kind 'work', and unable to push to GitHub. */
 export function workEnv(cfg, w, env = process.env) {
-  const out = {
+  return {
     ...sessionEnv(cfg, env),
     ...fenceEnv('work', rootsOf(w), cfg.builder.mcpAllow, trackerHosts(cfg.taskBoard === 'jira' ? cfg.jira.site : '')),
+    ...noPushEnv(env),
     PROWL_BRIEF_DIR: w.briefDir, PROWL_UNATTENDED: '1',
   };
-  for (const k of ['JIRA_API_TOKEN', 'AZURE_DEVOPS_EXT_PAT', 'SYSTEM_ACCESSTOKEN']) delete out[k];
-  return out;
 }
 
 /** Runs `claude` for `w`'s session with `prompt` as a detached process logging to `${base}.ndjson`; returns the child. */
 function spawnTurn(cfg, appDir, w, prompt, budget, base, readOnly) {
   fs.mkdirSync(LOGS_DIR, { recursive: true });
-  const settingsPath = path.join(w.briefDir, 'settings.json');
+  const settingsPath = `${base}.settings.json`; // beside the log, not in the brief folder: the session can write there
   writeJson(settingsPath, fenceSettings(appDir));
   fs.writeFileSync(`${base}.prompt.md`, prompt);
   const stdin = fs.openSync(`${base}.prompt.md`, 'r');

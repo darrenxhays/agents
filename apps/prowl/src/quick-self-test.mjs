@@ -119,6 +119,17 @@ async function queue(assert) {
   q.set('reviewer', 'run9', pr(2), '', ['Ready for Review']);
   await q.drain();
   assert.ok(!q.pending(pr(2).url), 'already removed: done');
+  // Only the trigger label is taken off within the typo tolerance: the labels Prowl sets itself are matched exactly.
+  on['o/r#2'] = ['Reviewer', 'In Preview', 'Ready for Reveiw', 'reviewed'];
+  calls.length = 0;
+  gh.removeLabel = async (p, name) => { calls.push(['remove', p.number, name]); on[`${p.repo}#${p.number}`] = on[`${p.repo}#${p.number}`].filter(l => l !== name); };
+  q.set('reviewer', 'run9', pr(2), 'In Review', ['Ready for Review', 'Reviewed'], 2, ['Ready for Review']);
+  await q.drain();
+  assert.deepEqual([calls, on['o/r#2']], [[['remove', 2, 'Ready for Reveiw'], ['remove', 2, 'reviewed'], ['add', 2, 'In Review']], ['Reviewer', 'In Preview', 'In Review']], "a label that only looks like one of Prowl's own stays");
+  on['o/r#2'] = ['Ready for Reveiw'];
+  q.state().ops.push({ side: 'reviewer', owner: 'run9', url: pr(2).url, repo: 'o/r', number: 2, add: '', remove: ['Ready for Review'], typos: 2, at: now });
+  await q.drain();
+  assert.deepEqual(on['o/r#2'], ['Ready for Reveiw'], 'a write queued before 2.23.5 names no loose label: exact');
   assert.ok(createLabels({ gh, log() {}, file }).state().owners[`reviewer ${pr(3).url}`] === 'new', 'kept in labels.json across launches');
   fs.rmSync(dir, { recursive: true });
 }
@@ -234,6 +245,11 @@ async function boards(assert) {
   const rivalAdo = { ...ado, readItem: async (...a) => { const t = await ado.readItem(...a); adoItems[7].rev++; return t; } }; // someone writes after the read
   assert.deepEqual(await acceptOffer(app, rivalAdo, o, { tag: 'Ready for Review', busyTag: 'In Review', isTag: () => false, addBoards: false, log: (l, m) => logs.push(m), saveConfig() {} }), [], 'the revision check holds');
   assert.ok(logs.some(l => /AB#7: not tagged: it changed meanwhile/.test(l)));
+  // config.json re-read while the tickets are read again (a new app.cfg): the board goes into the config that is saved.
+  const reread = { cfg: adoCfg, boards: () => reread.cfg.ado.boards, dryRun: () => false };
+  const rereading = { ...ado, readItem: async (...a) => { const t = await ado.readItem(...a); reread.cfg = structuredClone(reread.cfg); return t; }, claim: async () => {} };
+  await acceptOffer(reread, rereading, o, { tag: 'Ready for Review', busyTag: 'In Review', isTag: () => false, addBoards: true, log() {}, saveConfig() {} });
+  assert.deepEqual(reread.cfg.ado.boards.at(-1), { project: 'Shop', team: 'Web' }, 'a board is added to the config in use when it is saved, not the one read before the tickets were');
 
   // Jira: the board holding the issue, of its project's boards; a name that repeats is named by its id.
   const jiraIssues = { 'SHOP-1': { labels: ['ui'], status: 'indeterminate' }, 'SHOP-2': { labels: [], status: 'done' }, 'SHOP-3': { labels: [], status: 'new' } };
@@ -267,6 +283,15 @@ async function boards(assert) {
   assert.deepEqual(await jira.boardOf(jiraCfg, await jira.lookup(jiraCfg, 'SHOP-3')), { board: '9' }, 'by id when another board has its name');
   const japp = { cfg: jiraCfg, boards: () => jiraCfg.jira.boards, dryRun: () => false };
   assert.equal((await offerFor(japp, jira, [j1], 'In Review')).polled, true, 'on a polled board');
+  // A board the config watches is named as config.json names it, and wins over an earlier board that holds the issue too.
+  jiraCfg.jira.boards = [{ board: '8' }];
+  assert.deepEqual(await jira.boardOf(jiraCfg, j1), { board: '8' }, 'a board watched by its id is named by its id');
+  assert.equal((await offerFor(japp, jira, [j1], 'In Review')).polled, true, 'so the offer sees it as polled, and does not add it again by name');
+  jiraCfg.jira.boards = [{ board: 'cart board' }];
+  onBoard[7].push('SHOP-1');
+  assert.deepEqual(await jira.boardOf(jiraCfg, j1), { board: 'cart board' }, 'on two boards: the watched one, not the first');
+  onBoard[7].pop();
+  jiraCfg.jira.boards = [{ board: 'Cart board' }];
   assert.equal(await offerFor(japp, jira, [await jira.lookup(jiraCfg, 'SHOP-2')], 'In Review'), null, 'closed: no offer');
   assert.ok(sameBoard({ board: 'cart Board' }, { board: 'Cart board' }) && !sameBoard({ board: '8' }, { board: 'Cart board' }), 'Jira boards by name, without case');
   assert.deepEqual(await jira.linkedBranches(jiraCfg, { key: 'SHOP-1' }), [
@@ -277,6 +302,17 @@ async function boards(assert) {
   // Azure DevOps' GitHub links: the connection id, then the branch or PR, split on the first %2F in any case.
   assert.deepEqual(ado.githubLinks(['vstfs:///GitHub/Branch/c0ffee-1%2Ffeature%2F12345-cart', 'vstfs:///GitHub/PullRequest/c0ffee-1%2f77', 'vstfs:///Git/Commit/x%2Fy', 'vstfs:///GitHub/Branch/nope']),
     { branches: [{ id: 'c0ffee-1', branch: 'feature/12345-cart' }], prs: [{ id: 'c0ffee-1', number: 77 }] }, 'GitHub branch and PR links');
+  // A board with more open labelled issues than Prowl reads says how many it left unread.
+  const reads = [];
+  globalThis.fetch = async url => {
+    const at = Number(new URL(url).searchParams.get('startAt'));
+    reads.push(at);
+    return json({ total: 2350, issues: Array.from({ length: 100 }, (x, i) => ({ key: `SHOP-${at + i}`, fields: { summary: 's', labels: at + i === 1999 ? ['Ready-for-Review'] : ['ui'] } })) });
+  };
+  const big = await jira.findTickets(jiraCfg, { board: '7' }, t => t === 'Ready-for-Review');
+  assert.deepEqual([big.tickets.map(t => t.key), big.unread, reads.length], [['SHOP-1999'], 350, 20], 'Jira: the first 2000 are read, and the rest counted');
+  globalThis.fetch = async url => json({ total: 150, issues: Array.from({ length: Number(new URL(url).searchParams.get('startAt')) ? 50 : 100 }, (x, i) => ({ key: `SHOP-${i}`, fields: { labels: ['ui'] } })) });
+  assert.equal((await jira.findTickets(jiraCfg, { board: '7' }, () => false)).unread, 0, 'a board read whole: none unread');
   globalThis.fetch = realFetch;
 }
 

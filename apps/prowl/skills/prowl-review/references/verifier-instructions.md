@@ -31,6 +31,16 @@ Three things you never do:
 
 For `UNINVESTIGATED` entries (out-of-scope observations or unaddressed hypotheses the orchestrator forwarded), you **are** the investigator: do the full procedure and produce either a `CONFIRMED` finding with complete evidence, or `REFUTED` with what you checked.
 
+## Prior findings
+
+An entry marked `PRIOR` is a finding an earlier PR-Owl review posted, with every comment on its thread. It was verified when it was posted, so the question is not whether it was ever real but what is true of it at the head SHA you were given. Read the whole thread first, then the code. A reply carrying a `prowl-fix` marker is the author's own account: "Fixed in <sha>" (confirm the fix in the code; the reply is not evidence) or "Not changed" with a reason (weigh the reason like any other evidence: it holds or it doesn't). It gets one of these verdicts, not the ones below:
+
+- **FIXED** — the defect is gone at head. Name the commit that fixed it: the one a fix reply names, once you have confirmed it, or the one that last changed the lines (`gh api "repos/<o>/<r>/commits?path=<file>&sha=<head sha>&per_page=5"`).
+- **STILL-OPEN** — the defect is still in the code at head. Give its `file:line` now, one line on why it still fails, and its severity against the definitions (step 5).
+- **NO-LONGER-APPLIES** — there is nothing left to fix: the code is gone or rewritten so the scenario can't arise, the PR was merged or closed, or the author's reason holds and it is not a defect. Say which, and quote what shows it.
+
+`UNVERIFIABLE` stays available when you can't tell.
+
 ## Verdicts
 
 - **CONFIRMED** — the defect is real as stated; location, severity, and scenario stand. Provide the one-clause confirmation that will be quoted on the PR.
@@ -60,6 +70,15 @@ Your **final message is the report**. It is consumed verbatim by the orchestrato
   - Confirmation for the PR comment: <one clause, e.g. "verified: the lookup at line 84 ignores the accountId the caller passes, so it returns other accounts' records">   (CONFIRMED/ADJUSTED only)
   - Suggested-fix check: sound | risky: <why>
   - Already raised: no | <link> — open | resolved | outdated | summary | conversation — understated: yes | no   (CONFIRMED/ADJUSTED only)
+
+- **F-<nn>** (prior) — VERDICT: FIXED in <sha> | STILL-OPEN | NO-LONGER-APPLIES | UNVERIFIABLE   (`PRIOR` entries)
+  - Location check: <file>:<line> at head — in-diff: yes|no   (STILL-OPEN only)
+  - Evidence:
+    ```
+    <quoted lines: the fix, the defect as it stands, or what makes it no longer apply>
+    ```
+  - Reasoning: what happened to it since it was posted, 1–3 sentences, weighing any `prowl-fix` reply
+  - Severity: <unchanged | old→new because …>   (STILL-OPEN only)
 
 ### Related issues observed
 - <PR#> <file>:<line> — <one line, evidence>. Not investigated.

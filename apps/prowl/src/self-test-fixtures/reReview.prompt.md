@@ -10,7 +10,7 @@
 
 The previous review (review 1, finished 2025-10-09 08:53 UTC) produced the report below. The ticket has been tagged for review again, so the authors believe they have addressed it. On top of the normal prowl-review steps:
 
-1. Use the previous report as context for the skill's prior findings (`prior-findings.md`, Prowl's open threads on the PRs): match each of its findings to its thread by link, for the full problem and fix. Add each one with no open thread (posted only in a review body, or its thread since resolved) to the ledger as a prior finding too, re-verified and replied on like the others.
+1. Use the previous report as context for the skill's prior findings (`prior-findings.md`, Prowl's open threads on the PRs): match each of its findings to its thread by link, for the full problem and fix. Add each one with no open thread (posted only in a review body, or its thread since resolved) to the ledger as a prior finding too, re-verified like the others; the skill's *Prior findings* (Step 8) says what each then gets.
 
 <previous-report>
 ---
@@ -85,6 +85,6 @@ Then these sections:
 3. Issues found: per PR, every verified finding with severity, title, file:line, a link to its posted comment (or to the review when it is in the review body; for a point someone else raised first, a link to their comment and to the reply, if any), the problem, the failure scenario and the suggested fix.
 4. What was fixed: every prior finding verified fixed, with the fixing commit and a link to its comment thread, or "No earlier findings."
 5. Still open from the previous review: each prior finding still open, with a link to its comment thread, or "No earlier findings."
-6. Not posted: refuted, disputed and unverifiable findings, one line each with the reason.
+6. Not posted: refuted, duplicate, already-addressed and unverifiable findings, one line each with the reason.
 
 Every link must be a full https:// URL.

@@ -286,7 +286,8 @@ const worktreeOf = (w, repo) => w.repos.find(r => r.repo === repo).worktree;
 /** The session most builds use: investigate (asking for octo-org/api), plan both repos, then commit in both. */
 const twoRepoBuild = (overrides = {}) => (w, prompt) => {
   // A finish session (work picked up): nothing left to add, unless the test says what to commit.
-  if (prompt.startsWith('/prowl:prowl-build finish ')) return overrides.finish ? overrides.finish(w, prompt) : { result: { status: 'complete', summary: 'Nothing left to do.' } };
+  if (w.turnKind === 'finish' && overrides.finish) return overrides.finish(w, prompt);
+  if (prompt.startsWith('/prowl:prowl-build finish ')) return { result: { status: 'complete', summary: 'Nothing left to do.' } };
   if (prompt.startsWith('/prowl:prowl-build ')) {
     fs.writeFileSync(path.join(w.briefDir, 'investigation.md'), '# Investigation\n');
     return { result: { status: 'needs-repos', repos: [{ repo: 'octo-org/api', why: 'the API stores carts' }], investigation: 'investigation.md' } };
@@ -342,6 +343,9 @@ async function pure(assert) {
   assert.ok(rules.slug('A very long title that goes on and on well past forty characters').length <= 40);
   const remote = ['main', 'develop', 'release/1.9', 'release/1.10', 'release/1.2'];
   assert.deepEqual(rules.pickBase({ 'octo-org/web': 'release/*' }, 'octo-org/web', { remote, defaultBranch: 'main' }), { base: 'release/1.10' }, 'a branch glob takes the highest version');
+  assert.deepEqual(['release/2.0-rc1', 'release/1.10.1', 'release/2.0', 'release/1.10', 'release/2.0-hotfix', 'release/1.9'].sort(rules.versionCompare),
+    ['release/1.9', 'release/1.10', 'release/1.10.1', 'release/2.0-hotfix', 'release/2.0-rc1', 'release/2.0'], 'a suffix sorts before the plain release, a further number after it');
+  assert.deepEqual(rules.pickBase({ 'octo-org/web': 'release/*' }, 'octo-org/web', { remote: [...remote, 'release/2.0', 'release/2.0-rc1'], defaultBranch: 'main' }), { base: 'release/2.0' }, 'not its release candidate');
   assert.deepEqual(rules.pickBase({ 'octo-org/*': 'develop', 'octo-org/web': 'release/*' }, 'octo-org/web', { remote, defaultBranch: 'main' }), { base: 'develop' }, 'the first rule that matches wins');
   assert.match(rules.pickBase({ 'octo-org/web': 'trunk' }, 'octo-org/web', { remote, defaultBranch: 'main' }).error, /isn't on its remote/);
   assert.deepEqual(rules.pickBase({}, 'octo-org/web', { planBase: 'develop', remote, defaultBranch: 'main' }), { base: 'develop' }, "no rule: the plan's base, if the remote has it");
@@ -367,6 +371,18 @@ async function pure(assert) {
     [{ ...ok, commits: [] }, /no commits/], [{ ...ok, commits: [{ repo: 'octo-org/web', sha: 'zzz' }] }, /not a commit sha/], [{ ...ok, prs: [] }, /no PR title/],
     [{ ...ok, commits: [{ repo: 'web', sha: 'abc1234' }] }, /owner\/name/], [{ status: 'blocked' }, /reason/], [{ status: 'question', question: {} }, /a question needs/], [[], /not a JSON object/]]) {
     assert.match(rules.validateBuild(r, dir), why, `invalid: ${JSON.stringify(r).slice(0, 60)}`);
+  }
+  // History's spend: what the turns reported; a turn that reported none is named, not shown as $0 or as the allowance the caps count.
+  assert.deepEqual([rules.spendText({ costUsd: 3.5, turns: [{ costUsd: 3.5 }] }), rules.spendText({ costUsd: 53.5, turns: [{ costUsd: 3.5 }, { costUsd: 50, costUnknown: true }] }), rules.spendText({ costUsd: 0, turns: [{ costUsd: 0, costUnknown: true }] }), rules.spendText({})],
+    ['$3.50', '$3.50 + cost not reported', 'cost not reported', '$0.00']);
+  // A question that takes several picks may default to several of its options.
+  const several = { id: 'Q1', question: 'Which stores?', options: ['web', 'ios', 'android'], default: ['web', 'ios'], multiple: true };
+  assert.deepEqual([rules.validateBuild({ status: 'needs-approval', plan: 'plan.md', openQuestions: [several] }, dir), rules.validateBuild({ status: 'question', question: several }, dir)], ['', ''], 'several defaults');
+  assert.match(rules.validateBuild({ status: 'question', question: { ...several, default: [1, 2] } }, dir), /default and context must be text/);
+  // The plan and the investigation are files in the brief folder: a path that leads out of it is refused, even one that exists.
+  for (const r of [{ status: 'needs-approval', plan: path.dirname(dir) }, { status: 'needs-approval', plan: path.join('..', path.basename(dir), '..') },
+    { status: 'question', question: { id: 'Q1', question: 'Which?' }, investigation: path.join(dir, '..', 'elsewhere.md') }]) {
+    assert.match(rules.validateBuild(r, dir), /isn't in the brief folder/, `outside the brief folder: ${r.plan || r.investigation}`);
   }
   fs.rmSync(dir, { recursive: true });
 
@@ -427,6 +443,18 @@ async function pure(assert) {
   assert.equal(env.PROWL_WORK_ROOTS, ['/wt/web', '/wt/api', '/w/AB123'].join(path.delimiter));
   assert.ok(env.PROWL_BRIEF_DIR === '/w/AB123' && env.PROWL_UNATTENDED === '1' && env.PROWL_TRACKER_HOSTS.includes('https://example.atlassian.net'));
   assert.ok(!('JIRA_API_TOKEN' in env) && !('AZURE_DEVOPS_EXT_PAT' in env), 'never a tracker token');
+  // A push the hook can't see (from a script, say) goes nowhere: for pushes only, GitHub's addresses lead to one git can't reach.
+  assert.deepEqual([env.GIT_CONFIG_COUNT, env.GIT_CONFIG_KEY_0, env.GIT_CONFIG_VALUE_0, env.GIT_CONFIG_VALUE_1, env.GIT_CONFIG_VALUE_2],
+    ['3', 'url.prowl-fence-no-push://session/.pushInsteadOf', 'https://github.com/', 'git@github.com:', 'ssh://git@github.com/']);
+  assert.deepEqual([workEnv(scfg, w, { GIT_CONFIG_COUNT: '2' }).GIT_CONFIG_COUNT, workEnv(scfg, w, { GIT_CONFIG_COUNT: '2' }).GIT_CONFIG_VALUE_2], ['5', 'https://github.com/'], 'after config the environment already passes');
+  const pushless = fs.mkdtempSync(path.join(os.tmpdir(), 'prowl-nopush-'));
+  git(pushless, 'init', '-q');
+  git(pushless, 'remote', 'add', 'origin', 'https://github.com/octo-org/web.git');
+  git(pushless, 'remote', 'add', 'ssh', 'git@github.com:octo-org/web.git');
+  const urlIn = (...a) => execFileSync('git', ['-C', pushless, 'remote', 'get-url', ...a], { encoding: 'utf8', env: { ...process.env, ...env, PATH: process.env.PATH } }).trim();
+  assert.deepEqual([urlIn('--push', 'origin'), urlIn('--push', 'ssh'), urlIn('origin')],
+    ['prowl-fence-no-push://session/octo-org/web.git', 'prowl-fence-no-push://session/octo-org/web.git', 'https://github.com/octo-org/web.git'], "in a session's environment a push to GitHub goes nowhere; a fetch is untouched");
+  fs.rmSync(pushless, { recursive: true, force: true });
 }
 
 // ---- The trackers' board access, through the REST fakes ----
@@ -920,6 +948,107 @@ async function builds(assert) {
   assert.deepEqual(h.server.labels('PROJ-123'), ['web', 'Ready-for-Review'], 'Jira: the done label hyphenated');
   await assert.rejects(h.b.enqueue('AB#9', 'manual'), /use PROJ-123/);
   h.done();
+
+  // The guards read .gitattributes as they were before the session: its own `* -diff` can't turn a big file, or a secret in it, binary.
+  h = harness('ado', twoRepoBuild({ files: { web: { '.gitattributes': '* -diff\n', 'src/big.js': `${'x\n'.repeat(5000)}const k = "AKIAABCDEFGHIJKLMNOP";\n` }, api: { 'src/carts.js': 'export const store = () => {};\n' } } }));
+  await h.poll();
+  assert.deepEqual([h.b.needs()[0]?.kind, h.gh.prs.length, remoteHas(h.bares['octo-org/web'], branch)], ['guard', 0, false], "a session's .gitattributes hides nothing from the guards");
+  assert.match(h.b.needs()[0].question, /over Max lines changed.*an AWS access key|\.gitattributes, which can hide/);
+  h.done();
+
+  // Prowl's push sends the commit the guards checked and nothing else, whatever the clone's config says: no tag a session made goes along.
+  h = harness('ado', (w2, prompt) => {
+    const r = twoRepoBuild()(w2, prompt);
+    if (prompt.startsWith('approve')) {
+      git(worktreeOf(w2, 'octo-org/web'), 'config', 'push.followTags', 'true');
+      git(worktreeOf(w2, 'octo-org/web'), 'tag', '-a', 'v9.9.9', '-m', 'release');
+    }
+    return r;
+  });
+  await h.poll();
+  assert.deepEqual([h.b.history()[0].status, execFileSync('git', ['ls-remote', '--tags', h.bares['octo-org/web']], { encoding: 'utf8' }).trim()], ['following', ''], "a session's tag is never pushed");
+  h.done();
+
+  // A push the remote refuses goes to Needs you at once: no retry every minute, running your checks again each time.
+  h = harness('ado', twoRepoBuild());
+  const ran = path.join(h.root, 'checks-ran.txt');
+  fs.writeFileSync(CHECKS_PATH, JSON.stringify({ 'octo-org/*': { run: [`node -e "require('fs').appendFileSync(process.argv[1], 'x')" ${JSON.stringify(ran)}`] } }));
+  const declinePushes = on => Object.values(h.bares).forEach(bare => {
+    fs.mkdirSync(path.join(bare, 'hooks'), { recursive: true });
+    if (on) fs.writeFileSync(path.join(bare, 'hooks', 'pre-receive'), '#!/bin/sh\necho "push declined by a repository rule" >&2\nexit 1\n', { mode: 0o755 });
+    else fs.rmSync(path.join(bare, 'hooks', 'pre-receive'));
+  });
+  declinePushes(true);
+  await h.poll();
+  w = h.b.history()[0];
+  assert.deepEqual([w.status, h.b.needs()[0]?.kind, h.b.needs()[0]?.retry, read(ran)], ['needs-you', 'failed', 'publish', 'xx'], 'a refused push: Needs you, the checks run once per repo');
+  assert.match(h.b.needs()[0].question, /octo-org\/web refused Prowl's push of AB#123/);
+  declinePushes(false);
+  h.b.answer(h.b.needs()[0], '');
+  await h.b.drain();
+  assert.deepEqual([w.status, h.gh.prs.length], ['following', 2], 'enter tries the push again');
+  fs.writeFileSync(CHECKS_PATH, '{}');
+  h.done();
+
+  // Any other step that keeps failing is yours after five tries.
+  h = harness('ado', twoRepoBuild());
+  h.gh.prForBranch = async () => { throw new Error('gh: HTTP 502'); };
+  await h.poll();
+  w = h.b.history()[0];
+  for (let i = 0; i < 3; i++) { w._retryAt = 0; await h.b.drain(); }
+  assert.deepEqual([w.step, w.failures, h.b.needs().length], ['publish', 4, 0], 'four tries: still retrying');
+  w._retryAt = 0;
+  await h.b.drain();
+  assert.deepEqual([h.b.needs()[0]?.kind, h.b.needs()[0]?.retry], ['failed', 'publish'], 'the fifth: Needs you');
+  assert.match(h.b.needs()[0].question, /keeps failing on AB#123 \(5 tries\): gh: HTTP 502/);
+  h.gh.prForBranch = async () => null;
+  h.b.answer(h.b.needs()[0], '');
+  await h.b.drain();
+  assert.deepEqual([w.status, w.failures], ['following', 0], 'enter retries the step, and the count starts over');
+  h.done();
+
+  // s as the build's last step finishes: nothing is left to stop, and the stop doesn't land on the ticket's next round instead.
+  let late = true;
+  h = harness('ado', twoRepoBuild(), { trackerWrap: t => ({ ...t, retag: async (...a) => { if (late) { late = false; h.b.stop(h.b.history()[0]); } return t.retag(...a); } }) });
+  await h.poll();
+  w = h.b.history()[0];
+  assert.deepEqual([w.status, w.stopRequested, h.server.tags(123), JSON.parse(read(path.join(h.root, 'work.json'))).records[0].stopRequested],
+    ['following', false, ['Web', 'Ready for Review'], false], 'a stop that came too late is dropped, not kept for later');
+  assert.ok(h.logs.some(l => /AB#123: finished before the stop reached it/.test(l)));
+  h.done();
+
+  // s on a ticket still waiting for a slot, never claimed, takes no tag off it; s on a claimed one takes off In Development, never a review's tag.
+  h = harness('ado', () => ({ result: { status: 'blocked', reason: 'no access' } }));
+  await h.poll(); // AB#123 is claimed and waits in Needs you: the one slot is taken
+  const waiting = await h.b.enqueue('AB#124', 'manual');
+  await h.b.drain();
+  h.server.setTags(124, ['Web', 'In Review']); // a teammate's review claims it meanwhile
+  h.b.stop(waiting);
+  await new Promise(r => setTimeout(r, 20));
+  assert.deepEqual([waiting.status, waiting.claimedAt, h.server.tags(124)], ['stopped', null, ['Web', 'In Review']], 'not claimed: its tags are not this run\'s to remove');
+  h.server.setTags(123, ['Web', 'In Development', 'In Review']);
+  await h.b.skip(h.b.needs()[0]);
+  assert.deepEqual([h.b.history().find(r => r.key === 'AB#123').status, h.server.tags(123)], ['stopped', ['Web', 'In Review']], 'claimed: In Development comes off, the review\'s tag stays');
+  h.done();
+
+  // A turn the time cap kills leaves no result event: its cost isn't reported, so the caps count all it was allowed. One
+  // that never reached the model (it couldn't start) spent nothing.
+  for (const reachedModel of [true, false]) {
+    h = harness('ado', twoRepoBuild(), { cfgOver: { maxBudgetUsd: 20 } });
+    let running = true;
+    Object.assign(h.session, { alive: () => running, kill: () => { running = false; },
+      start: (cfg, appDir, w2) => {
+        const logPath = path.join(h.root, 'turn.ndjson');
+        fs.writeFileSync(logPath, reachedModel ? `${JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'Reading the ticket.' }] } })}\n` : 'Error: not signed in\n');
+        Object.assign(w2, { startedAt: Date.now() - 999 * 60_000, logPath, sessionStarted: true, pid: null });
+      } });
+    await h.b.poll();
+    for (let i = 0; i < 6; i++) { h.b.tick(); await h.b.idle(); }
+    w = h.b.history()[0];
+    assert.deepEqual([h.b.needs()[0]?.kind, w.costUsd, w.sessionCostUsd, Boolean(w.turns[0].costUnknown), rules.spendText(w)],
+      reachedModel ? ['cap', 20, 20, true, 'cost not reported'] : ['cap', 0, 0, false, '$0.00'], `a killed turn's cost (reached the model: ${reachedModel})`);
+    h.done();
+  }
 }
 
 // ---- Following the PRs through review ----
@@ -1256,6 +1385,20 @@ async function feedback(assert) {
   assert.equal(h.b.needs()[0]?.kind, 'cap');
   assert.ok(h.server.tags(123).includes('In Development'), 'keeping In Development');
   h.done();
+
+  // A rebuild after a round pushed to the first build's branch steps past that branch too: the round's commit is Prowl's.
+  h = harness('ado', roundScript());
+  await h.poll();
+  addFeedback(h, h.gh.prs.find(p => p.repo === 'octo-org/web').url);
+  h.server.setTags(123, ['Web', 'Reviewed']);
+  await h.poll();
+  assert.equal(h.b.history()[0].rounds, 1);
+  for (const p of h.gh.prs) p.state = 'CLOSED';
+  await h.poll();
+  h.server.setTags(123, ['Web', 'Ready to Start']);
+  await h.poll();
+  assert.deepEqual([h.b.needs().map(n => n.question), remoteHas(h.bares['octo-org/web'], 'prowl/123-save-the-cart-between-visits-2')], [[], true], 'a rebuild after a round uses -2');
+  h.done();
 }
 
 // ---- Picking up work at any stage: your branches, your PRs' failing checks and conflicts, others' work as context ----
@@ -1273,10 +1416,14 @@ function pushTo(h, repo, branch, files, who = 'Prowl Test', from = 'main') {
 }
 const remoteHead = (h, repo, branch) => execFileSync('git', ['ls-remote', h.bares[repo], `refs/heads/${branch}`], { encoding: 'utf8' }).split(/\s/)[0];
 
-/** A finish session that commits on top of each branch it continues (and nothing else), and says done. */
+/** A finish session that plans what is left, and once that is approved commits on top of each branch it continues (and nothing else), and says done. */
 const finishOnTop = (w, prompt) => {
-  if (!prompt.startsWith('/prowl:prowl-build finish ')) return { result: 'unexpected prompt' };
   const recs = w.repos.filter(r => r.continued);
+  if (prompt.startsWith('/prowl:prowl-build finish ')) {
+    fs.writeFileSync(path.join(w.briefDir, 'plan.md'), '# What is left\n');
+    return { result: { status: 'needs-approval', plan: 'plan.md', changes: recs.map(r => ({ repo: r.repo })), openQuestions: [] } };
+  }
+  if (!prompt.startsWith('approve')) return { result: 'unexpected prompt' };
   const commits = recs.map(r => ({ repo: r.repo, sha: commit(r.worktree, { 'FINISH.md': `finished ${r.branch}\n` }, `${w.key}: finish it`) }));
   return { result: { status: 'done', commits, prs: recs.map(r => ({ repo: r.repo, title: `${w.key}: Save the cart`, body: 'Finished.' })), summary: 'Finished.' } };
 };
@@ -1382,6 +1529,35 @@ async function pickups(assert) {
   pushTo(h, 'octo-org/web', 'feature/123-cart', { 'src/cart.js': 'mine\n' });
   await h.poll();
   assert.ok(h.session.turns[0].prompt.startsWith('/prowl:prowl-build ') && !h.session.turns[0].prompt.includes('finish') && h.gh.prs.length === 2, 'off: built as before');
+  h.done();
+
+  // A finish session's branches are there from the start, so nothing but this keeps it to its plan: done before the
+  // plan is approved is not a usable result, and nothing is pushed.
+  const doneAtOnce = (w2) => {
+    const r = w2.repos.find(x => x.continued);
+    return { result: { status: 'done', commits: [{ repo: r.repo, sha: commit(r.worktree, { 'FINISH.md': `turn ${w2.turns.length}\n` }, `${w2.key}: finish it`) }], prs: [{ repo: r.repo, title: `${w2.key}: Save the cart`, body: '' }] } };
+  };
+  h = harness('ado', twoRepoBuild({ finish: doneAtOnce }), { cfgOver: { approvePlans: 'ask' } });
+  let tip = pushTo(h, 'octo-org/web', 'feature/123-cart', { 'src/cart.js': 'mine\n' });
+  await h.poll();
+  assert.deepEqual([remoteHead(h, 'octo-org/web', 'feature/123-cart'), h.gh.prs.length, h.b.needs()[0]?.kind, h.session.turns.length], [tip, 0, 'failed', 2], 'done without an approved plan: asked once more, then Needs you, nothing pushed');
+  assert.ok(h.session.turns[1].prompt.includes('done before its plan was approved'));
+  h.done();
+  // With Approve plans on ask, its plan waits for you like any other; approved, the work is pushed.
+  h = harness('ado', twoRepoBuild({ finish: finishOnTop }), { cfgOver: { approvePlans: 'ask' } });
+  tip = pushTo(h, 'octo-org/web', 'feature/123-cart', { 'src/cart.js': 'mine\n' });
+  await h.poll();
+  assert.deepEqual([h.b.needs()[0]?.kind, remoteHead(h, 'octo-org/web', 'feature/123-cart'), h.gh.prs.length], ['plan', tip, 0], "a finish session's plan waits in Needs you");
+  h.b.answer(h.b.needs()[0], '');
+  await h.b.drain();
+  assert.deepEqual([h.b.history()[0].status, h.gh.prs.length, remoteHead(h, 'octo-org/web', 'feature/123-cart') !== tip], ['following', 1, true], 'approved: pushed, and its PR opened');
+  h.done();
+
+  // A branch picked up takes its base from Base branches, as a build does: its PR opens against that, not the default branch.
+  h = harness('ado', twoRepoBuild({ finish: finishOnTop }), { cfgOver: { base: { 'octo-org/web': 'release/*' } } });
+  pushTo(h, 'octo-org/web', 'feature/123-cart', { 'src/cart.js': 'mine\n' }, 'Prowl Test', 'release/1.10');
+  await h.poll();
+  assert.deepEqual([h.gh.prs[0]?.base, h.gh.prs[0]?.head, h.session.turns[0].prompt.includes('feature/123-cart at ') && h.session.turns[0].prompt.includes(', from release/1.10')], ['release/1.10', 'feature/123-cart', true], "a picked-up branch's PR opens against the base rule's branch");
   h.done();
 }
 

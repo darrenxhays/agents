@@ -20,11 +20,14 @@ const DENY = [
   [/\bgh\s+pr\s+(?:create|merge|review|comment|close|edit|ready|reopen|lock|unlock)\b/, 'changing a PR: Prowl opens PRs and posts replies itself'],
   [/\bgh\s+repo\s+(?:create|delete|edit|fork|rename|archive|unarchive|sync|set-default|deploy-key|autolink)\b/, 'changing a repository'],
   [/\bgh\s+issue\s+(?:create|close|comment|delete|edit|lock|pin|reopen|transfer|unlock|unpin|develop)\b/, 'changing an issue'],
-  [/\baz\s+boards\s+(?:work-item\s+(?:create|update|delete|relation\s+(?:add|remove))|(?:area|iteration)\s+\S+\s+(?:create|update|delete|add|remove))\b/, 'a write to the tracker: Prowl tags the ticket itself'],
+  [/\baz\s+boards\b[^;&|\n]*?\b(?:work-item\s+(?:create|update|delete|relation\s+(?:add|remove))|(?:area|iteration)\s+\S+\s+(?:create|update|delete|add|remove))\b/, 'a write to the tracker: Prowl tags the ticket itself'],
   [/\baz\s+devops\s+invoke\b[^;&|\n]*--http-method[\s=]+['"]?(?:POST|PUT|PATCH|DELETE)\b/i, 'a write to the tracker: Prowl tags the ticket itself'],
+  [/\baz\s+rest\b[^;&|\n]*(?:\s-m|--method)[\s=]+['"]?(?:POST|PUT|PATCH|DELETE)\b/i, 'a write through az rest: Prowl tags the ticket itself'],
+  // GIT_CONFIG_COUNT and the like set aliases and push URLs the alias lookup can't see (and could unset the push block below).
+  [/\bGIT_CONFIG(?:_[A-Z0-9_]+)?\b/, "git config from the environment, which the fence can't read"],
   [/\bacli\s+jira\s+\S+\s+(?:create|edit|delete|transition|assign|comment|link|clone|archive)\b/, 'a write to the tracker: Prowl tags the ticket itself'],
 ];
-const WRITE_METHOD = /(?:^|\s)(?:-X|--method)[\s=]*['"]?(?:POST|PATCH|PUT|DELETE)\b/i;
+const WRITE_METHOD = /(?:^|\s)(?:-X|--method)[\s=]*['"]?(?:(?:POST|PATCH|PUT|DELETE)\b|[$`])/i; // a method the shell fills in may be one
 const GET_METHOD = /(?:^|\s)(?:-X|--method)[\s=]*['"]?GET\b/i;
 const FIELDS = /(?:^|\s)(?:-[fF]|--field|--raw-field|--input)(?:\s|=)/; // gh api sends fields as a POST unless told GET
 // Git subcommands, which an alias can't shadow: anything else after `git` may be an alias, and is looked up.
@@ -34,19 +37,41 @@ const GIT_BUILTINS = new Set(('add am apply archive bisect blame branch bundle c
   + 'replace reset restore rev-list rev-parse revert rm send-pack shortlog show show-branch show-ref sparse-checkout stash status submodule '
   + 'subtree switch symbolic-ref tag update-index update-ref var verify-commit version whatchanged worktree write-tree lfs').split(' '));
 
-/** Why setting git config `key` to `value` changes how or where git pushes, or ''. */
-function pushConfig(key, value) {
+/**
+ * Why setting git config `key` to `value` changes how or where git pushes, or ''. `sets`: false for a call that only
+ * reads the key (git config remote.origin.url).
+ */
+function pushConfig(key, value, sets = true) {
   if (new RegExp(`^${PUSH_CONFIG}$`, 'i').test(key)) return 'changing where a remote pushes';
   if (/^alias\./i.test(key) && /\b(?:push|send-pack)\b/.test(value)) return 'a git alias that pushes';
+  // Prowl's own push runs with the clone's config: its remote, what a push takes along (push.followTags), and any file it includes.
+  if (sets && /^(?:remote|push)\./i.test(key)) return 'changing git remotes or what a push sends';
+  if (sets && /^include(?:if)?\./i.test(key)) return "git config from a file the fence can't read";
   return '';
 }
 
-/** Why `gh api …` (one command, up to the next ; && || | or line break) writes to GitHub, or ''. */
-function apiWrite(cmd) {
+// gh subcommands that only read. Anything else may write to GitHub (or sign in, or add an alias that does), so it is denied.
+const GH_READS = new Set('view list diff checks status watch download clone'.split(' '));
+
+/** Why `gh <args>` writes to GitHub or can't be read, or ''. `args` are lexed words, so quoting and options hide nothing. */
+function ghWrite(args) {
+  const [group, verb] = args;
+  if (!group || /^(?:--version|--help|help|version)$/.test(group.text)) return '';
+  if (args.slice(0, 2).some(a => a.dynamic || a.unreadable)) return "a gh command the fence can't read";
+  if (group.text === 'api') return apiWrite(args.slice(1).map(a => a.text).join(' '), args.some(a => a.dynamic));
+  if (group.text === 'search' || (group.text === 'status' && !verb) || (verb && (verb.text === '--help' || GH_READS.has(verb.text)))) return '';
+  return `gh ${group.text}${verb ? ` ${verb.text}` : ''}: only gh's read commands (${[...GH_READS].join(', ')}, search, and api reads) are allowed, with the subcommand straight after gh`;
+}
+
+/**
+ * Why `gh api …` (one command, up to the next ; && || | or line break) writes to GitHub, or ''. `shellBuilt`: the
+ * shell expands something in it (worked out from the text's quoting, unless the caller knows from the lexed words).
+ */
+function apiWrite(cmd, shellBuilt = /\$[\w{(]|`/.test(cmd.replace(/'[^']*'/g, "''"))) {
   if (/\bgraphql\b/.test(cmd)) {
     // A query read from a file or built by the shell can't be checked, so it is treated as a mutation.
     if (/(?:^|\s)(?:-[fF]\s*|--(?:raw-)?field[\s=]+)['"]?query=@|(?:^|\s)--input\b/.test(cmd)) return 'a GraphQL query read from a file';
-    if (/\$[\w{(]|`/.test(cmd.replace(/'[^']*'/g, "''"))) return 'a GraphQL query built by the shell';
+    if (shellBuilt) return 'a GraphQL query built by the shell';
     return /\bmutation\b/.test(cmd) ? 'a GraphQL mutation' : '';
   }
   if (WRITE_METHOD.test(cmd)) return 'a write to the GitHub API';
@@ -168,18 +193,21 @@ export function lex(text) {
   return Object.assign(cmds.filter(cmd => cmd.length), { subs });
 }
 
-/** The words a brace expansion makes of `text` ({a,b} → a, b; nested too), or null for one the fence can't follow ({1..3}). */
-function braceExpand(text) {
+/**
+ * The words a brace expansion makes of `text` ({a,b} → a, b; nested too), or null for one the fence can't follow
+ * ({1..3}, or more words than `budget` has left: {a,b}{a,b}… doubles with every group).
+ */
+function braceExpand(text, budget = { left: 4096 }) {
   const m = /\{([^{}]*)\}/.exec(text);
-  if (!m) return [text];
+  if (!m) return budget.left-- > 0 ? [text] : null;
   if (m[1].includes('..')) return null;
   if (!m[1].includes(',')) { // not an expansion: keep it, and expand what comes after it
-    const rest = braceExpand(text.slice(m.index + m[0].length));
+    const rest = braceExpand(text.slice(m.index + m[0].length), budget);
     return rest && rest.map(r => text.slice(0, m.index + m[0].length) + r);
   }
   const out = [];
   for (const part of m[1].split(',')) {
-    const more = braceExpand(text.slice(0, m.index) + part + text.slice(m.index + m[0].length));
+    const more = braceExpand(text.slice(0, m.index) + part + text.slice(m.index + m[0].length), budget);
     if (!more) return null;
     out.push(...more);
   }
@@ -235,9 +263,11 @@ function writeTargets(cmd) {
   let at = 0;
   const lead = ['sudo', 'env', 'command', 'builtin', 'exec', 'nohup', 'time', 'if', 'then', 'else', 'elif', 'while', 'until', 'do', '!', '{'];
   // Each wrapper's options, and those of them that take a value (env -u NAME, sudo -u user). env -S runs its value.
-  const wrappers = { sudo: /^(?:-[ughpCDRTU]|--(?:user|group|host|prompt|chdir|role|type|close-from|other-user|command-timeout))$/, env: /^(?:-[uCS]|--(?:unset|chdir|split-string))$/, command: null, builtin: null, exec: /^-a$/, nohup: null, time: /^-[of]$/ };
+  const wrappers = { sudo: /^(?:-[ughpCDRTU]|--(?:user|group|host|prompt|chdir|role|type|close-from|other-user|command-timeout))$/, env: /^(?:-[uCS]|--(?:unset|chdir|split-string))$/, command: null, builtin: null, exec: /^-a$/, nohup: null, time: /^-[of]$/,
+    timeout: /^(?:-[ks]|--(?:kill-after|signal))$/, nice: /^(?:-n|--adjustment)$/, xargs: /^(?:-[EILPadns]|--(?:arg-file|delimiter|eof|replace|max-lines|max-args|max-procs|max-chars))$/ };
   let split = null;
   let chdir = null; // env -C dir: where the command runs
+  let piped = false; // xargs: more arguments come from its input, which the fence can't read
   while (at < words.length && (/^\w+=/.test(words[at].text) || lead.includes(words[at].text) || Object.hasOwn(wrappers, path.basename(words[at].text)))) {
     const wrapper = path.basename(words[at++].text); // /usr/bin/env too
     if (!Object.hasOwn(wrappers, wrapper)) continue;
@@ -249,20 +279,25 @@ function writeTargets(cmd) {
       if (attached != null) { at++; continue; }
       at += wrappers[wrapper]?.test(words[at].text) ? 2 : 1;
     }
+    if (wrapper === 'timeout') at++; // its duration
+    if (wrapper === 'xargs') piped = true;
   }
   if (split) {
     // env -S 'rm -rf' x: the split string and the words after it make one command line.
-    return { name: '', words, args: [], chdir, split: [split.text, unparse(words.slice(at))].join(' '), targets: targets.filter(Boolean) };
+    return { name: '', words, args: [], chdir, split: [split.text, unparse(words.slice(at))].join(' '), targets: targets.filter(Boolean), piped };
   }
+  // A name the shell fills in ($GIT, $(which git)) could be any command; "$DIR/jest" is still jest.
+  const unreadName = Boolean(words[at]?.dynamic) && !/^(?!.*\$\()[^`]*\/[^$`/]+$/.test(words[at].text);
   const name = path.basename(words[at]?.text || '');
   const args = expand(words.slice(at + 1)); // cp a{,.bak} is two operands
+  if (piped && ['tee', 'rm', 'rmdir', 'unlink', 'mv', 'cp', 'ln'].includes(name)) targets.push({ text: 'what xargs reads', unreadable: true });
   const operands = args.filter(a => a.dynamic || !a.text.startsWith('-') || a.text === '-');
   // cp and mv's destination folder: -t dir, -tdir, bundled (-vt dir, -vtdir), --target-directory dir or =dir.
   const dirFlag = args.findIndex(a => /^--target-directory(?:=|$)|^-[a-zA-Z]*t/.test(a.text));
   const flag = args[dirFlag]?.text || '';
   const attached = flag.startsWith('--') ? flag.split('=').slice(1).join('=') : flag.replace(/^-[a-zA-Z]*?t/, '');
   const intoDir = dirFlag < 0 ? null : attached ? { ...args[dirFlag], text: attached } : args[dirFlag + 1];
-  if (name === 'tee' || name === 'rm' || name === 'rmdir' || name === 'unlink') targets.push(...operands);
+  if (name === 'tee' || name === 'rm' || name === 'rmdir' || name === 'unlink' || name === 'ln') targets.push(...operands); // a link out of the folders is a way to write there
   else if (name === 'mv') targets.push(...operands, ...(intoDir ? [intoDir] : [])); // a move also removes its sources
   else if (name === 'cp') {
     if (intoDir) targets.push(intoDir);
@@ -270,7 +305,7 @@ function writeTargets(cmd) {
     else if (!intoDir && operands.length === 1 && operands[0].dynamic) targets.push(operands[0]); // "$@"-like: it may be several, the last the destination
     else if (!intoDir && operands.length > 1) targets.push(operands.at(-1));
   }
-  return { name, words, args, chdir, split: '', targets: targets.filter(Boolean) };
+  return { name, words, args, chdir, split: '', targets: targets.filter(Boolean), piped, unreadName };
 }
 
 /**
@@ -286,7 +321,7 @@ function resolvePath(word, cwd, envSet = false) {
   if (p === '~' || p.startsWith('~/')) {
     if (envSet) return '';
     p = path.join(os.homedir(), p.slice(1));
-  }
+  } else if (p.startsWith('~')) return ''; // ~user, ~+ and ~- are folders the fence doesn't know
   if (cwd == null && !path.isAbsolute(p)) return '';
   return path.resolve(cwd, p);
 }
@@ -378,7 +413,8 @@ export function deniedCommand(command, ctx = {}) {
     }
     const web = webWrite(cmd, ctx.trackerHosts || [], text);
     if (web) return web;
-    const { name, words, args, chdir, split, targets } = writeTargets(cmd);
+    const { name, words, args, chdir, split, targets, piped, unreadName } = writeTargets(cmd);
+    if (unreadName) return `running ${words.find(x => x.dynamic).text}, a command the fence can't read`;
     const runsIn = base => (chdir ? resolvePath(chdir, base, envSet) || null : base); // where this one command runs, from `base`
     const here = runsIn(cwd);
     if (split) { // env -S 'rm -rf x': the value is the command
@@ -390,6 +426,14 @@ export function deniedCommand(command, ctx = {}) {
       const why = nested(args[dashC + 1].text, runsIn);
       if (why) return why;
     }
+    if (name === 'eval' && args.length) { // eval "git pu""sh": its words, joined, are the command
+      const why = nested(args.map(a => a.text).join(' '));
+      if (why) return why;
+    }
+    if (name === 'gh') {
+      const why = piped ? "a gh command whose arguments xargs reads, which the fence can't" : ghWrite(args);
+      if (why) return why;
+    }
     if (['sh', 'bash', 'zsh', 'dash', 'ksh'].includes(name) && dashC < 0) {
       for (const body of cmd.bodies || []) { // bash <<'SH' … SH: the heredoc is the script
         const why = nested(body, runsIn);
@@ -397,6 +441,7 @@ export function deniedCommand(command, ctx = {}) {
       }
     }
     if (name === 'git') {
+      if (piped) return "a git command whose arguments xargs reads, which the fence can't";
       let i = 0; // in git's own words, after env, command and the like
       const moves = []; // git -C dirs, in order: the alias is looked up where git runs
       let otherRepo = false; // --git-dir: another repository's config, not looked up
@@ -404,6 +449,7 @@ export function deniedCommand(command, ctx = {}) {
       while (args[i] && /^-/.test(args[i].text)) {
         if (args[i].text === '-C' && args[i + 1]) moves.push(args[i + 1]);
         if (/^--git-dir\b/.test(args[i].text)) otherRepo = true;
+        if (/^--config-env\b/.test(args[i].text)) return "git config from the environment, which the fence can't read";
         if (args[i].text === '-c' && args[i + 1]) { // -c 'alias.x=push …', -c remote.origin.pushurl=…
           const [key, ...value] = args[i + 1].text.split('=');
           const why = pushConfig(key, value.join('='));
@@ -412,6 +458,7 @@ export function deniedCommand(command, ctx = {}) {
         }
         i += /^(?:-[Cc]|--(?:git-dir|work-tree|namespace|exec-path|config-env))$/.test(args[i].text) ? 2 : 1;
       }
+      if (args[i]?.dynamic || args[i]?.unreadable) return `the git command ${args[i].text}, which the fence can't read`; // git $SUB may be a push
       const sub = args[i]?.text;
       const then = args[i + 1]?.text;
       // The same as DENY, for options the regexes can't step over (a quoted -C "My App", say).
@@ -420,8 +467,10 @@ export function deniedCommand(command, ctx = {}) {
       if (sub === 'remote' && /^(?:add|remove|rm|rename|set-url|set-head|set-branches|prune|update)$/.test(then || '')) return 'changing git remotes';
       if (sub === 'config') { // git config [set|add …] [options] key [value]
         const rest = args.slice(i + 1).filter(a => !a.text.startsWith('-')).map(a => a.text);
-        const k = rest.findIndex(t => /^(?:alias|remote|url)\./i.test(t));
-        const why = k >= 0 && pushConfig(rest[k], rest.slice(k + 1).join(' '));
+        const k = rest.findIndex(t => /^(?:alias|remote|url|push|include|includeif)\./i.test(t));
+        // A key alone only reads it, unless the call unsets or renames.
+        const sets = rest.length > k + 1 || args.slice(i + 1).some(a => /^(?:--)?(?:unset|unset-all|remove-section|rename-section)$/.test(a.text));
+        const why = k >= 0 && pushConfig(rest[k], rest.slice(k + 1).join(' '), sets);
         if (why) return why;
       }
       if (sub && ctx.alias && !GIT_BUILTINS.has(sub)) {
@@ -450,11 +499,13 @@ export function deniedCommand(command, ctx = {}) {
         if (!insideRoots(file, writable)) return `writing outside the session's folders (${file})`;
       }
     }
-    if (name === 'cd') { // after if, then and the like too; cd -- dir, cd -P dir; a dir it can't read leaves the cwd unknown
+    if (name === 'cd' || name === 'pushd') { // after if, then and the like too; cd -- dir, cd -P dir; a dir it can't read leaves the cwd unknown
       const dir = args.find(a => a.dynamic || !/^-/.test(a.text));
       failed.push({ dir: cwd, applies: false }); // where the shell stays if this cd fails
-      cwd = dir ? resolvePath(dir, cwd, envSet) || null : os.homedir();
+      // pushd alone, or pushd +1, goes to a folder on the shell's stack, which the fence doesn't keep.
+      cwd = dir && !(name === 'pushd' && /^\+\d*$/.test(dir.text)) ? resolvePath(dir, cwd, envSet) || null : name === 'cd' ? os.homedir() : null;
     }
+    if (name === 'popd') cwd = null;
   }
   return '';
 }
@@ -479,6 +530,8 @@ export function insideRoots(file, roots) {
   });
 }
 
+const SHELL_TOOLS = ['Bash', 'PowerShell', 'Monitor']; // each runs `command` in a shell
+
 /** True when MCP tool `name` matches the allow list (tool names, or patterns with * wildcards). */
 export const mcpAllowed = (name, allow = []) => allow.some(a => new RegExp(`^${String(a).replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`).test(name));
 
@@ -494,15 +547,20 @@ export function fenceDecision(call, env = process.env, alias = null) {
   const roots = String(env[KINDS[kind]] || '').split(path.delimiter).filter(Boolean);
   const tool = String(call?.tool_name || '');
   let why = '';
-  if (tool.startsWith('mcp__')) {
-    let allow = [];
-    try { allow = JSON.parse(env.PROWL_MCP_ALLOW || '[]'); } catch { /* none */ }
-    if (!mcpAllowed(tool, allow)) why = `the MCP tool ${tool}, which isn't in the allow list`;
-  } else if (['Bash', 'PowerShell'].includes(tool)) {
-    why = deniedCommand(input.command, { cwd: call.cwd, roots, trackerHosts: String(env.PROWL_TRACKER_HOSTS || '').split(',').filter(Boolean), alias });
-  } else if (['Edit', 'Write', 'NotebookEdit'].includes(tool)) {
-    const file = input.file_path || input.notebook_path;
-    if (file && !insideRoots(file, roots)) why = `writing outside the session's folders (${roots.join(', ')})`;
+  try {
+    if (!call || typeof call !== 'object') why = "a tool call the fence couldn't read";
+    else if (tool.startsWith('mcp__')) {
+      let allow = [];
+      try { allow = JSON.parse(env.PROWL_MCP_ALLOW || '[]'); } catch { /* none */ }
+      if (!mcpAllowed(tool, allow)) why = `the MCP tool ${tool}, which isn't in the allow list`;
+    } else if (SHELL_TOOLS.includes(tool)) {
+      why = deniedCommand(input.command, { cwd: call.cwd, roots, trackerHosts: String(env.PROWL_TRACKER_HOSTS || '').split(',').filter(Boolean), alias });
+    } else if (['Edit', 'Write', 'NotebookEdit'].includes(tool)) {
+      const file = input.file_path || input.notebook_path;
+      if (file && !insideRoots(file, roots)) why = `writing outside the session's folders (${roots.join(', ')})`;
+    }
+  } catch {
+    why = "a command the fence couldn't read"; // one that breaks the fence's own reading (nested too deep, say) is denied, not let through
   }
   return why ? {
     hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `Prowl's unattended sessions don't allow ${why}.` },
@@ -532,7 +590,7 @@ export const DISALLOWED = [
  * unless some of their tools are allowed (the hook then denies every other MCP tool).
  */
 export const fenceArgs = (mcpAllow = []) => [
-  '--disallowedTools', ...DISALLOWED, ...(mcpAllow.length ? [] : ['mcp__*']),
+  '--disallowedTools', ...DISALLOWED, 'Monitor', ...(mcpAllow.length ? [] : ['mcp__*']), // Monitor: a second shell a session has no use for
   ...(mcpAllow.length ? [] : ['--strict-mcp-config']),
 ];
 
@@ -542,7 +600,7 @@ export function fenceSettings(appDir, node = process.execPath) {
   const q = p => `"${p.replace(/\\/g, '/')}"`;
   return {
     hooks: {
-      PreToolUse: [{ matcher: 'Bash|PowerShell|Edit|Write|NotebookEdit|mcp__.*', hooks: [{ type: 'command', command: `${q(node)} ${q(path.join(appDir, 'hooks', 'fence-guard.mjs'))}` }] }],
+      PreToolUse: [{ matcher: 'Bash|PowerShell|Monitor|Edit|Write|NotebookEdit|mcp__.*', hooks: [{ type: 'command', command: `${q(node)} ${q(path.join(appDir, 'hooks', 'fence-guard.mjs'))}` }] }],
     },
   };
 }
