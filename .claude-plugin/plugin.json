@@ -18,6 +18,9 @@
   "hooks": {
     "SessionStart": [
       { "matcher": "startup|clear|compact", "hooks": [{ "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh\"" }] }
+    ],
+    "SubagentStart": [
+      { "matcher": "^(general-purpose|claude)$", "hooks": [{ "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh\" subagent" }] }
     ]
   }
 }

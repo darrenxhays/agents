@@ -84,7 +84,9 @@ Follow `AGENTS.md` at the repo root and apply pragmatic-engineer. In short:
    (minor for features) and add the `## x.y.z` section at the top of
    `apps/prowl/CHANGELOG.md`, one line per change, written for people using
    Prowl. Mention config changes; link any new config file in the Config view
-   in `src/tui.mjs`.
+   (the `file` rows in `src/fields.mjs`). Update `apps/prowl/README.md` too:
+   the feature's own section, and the config and key tables for anything it
+   adds to them.
 4. Run `node apps/prowl/prowl.mjs --self-test` and fix what fails.
 5. Don't commit or push unless the user asks: a pushed bump on `main` releases
    to everyone.

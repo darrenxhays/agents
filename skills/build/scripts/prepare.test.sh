@@ -123,5 +123,8 @@ out="$(PATH="$tmp/bin:$no_codex_path" bash "$scripts/prepare.sh")"
 [ "$(field 'j["codex"]["login_ok"]' <<<"$out")" = True ] || fail "login status"
 [ "$(field 'sorted(m["slug"] for m in j["codex"]["models"])' <<<"$out")" = "['m-10-quick', 'm-2.1-work', 'm-3-frontier']" ] || fail "catalog filter: $out"
 [ "$(field '[m["efforts"] for m in j["codex"]["models"] if m["slug"]=="m-2.1-work"][0]' <<<"$out")" = "['low', 'medium', 'high']" ] || fail "ultra removed"
+[ "$(field 'j["codex"]["network"]' <<<"$out")" = False ] || fail "sandbox network off by default"
+out="$(BUILD_CODEX_NETWORK=true PATH="$tmp/bin:$no_codex_path" bash "$scripts/prepare.sh")"
+[ "$(field 'j["codex"]["network"]' <<<"$out")" = True ] || fail "sandbox network opt-in reported"
 
 echo ok

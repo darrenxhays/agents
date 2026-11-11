@@ -62,6 +62,13 @@ class ValidateTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported tag <div>"):
             message.validate("<div>hi</div>")
 
+    def test_rejects_link_that_is_not_http_https_or_mailto(self):
+        with self.assertRaisesRegex(ValueError, "unsupported link 'javascript:alert\\(1\\)'"):
+            message.validate('<a href="javascript:alert(1)">x</a>')
+        with self.assertRaisesRegex(ValueError, "unsupported link ''"):
+            message.validate("<a href>x</a>")
+        message.validate('<a href="mailto:a@example.com">a</a> <a href="HTTPS://example.com">b</a>')
+
     def test_rejects_unsupported_attribute(self):
         with self.assertRaisesRegex(ValueError, "unsupported attribute style on <b>"):
             message.validate('<b style="color:red">hi</b>')
@@ -79,7 +86,7 @@ class CleanupTest(unittest.TestCase):
             other.write_text("<title>Message</title>")
             out = tmp / "new-topic-message.html"
 
-            message.write_preview(out, "<b>hi</b>")
+            message.write_preview(out, "<b>hi</b>", "hi")
             message.remove_old_previews(out)
 
             self.assertFalse(old.exists())
@@ -87,6 +94,20 @@ class CleanupTest(unittest.TestCase):
             self.assertTrue(other.exists())
             self.assertIn("<b>hi</b>", out.read_text())
             self.assertIn(message.MARKER, out.read_text())
+
+
+class PreviewTest(unittest.TestCase):
+    def test_copy_button_gets_the_fragment_and_the_plain_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "x-message.html"
+            fragment = 'See <a href="https://example.com">it</a> </script> {text_json}'
+
+            message.write_preview(out, fragment, "See it (https://example.com)")
+            page = out.read_text()
+
+            self.assertIn('var html = "See <a href=\\"https://example.com\\">it<\\/a> <\\/script> {text_json}"', page)
+            self.assertIn('text = "See it (https://example.com)";', page)
+            self.assertEqual(page.count("</script>"), 2)  # the fragment's own, and the page's
 
 
 if __name__ == "__main__":

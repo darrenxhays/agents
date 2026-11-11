@@ -4,9 +4,11 @@ Usage: python3 -I message.py <out.html> < fragment.html
 
 Reads an HTML fragment from stdin, checks that it uses only markup both apps
 render the same way, writes a preview page with a Copy button to <out.html>
-(removing older preview pages in that directory), puts the HTML and a
-plain-text fallback on the clipboard, and prints the plain text.
+(removing older preview pages in that directory), prints the plain text, and
+puts the HTML and a plain-text fallback on the clipboard. When the clipboard
+can't be set it exits non-zero, with the preview page already written.
 """
+import json
 import re
 import subprocess
 import sys
@@ -17,6 +19,8 @@ ALLOWED_TAGS = {"a", "b", "i", "s", "code", "pre", "br", "ul", "ol", "li"}
 # Not after a letter or digit, so times like 10:30:45 and ratios like 1:2:3 pass.
 SHORTCODE = re.compile(r"(?<!\w):[a-z0-9_+-]+:")
 URL = re.compile(r"\S+://\S+")
+# Schemes both apps keep as links; anything else pastes as plain text.
+LINK = re.compile(r"(https?://|mailto:)", re.I)
 MARKER = "<title>Message</title>"
 
 PAGE = """<!doctype html>
@@ -35,13 +39,22 @@ PAGE = """<!doctype html>
 </div>
 <button id="copy" type="button">Copy</button>
 <script>
+var html = {html_json}, text = {text_json};
 document.getElementById("copy").addEventListener("click", function () {
+  // Copies what the helper put on the clipboard, not the browser's styled rendering of it.
+  function onCopy(event) {
+    event.clipboardData.setData("text/html", html);
+    event.clipboardData.setData("text/plain", text);
+    event.preventDefault();
+  }
   var range = document.createRange();
   range.selectNodeContents(document.getElementById("message"));
   var selection = window.getSelection();
   selection.removeAllRanges();
   selection.addRange(range);
+  document.addEventListener("copy", onCopy);
   document.execCommand("copy");
+  document.removeEventListener("copy", onCopy);
   this.textContent = "Copied!";
 });
 </script>
@@ -62,9 +75,11 @@ class Validator(HTMLParser):
         if tag not in ALLOWED_TAGS:
             self.problems.append(f"unsupported tag <{tag}>")
             return
-        for name, _ in attrs:
+        for name, value in attrs:
             if not (tag == "a" and name == "href"):
                 self.problems.append(f"unsupported attribute {name} on <{tag}>")
+            elif not LINK.match(value or ""):
+                self.problems.append(f"unsupported link {value or ''!r} (use an http, https, or mailto link)")
         if tag in ("code", "pre"):
             self.in_code += 1
 
@@ -168,9 +183,17 @@ def plain_text(fragment):
     return parser.text()
 
 
-def write_preview(out, fragment):
+def script_string(value):
+    """A JSON string that is safe inside a <script> element."""
+    return json.dumps(value).replace("</", "<\\/")
+
+
+def write_preview(out, fragment, text):
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(PAGE.replace("{fragment}", fragment), encoding="utf-8")
+    values = {"fragment": fragment, "html_json": script_string(fragment), "text_json": script_string(text)}
+    # One pass, so a message that contains a placeholder's name is left as written.
+    page = re.sub(r"\{(fragment|html_json|text_json)\}", lambda m: values[m.group(1)], PAGE)
+    out.write_text(page, encoding="utf-8")
 
 
 def remove_old_previews(out):
@@ -210,13 +233,13 @@ def main():
     except ValueError as err:
         sys.exit(f"message.py: {err}")
     text = plain_text(fragment)
-    write_preview(out, fragment)
+    write_preview(out, fragment, text)
     remove_old_previews(out)
+    print(text)
     try:
         set_clipboard(text, fragment)
     except (OSError, subprocess.CalledProcessError) as err:
-        sys.exit(f"message.py: could not set the clipboard ({err}); the preview page is at {out}")
-    print(text)
+        sys.exit(f"message.py: could not set the clipboard ({err}); copy the message from the preview page: {out}")
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ This skill applies whenever you produce a message for the user to send, not only
 
 ## 1. Write the message
 If a caller (another skill, a script, or the user) supplied a prebuilt HTML fragment, skip to step 2 and send it through unchanged. Otherwise write an HTML fragment that renders the same in both apps:
-- **Tags:** only `a`, `b`, `i`, `s`, `code`, `pre`, `br`, `ul`, `ol`, `li`, and no attributes except `href` on `a`. `<br>` is a line break and `<br><br>` a blank line. HTML-escape text: `&amp;`, `&lt;`, `&gt;`, and `&quot;` inside attributes.
+- **Tags:** only `a`, `b`, `i`, `s`, `code`, `pre`, `br`, `ul`, `ol`, `li`, and no attributes except `href` on `a`, which must be an `http`, `https`, or `mailto` link. `<br>` is a line break and `<br><br>` a blank line. HTML-escape text: `&amp;`, `&lt;`, `&gt;`, and `&quot;` inside attributes.
 - **Emoji:** real Unicode emoji (for example ✅), at most one, only when it adds meaning; none is fine. Never Slack `:shortcodes:`: Teams shows them as text.
 - **No Slack-only syntax:** no `<@U123>` mentions, `<!channel>`, `<url|label>` links, or `*bold*` mrkdwn. Don't emit placeholders for mentions or channel pings; if the user asked for one, tell them in your reply to type it after pasting.
 
@@ -42,9 +42,9 @@ MSG
 ```
 If you run in a sandbox, run this command outside it (in Claude Code, with `dangerouslyDisableSandbox`): the sandbox can't reach the clipboard.
 
-The helper rejects unsupported tags, attributes, and shortcodes, writes the preview page, removes its older preview pages in that directory, sets the clipboard to the HTML with a plain-text fallback, and prints the plain text. If it fails, show the user its error output and stop. Don't hand them a rebuilt message instead.
+The helper rejects unsupported tags, attributes, links, and shortcodes, writes the preview page, removes its older preview pages in that directory, prints the plain text, and sets the clipboard to the HTML with a plain-text fallback. If it fails, show the user its error output and stop. Don't hand them a rebuilt message instead. The one exception is `could not set the clipboard` (not on macOS, or no clipboard to reach): the preview page was still written and the plain text printed, so reply as in step 3.
 
 ## 3. Reply
-- Say the message is on the clipboard.
+- Say the message is on the clipboard. If the clipboard couldn't be set, say that instead, and that the preview page's **Copy** button copies it.
 - Link the preview page as `[Copy message](file://<preview path>)`, with `$HOME` expanded to the absolute path and spaces written as `%20`.
 - For a message you wrote, also show the plain text the helper printed.

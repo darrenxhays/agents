@@ -10,7 +10,8 @@ $rule
 fail() { echo "FAIL: $1"; exit 1; }
 # Optional second argument: the auto_use plugin option (unset = never configured);
 # third: the project's PRAGMATIC_ENGINEER_AUTO_USE override; fourth: the message_auto_use option.
-run() { HOME="$1" CLAUDE_PLUGIN_ROOT="$root" CLAUDE_PLUGIN_OPTION_AUTO_USE="$2" PRAGMATIC_ENGINEER_AUTO_USE="$3" CLAUDE_PLUGIN_OPTION_MESSAGE_AUTO_USE="$4" sh "$hook"; }
+# fifth: the hook's own argument ("subagent" for the SubagentStart hook).
+run() { HOME="$1" CLAUDE_PLUGIN_ROOT="$root" CLAUDE_PLUGIN_OPTION_AUTO_USE="$2" PRAGMATIC_ENGINEER_AUTO_USE="$3" CLAUDE_PLUGIN_OPTION_MESSAGE_AUTO_USE="$4" sh "$hook" $5; }
 context_of() { python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])'; }
 codex_home() { h=$(mktemp -d); mkdir "$h/.codex"; }
 agents() { cat "$h/.codex/AGENTS.md"; }
@@ -101,5 +102,18 @@ printf '%s' "$context" | tail -n 1 | grep -q '^The user turned off automatic use
 h=$(mktemp -d)
 run "$h" | grep -q additionalContext || fail "context without codex"
 [ ! -e "$h/.codex" ] || fail "created ~/.codex"
+
+# A subagent gets the skill body under its own event name, touches nothing in ~/.codex,
+# doesn't get the message instruction, and follows the same two switches.
+codex_home
+out=$(run "$h" "" "" false subagent)
+printf '%s' "$out" | grep -q '"hookEventName":"SubagentStart"' || fail "subagent event name"
+context=$(printf '%s' "$out" | context_of) || fail "invalid JSON for a subagent"
+printf '%s' "$context" | grep -q '^## Stop at the first rung that holds$' || fail "subagent context has the skill body"
+printf '%s' "$context" | grep -q 'message skill' && fail "subagent got the message instruction"
+[ -z "$(ls -A "$h/.codex")" ] || fail "subagent hook wrote to ~/.codex"
+[ -z "$(run "$h" false "" "" subagent)" ] || fail "subagent context printed when off"
+[ -z "$(run "$h" true false "" subagent)" ] || fail "subagent context printed when off in project"
+run "$h" false true "" subagent | grep -q additionalContext || fail "subagent context when on in project"
 
 echo "ok"

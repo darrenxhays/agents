@@ -260,7 +260,10 @@ print(json.dumps([entry for _, entry in best.values()]))
     models_error="could not read the Codex model catalog: $models"
     models="null"
   fi
-  codex_json="{\"login_ok\":$login_ok,\"login\":$(json_str "$login"),\"models\":$models,\"models_error\":$(json_or_null "$models_error")}"
+  # Whether run-codex.sh will open the sandbox's network (BUILD_CODEX_NETWORK=true).
+  network=false
+  [[ "${BUILD_CODEX_NETWORK:-}" == true ]] && network=true
+  codex_json="{\"login_ok\":$login_ok,\"login\":$(json_str "$login"),\"network\":$network,\"models\":$models,\"models_error\":$(json_or_null "$models_error")}"
 fi
 
 # --- Output -------------------------------------------------------------------

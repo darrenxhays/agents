@@ -28,7 +28,7 @@
 1. <smallest coherent step with the files and symbols it changes>
 
 ## Validation
-Checks the implementer can run in its sandbox (no network or local services unless the README's opt-in is on):
+Checks the implementer can run in its sandbox (no network or local services unless `codex.network` from prepare.sh is true):
 - `<command>`: <what it validates>
 
 Checks Claude runs after the implementer finishes:

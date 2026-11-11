@@ -6,7 +6,7 @@ Plugins, skills and apps for Claude Code and Codex.
 
 ### Prowl
 
-A terminal app that watches your Azure DevOps or Jira boards for tickets tagged **Ready for Review** and has Claude Code review their open GitHub PRs as one set, posting verified findings from your GitHub account. It updates itself on launch. See the [Prowl README](apps/prowl/README.md) for setup, configuration and the review config.
+A terminal app with two sides on your Azure DevOps or Jira boards. The **Reviewer** watches for tickets tagged **Ready for Review** and has Claude Code review their open GitHub PRs as one set, posting verified findings from your GitHub account. The **Builder** (off by default) picks up your tickets tagged **Ready to Start**, builds them in a fenced Claude Code session, opens one PR per repo and follows the PRs through review. It updates itself on launch. See the [Prowl README](apps/prowl/README.md) for setup, configuration and the review config.
 
 Install or update, in a terminal:
 
@@ -20,7 +20,7 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/darrenxhays/agents/main/ap
 irm https://raw.githubusercontent.com/darrenxhays/agents/main/apps/prowl/install.ps1 | iex
 ```
 
-The installer adds whatever Prowl needs (Node.js, Git, the GitHub CLI, Claude Code, and the Azure CLI for Azure DevOps), then signs you in and asks for your first board. Prowl's review skill is used only by the app: it isn't a marketplace plugin and isn't added to your Claude Code skills.
+The installer adds whatever Prowl needs (Node.js, Git, the GitHub CLI, Claude Code, and the Azure CLI for Azure DevOps), then signs you in and asks for your first board. Prowl's review and build skills are used only by the app: they aren't a marketplace plugin and aren't added to your Claude Code skills.
 
 ## Skills (darrenxhays plugin)
 
@@ -32,7 +32,7 @@ All skills ship in one Claude Code plugin, so they're named `darrenxhays:<skill>
 
 Turn on auto-update for the `agents` marketplace in `/plugin` to get every pushed change.
 
-Each Claude session starts with pragmatic-engineer's instructions in its context, so they apply to every planning and coding task without loading the skill. They come back after `/compact` and `/clear`. Your `CLAUDE.md` is not edited, so they go away when the plugin is disabled or uninstalled.
+Each Claude session starts with pragmatic-engineer's instructions in its context, so they apply to every planning and coding task without loading the skill. They come back after `/compact` and `/clear`, and the general-purpose subagents a session starts get them too. Your `CLAUDE.md` is not edited, so they go away when the plugin is disabled or uninstalled.
 
 To stop that, run `/plugin configure darrenxhays` (or open the plugin in `/plugin`) and turn off **Use pragmatic-engineer automatically**; turn it back on the same way. It takes effect from the next session. While off, the instructions are no longer added to Claude sessions, the rule is removed from `~/.codex/AGENTS.md`, and you can still call `/darrenxhays:pragmatic-engineer` (or `$pragmatic-engineer` in Codex) when you want it.
 

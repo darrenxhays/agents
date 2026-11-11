@@ -68,7 +68,7 @@ Run `"${CLAUDE_SKILL_DIR}/scripts/prepare.sh" --slug <short-slug> [--ticket <id>
 ## 3. Investigate and write the plan
 Investigate enough to plan, capturing concrete file paths, symbols, and commands:
 - Existing implementations of similar behavior, and the entry points, services, data models, configuration, and tests involved.
-- The project's own build, lint, typecheck, and test commands (`CLAUDE.md`/`AGENTS.md`, README or contributing docs, package scripts, CI config). Split them by whether they need network access or a local service such as a database or container runtime: those can't run in the implementer's sandbox unless its network opt-in is on.
+- The project's own build, lint, typecheck, and test commands (`CLAUDE.md`/`AGENTS.md`, README or contributing docs, package scripts, CI config). Split them by whether they need network access or a local service such as a database or container runtime: in Codex mode those can't run in the implementer's sandbox unless `codex.network` is true (the user started Claude with `BUILD_CODEX_NETWORK=true`).
 - Conventions for errors, logging, migrations, feature flags, accessibility, security, docs, and code comments, including any project- or organization-wide comment guidelines.
 - Everything the change touches outside this code: who calls it, what it stores, what it permits, what it costs.
 
