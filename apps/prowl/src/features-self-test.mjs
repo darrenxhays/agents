@@ -6,7 +6,7 @@ import path from 'node:path';
 import { CONFIG_PATH, HOME, loadConfig, newSettings } from './config.mjs';
 import { killChecks, reviewSteps, runChecks, runCommand, runSteps } from './checks.mjs';
 import { addWorktree, noHooks, noHooksEnv } from './git.mjs';
-import { otherKeys, titleNamesOnly } from './github.mjs';
+import { branchHadPr, fromOwnBranch, otherKeys, prForBranch, titleNamesOnly } from './github.mjs';
 import { ticketsFrom } from './ado.mjs';
 import { norm, tagMatches } from './match.mjs';
 import { baseSteps, checkPlan, checksLine, prChecks } from './reviewer/checks.mjs';
@@ -501,6 +501,20 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
     t.tui.key('v');
     t.tui.key('y');
     assert.equal(t.calls.length, 1, 'nor does a wait row in Running');
+  }
+
+  // ---- C-40: the Builder doesn't take a fork's same-named branch PR as its own ----
+  {
+    const fork = { number: 9, html_url: 'https://github.com/acme/widgets/pull/9', head: { repo: { full_name: 'acme/widgets-fork' } } };
+    const own = { number: 4, html_url: 'https://github.com/acme/widgets/pull/4', head: { repo: { full_name: 'Acme/Widgets' } } };
+    const gone = { number: 5, html_url: 'https://github.com/acme/widgets/pull/5', head: { repo: null } };
+    assert.deepEqual(fromOwnBranch([fork, own, gone], 'acme/widgets').map(p => p.number), [4]);
+    const asked = [];
+    const exec = list => async (cmd, args) => { asked.push(args[1]); return list.map(p => JSON.stringify(p)).join('\n'); };
+    assert.equal(await prForBranch('acme/widgets', 'prowl/123-x', exec([fork])), null, "only the fork's PR: none of its own");
+    assert.deepEqual(await prForBranch('acme/widgets', 'prowl/123-x', exec([fork, own])), { url: own.html_url, number: 4 });
+    assert.deepEqual([await branchHadPr('acme/widgets', 'prowl/123-x', exec([fork, gone])), await branchHadPr('acme/widgets', 'prowl/123-x', exec([own]))], [false, true]);
+    assert.ok(asked[0] === 'repos/acme/widgets/pulls?state=open&head=acme:prowl%2F123-x' && asked.at(-1).includes('state=all'));
   }
 
   // ---- C-06: verifier model and effort ----

@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import * as ado from '../ado.mjs';
 import * as jira from '../jira.mjs';
 import { CHECKS_PATH, loadConfig } from '../config.mjs';
+import * as github from '../github.mjs';
 import { createLabels } from '../labels.mjs';
 import { mentions } from '../match.mjs';
 import * as brief from './brief.mjs';
@@ -144,7 +145,11 @@ function githubFake(bares) {
   const gitOf = (repo, ...a) => execFileSync('git', ['--git-dir', bares[repo], ...a], { encoding: 'utf8' }).trim();
   // Commits made by the test's own git identity are yours (octocat); a commit's author name stands for anyone else's login.
   const login = name => (name === 'Prowl Test' ? 'octocat' : name);
-  return {
+  // What the pulls API lists for a branch, for the real prForBranch() and branchHadPr(): the repo's own PRs, and any
+  // PR from a fork's branch of the same name a test adds with fake.forkPrFor.
+  const pulls = (repo, branch, open) => async () => [...(fake.forkPrFor?.(repo, branch) || []),
+    ...prs.filter(x => x.repo === repo && x.head === branch && (!open || x.state === 'OPEN')).map(p => ({ number: p.number, html_url: p.url, head: { repo: { full_name: p.repo } } }))].map(p => JSON.stringify(p)).join('\n');
+  const fake = {
     prs,
     labelCalls: [],
     prByRef: async ({ repo, number }) => {
@@ -156,7 +161,7 @@ function githubFake(bares) {
     addLabel: async (pr, name) => { const p = find(pr); (p.labels ??= []).push(name); },
     removeLabel: async (pr, name) => { const p = find(pr); p.labels = (p.labels || []).filter(l => l !== name); },
     markReady: async pr => { find(pr).draft = false; },
-    branchHadPr: async (repo, branch) => prs.some(x => x.repo === repo && x.head === branch),
+    branchHadPr: (repo, branch) => github.branchHadPr(repo, branch, pulls(repo, branch, false)),
     defaultBranch: async () => 'main',
     repoBranches: async repo => gitOf(repo, 'for-each-ref', '--format=%(refname:short)', 'refs/heads').split('\n').filter(Boolean),
     branchVsBase: async (repo, base, branch) => {
@@ -175,7 +180,7 @@ function githubFake(bares) {
       prs.push({ repo, number, url, title: d.title, body: d.body, head: d.head, base: d.base, draft: d.draft, state: 'OPEN', author: 'octocat', reviews: [], threads: [], checks: [], replies: [] });
       return { url, number };
     },
-    prForBranch: async (repo, branch) => { const p = prs.find(x => x.repo === repo && x.head === branch && x.state === 'OPEN'); return p ? { url: p.url, number: p.number } : null; },
+    prForBranch: (repo, branch) => github.prForBranch(repo, branch, pulls(repo, branch, true)),
     editPr: async (pr, file) => { find(pr).body = JSON.parse(read(file)).body; },
     prFacts: async pr => {
       const p = find(pr);
@@ -190,6 +195,7 @@ function githubFake(bares) {
     postReply: async (pr, commentId, file) => { find(pr).replies.push({ commentId, body: JSON.parse(read(file)).body }); return `${pr.url}#reply`; },
     failedLog: async () => 'Error: 1 test failed',
   };
+  return fake;
 }
 
 /** A scripted session: `script(w, prompt)` does the turn's work and returns { result, cost, subtype }. */
@@ -325,6 +331,7 @@ export async function run(assert) {
     await pickups(assert);
     await quickBuilds(assert);
     await staleHits(assert);
+    await forkBranches(assert);
   } finally {
     globalThis.fetch = realFetch;
     for (const k of Object.keys(process.env)) if (!(k in envBefore)) delete process.env[k];
@@ -337,6 +344,16 @@ export async function run(assert) {
 // ---- Pure rules: repos, bases, branches, the result contract, caps, follow-up ----
 
 // A found ticket that no longer carries the start tag when read again (the board search lags) is someone else's: not claimed.
+// A stranger's PR from a fork's branch of the same name is never "the PR from the branch I pushed": the Builder opens its own.
+async function forkBranches(assert) {
+  const h = harness('ado', twoRepoBuild());
+  h.gh.forkPrFor = repo => [{ number: 999, html_url: `https://github.com/${repo}/pull/999`, head: { repo: { full_name: `${repo}-fork` } } }];
+  await h.poll();
+  const w = h.b.history()[0];
+  assert.deepEqual([w.status, h.gh.prs.length, w.prs.some(p => p.number === 999)], ['following', 2, false], "publishing beside a fork's same-named branch PR opens its own PRs");
+  h.done();
+}
+
 async function staleHits(assert) {
   for (const board of ['ado', 'jira']) {
     let h = harness(board, twoRepoBuild(), { trackerWrap: t => ({ ...t, current: async (c, ticket) => ({ ...ticket, tags: ['web', 'In-Development'], rev: 99 }) }) });

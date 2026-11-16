@@ -254,16 +254,25 @@ export async function createPr(repo, file) {
   return { url, number: Number(number) };
 }
 
-/** The open PR from `branch` in `repo` (owner/name), as { url, number }, or null: one a create made before its answer was lost. */
-export async function prForBranch(repo, branch) {
-  const out = (await run('gh', ['api', `repos/${repo}/pulls?state=open&head=${repo.split('/')[0]}:${encodeURIComponent(branch)}`, '--jq', '.[0] | [.html_url, .number] | @tsv'])).trim();
-  const [url, number] = out.split('\t');
-  return url ? { url, number: Number(number) } : null;
+/**
+ * The PRs (as the pulls API lists them) that come from `repo`'s own branch, not from a fork's branch of that name: an
+ * organisation can hold a fork of its own repo under another name, whose head is `<owner>:<branch>` too. A PR whose
+ * head repo is gone is never the branch's.
+ */
+export const fromOwnBranch = (list, repo) => list.filter(p => String(p.head?.repo?.full_name || '').toLowerCase() === repo.toLowerCase());
+
+const pullsFrom = async (repo, branch, state, exec) => fromOwnBranch(jsonLines(await exec('gh', ['api', `repos/${repo}/pulls?state=${state}&head=${repo.split('/')[0]}:${encodeURIComponent(branch)}`,
+  '--paginate', '--jq', '.[] | {number, html_url, head: {repo: (if .head.repo then {full_name: .head.repo.full_name} else null end)}}'])), repo);
+
+/** The open PR from `branch` in `repo` (owner/name) itself, as { url, number }, or null: one a create made before its answer was lost. */
+export async function prForBranch(repo, branch, exec = run) {
+  const [pr] = await pullsFrom(repo, branch, 'open', exec);
+  return pr ? { url: pr.html_url, number: pr.number } : null;
 }
 
-/** True when `branch` in `repo` has had a PR, open, closed or merged: it isn't a branch with no PR. */
-export async function branchHadPr(repo, branch) {
-  return Number((await run('gh', ['api', `repos/${repo}/pulls?state=all&head=${repo.split('/')[0]}:${encodeURIComponent(branch)}`, '--jq', 'length'])).trim()) > 0;
+/** True when `repo`'s own `branch` has had a PR, open, closed or merged: it isn't a branch with no PR. */
+export async function branchHadPr(repo, branch, exec = run) {
+  return (await pullsFrom(repo, branch, 'all', exec)).length > 0;
 }
 
 /** Replaces a PR's body with the one in `file` ({ body }). */

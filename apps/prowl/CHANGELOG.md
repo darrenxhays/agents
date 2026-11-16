@@ -18,6 +18,7 @@ Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z`
 - A ticket another copy of Prowl (or a person) claimed a moment ago is no longer picked up a second time because the board search was a few seconds behind: a found ticket is taken only if, read now, it still carries the trigger or start tag. Before, on Azure DevOps a ticket another Builder had just taken could be built twice.
 - Two reviews can no longer run on the same PR at once and post over each other: a quick review is refused while any of its PRs is under a review that is running or being set up, and says which. Start it again once that review ends; a quick review waiting on its PRs tries again by itself each poll.
 - New key: `v` on a finished review in the Reviewer's History reviews its PRs again, as a quick review under the same ticket or name. It asks first, changes no tags, and leaves out a PR merged or closed since.
+- Builder: when it looks for the PR from the branch it pushed, it no longer picks up a PR from a fork's branch of the same name (a fork the same owner holds under another name). It opens its own PR instead of following someone else's.
 
 ## 2.23.6
 - An answer pasted into a Needs-you form is now what Submit sends. Before, pasting into **Other**, **Send it back with a note** or **Ask about this** and pressing enter sent the option that was already picked: the recommended answer, or an approval of the plan.
