@@ -117,6 +117,9 @@ export async function publishReview(run, result, deps) {
     const expected = EXPECTED[rec.event];
     if (posted.state && posted.state !== expected) log('warn', `${run.ticket}: the review on ${prName(pr.url)} came back as ${posted.state}, not ${expected}; no approval is recorded for it`);
     else if (rec.approval) {
+      // What this review supersedes is recorded only with its approval: a review that came back in another state supersedes nothing.
+      run.supersedes = [...new Set([...(run.supersedes || []), ...rec.supersedes])];
+      run.supersedesCarried = { ...run.supersedesCarried, ...rec.supersedesCarried };
       run.approved[pr.url] = rec.reviewedAt;
       if (rec.approval === 'awaiting-human' && !(run.awaitingHuman ??= []).includes(pr.url)) run.awaitingHuman.push(pr.url);
     }

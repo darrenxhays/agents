@@ -409,3 +409,11 @@ export async function setThreadResolved(threadId, resolved) {
   const m = resolved ? 'resolveReviewThread' : 'unresolveReviewThread';
   await ghApi(['graphql', '-f', `query=mutation($id:ID!){${m}(input:{threadId:$id}){thread{isResolved}}}`, '-f', `id=${threadId}`]);
 }
+
+/** Every submitted review on the PR, thread replies included: [{ id, user, state, at, body, commit, url }]. */
+export const allReviews = pr => apiLines([`repos/${pr.repo}/pulls/${pr.number}/reviews`, '--paginate', '--jq', '.[] | {id, user: .user.login, state, at: .submitted_at, body, commit: .commit_id, url: .html_url}']);
+
+/** Dismisses review `id` on the PR, from `file` ({ message, event: "DISMISS" }). It needs write access, and branch protection can restrict who may. */
+export async function dismissReview(pr, id, file) {
+  await ghApi(['-X', 'PUT', `repos/${pr.repo}/pulls/${pr.number}/reviews/${id}/dismissals`, '--input', file, '--jq', '.state']);
+}

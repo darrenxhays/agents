@@ -6,7 +6,7 @@ import { frontMatter } from '../match.mjs';
 import { noHooksEnv } from '../git.mjs';
 import { spawnCli, killTree } from '../proc.mjs';
 import { alive, capHit, readActivity, sessionEnded, sessionEnv, track } from '../sessions.mjs';
-import { checkResult, isParked } from './result.mjs';
+import { checkResult, isParked, isProwlReview, reviewIdOf } from './result.mjs';
 
 export { alive, readActivity, sessionEnded };
 export const REPORTS_DIR = path.join(HOME, 'reports');
@@ -223,6 +223,72 @@ export function launchReview(cfg, pluginDir, run) {
   fs.closeSync(log);
   track(run, child, cfg);
   return run;
+}
+
+// ---- Dismissing the earlier PR-Owl reviews a review supersedes. A dismissal can't be undone, so each is checked
+// against GitHub as it is now, just before. Pure: the Reviewer reads the PR's reviews and head, and makes the calls. ----
+
+/** True when two commit ids name the same commit: short and long forms, either case. */
+export const sameCommit = (a, b) => {
+  const [x, y] = [String(a || '').toLowerCase(), String(b || '').toLowerCase()];
+  return Math.min(x.length, y.length) >= 7 && (x.startsWith(y) || y.startsWith(x));
+};
+
+/** This run's own review among a PR's `reviews`: by the run's login, submitted since the run started, carrying its review marker. A marker alone isn't enough. */
+export const ownReview = (run, reviews) => (reviews || []).find(r => run.me && String(r.user || '').toLowerCase() === run.me.toLowerCase() && Date.parse(r.at) >= run.startedAt && String(r.body || '').includes(postMarker(run.id))) || null;
+
+/** Why nothing may be dismissed on `pr` for `run`, or ''. `reviews`: the PR's, as GitHub has them now; `head`: its head now. */
+export function dismissBlocker(run, pr, reviews, head) {
+  const verified = run.approved?.[pr.url];
+  if (!run.published?.[`review:${pr.url}`] || !verified) return "this review didn't approve it";
+  if (!run.me) return "your GitHub login isn't known";
+  if (String(pr.author || '').toLowerCase() === run.me.toLowerCase()) return "it's your own PR, so a teammate's review is theirs to clear";
+  const mine = ownReview(run, reviews);
+  if (!mine) return "this review's post wasn't found on it";
+  const expected = run.awaitingHuman?.includes(pr.url) ? 'COMMENTED' : 'APPROVED';
+  if (mine.state !== expected) return `this review posted as ${mine.state}, not ${expected}`;
+  if (!sameCommit(mine.commit, verified)) return 'this review posted on a newer commit than the one it verified';
+  if (!sameCommit(head, verified)) return 'the PR has new commits since this review verified it';
+  return '';
+}
+
+/**
+ * The dismissal's message, on the review dismissed. `url`: the new review. `own`: one of your own, cleared by your
+ * approval alone. `refs`: its findings the new review carries as still open or parked; they are the session's text,
+ * so they are listed only when every one is plainly a ref.
+ */
+export function dismissalMessage(url, { own = false, refs = [] } = {}) {
+  if (own) return `Superseded by PR-Owl review ${url}, the same reviewer's approval, which replaces this review.`;
+  if (!refs.length) return `Superseded by PR-Owl review ${url}: every finding in this review is verified fixed or no longer applies.`;
+  const plain = refs.every(r => r.length <= 80 && /^rb-\d{8}-[a-z0-9]+(?:-[a-z0-9]+)* [FC]-\d+$/.test(r));
+  return `Superseded by PR-Owl review ${url}, which accounts for every finding in this review: it carries ${refs.length} of them as still open or parked${plain ? ` (${refs.join(', ')})` : ''}, and any other is verified fixed or no longer applies. If one of those should still block this PR, request changes again.`;
+}
+
+/**
+ * The reviews to dismiss on `pr`, once dismissBlocker() allows it: { go: [{ id, user, message }], kept } (`kept`:
+ * how many the run lists that aren't a PR-Owl review still requesting changes from before this one). Each listed
+ * review whose findings this one accounts for, yours or a teammate's; and, when this run posted a real approval as
+ * you (not the stamp), every earlier PR-Owl review of yours still requesting changes, listed or not: your approval
+ * is your verdict now. A teammate's review is never dismissed on anything but its own findings.
+ */
+export function reviewsToDismiss(run, pr, reviews) {
+  const newUrl = run.published[`review:${pr.url}`];
+  const stale = r => r.state === 'CHANGES_REQUESTED' && Date.parse(r.at) < run.startedAt && isProwlReview(r.body);
+  const listed = (run.supersedes || []).filter(u => reviewIdOf(u, pr.url) > 0);
+  const go = [];
+  let kept = 0;
+  for (const url of listed) {
+    const r = (reviews || []).find(x => Number(x.id) === reviewIdOf(url, pr.url));
+    if (!r || !stale(r)) { kept++; continue; }
+    go.push({ id: r.id, user: r.user, message: dismissalMessage(newUrl, { refs: run.supersedesCarried?.[url] || [] }) });
+  }
+  if (!run.awaitingHuman?.includes(pr.url)) {
+    for (const r of reviews || []) {
+      if (!stale(r) || String(r.user || '').toLowerCase() !== run.me.toLowerCase() || go.some(g => g.id === r.id)) continue;
+      go.push({ id: r.id, user: r.user, message: dismissalMessage(newUrl, { own: true }) });
+    }
+  }
+  return { go, kept, listed: listed.length };
 }
 
 /** The hidden line that ends the body of each review a session posts. */

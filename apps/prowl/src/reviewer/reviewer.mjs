@@ -768,6 +768,7 @@ export function createReviewer(app, deps) {
     const failures = run.quick ? (side.state.quickFailures ??= {}) : side.state.failures; // a quick review's apart from the ticket's
     const again = run.quick ? 'n reviews PRs again' : `re-tag '${tags.trigger}' to try again`;
     if (run.resultMode && (resumed || run.status === 'done')) await settleResult(run);
+    if (run.resultMode && run.status === 'done') await dismissSuperseded(run); // before the tags and labels are written; never on a failed or stopped review
     else if (run.status === 'done') { // a review from before results: its session posted its reviews itself
       const unchecked = await checkPosted(run).catch(() => run.prs.map(p => p.url)); // announce any PR posted since the last check
       if (run.marker) rv.failUnposted(run, await missingReviews(run, unchecked)); // reviews started before 2.12.0 have none
@@ -797,6 +798,46 @@ export function createReviewer(app, deps) {
     }
     save();
     if (run.pendingTag != null) await applyTag(run);
+  }
+
+  /**
+   * Dismisses the earlier PR-Owl reviews this review supersedes: on each PR it approved, those still requesting
+   * changes whose findings it accounts for, and (with a real approval) your own earlier ones. Checked against GitHub
+   * as it is now: a dismissal can't be undone. Nothing here fails the review. A review already dismissed no longer
+   * requests changes, so a restart repeats nothing.
+   */
+  async function dismissSuperseded(run) {
+    for (const pr of run.prs) {
+      const listed = (run.supersedes || []).filter(u => u.startsWith(`${pr.url}#`));
+      if (!listed.length && !run.approved?.[pr.url]) continue;
+      const name = prName(pr.url);
+      const many = listed.length > 1;
+      let reviews;
+      let head;
+      try {
+        [reviews, head] = [await gh.allReviews(pr), await gh.headSha(pr)];
+      } catch (e) {
+        if (listed.length || run.published?.[`review:${pr.url}`]) log('warn', `${run.ticket}: couldn't read the reviews on ${name} to dismiss superseded ones (${e.message})`);
+        continue;
+      }
+      const why = rv.dismissBlocker(run, pr, reviews, head);
+      if (why) {
+        if (listed.length) log('warn', `${run.ticket}: left the earlier PR-Owl review${many ? 's' : ''} its report says it supersedes on ${name} as ${many ? 'they were' : 'it was'}: ${why}`);
+        continue;
+      }
+      const { go, kept } = rv.reviewsToDismiss(run, pr, reviews);
+      if (kept) log('warn', `${run.ticket}: left ${kept < listed.length ? `${kept} of ` : ''}the earlier PR-Owl review${many ? 's' : ''} its report says it supersedes on ${name} as ${kept > 1 ? 'they were' : 'it was'}: it isn't a PR-Owl review still requesting changes from before this one`);
+      for (const r of go) {
+        try {
+          const file = path.join(path.dirname(run.logPath), `${run.id}.dismiss.json`);
+          writeJson(file, { message: r.message, event: 'DISMISS' });
+          await gh.dismissReview(pr, r.id, file);
+          log('ok', `${run.ticket}: dismissed @${r.user}'s earlier PR-Owl review on ${name}, which this review supersedes`);
+        } catch (e) {
+          log('warn', `${run.ticket}: couldn't dismiss @${r.user}'s earlier PR-Owl review on ${name} (${e.message}); it was left as it was`);
+        }
+      }
+    }
   }
 
   /**

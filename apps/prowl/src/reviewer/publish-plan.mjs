@@ -2,7 +2,7 @@
 // threads to reopen and resolve, the review with its inline comments, and the details file. Pure: publish.mjs makes
 // the calls, and runs planPublish() again before each one, so later posts can link what earlier ones produced.
 import { cut, esc, fenceFor, fillTemplate, flat, LIMIT, place, prName, short, stateNote, TRIMMED } from './render.mjs';
-import { approvable, bySeverity, counts, eventFor, findingsOn, isCounted, isParked, notCarried, notChecked, NOT_FULLY, SEVERITIES, worst } from './result.mjs';
+import { approvable, bySeverity, counts, eventFor, findingsOn, isCounted, isParked, notCarried, notChecked, NOT_FULLY, SEVERITIES, supersededTally, worst } from './result.mjs';
 
 /** The right-side lines of a file's patch that can take a comment (added and context lines), each with its hunk's index. */
 export function commentableLines(patch) {
@@ -144,6 +144,12 @@ export function planPublish(given, ctx) {
     rec.event = base.event === 'APPROVE' && (withheld || rec.fallback === 'head') ? 'COMMENT' : base.event;
     rec.approval = withheld || rec.fallback === 'head' ? null : base.approval;
     rec.verdict = withheld ? NOT_FULLY : labels[rec.severity || 'none'];
+    // The earlier PR-Owl reviews this one supersedes: only when it approves the PR, or gives it Prowl's stamp.
+    if (rec.approval) {
+      const tally = supersededTally(result, p.url);
+      rec.supersedes = tally.map(t => t.url);
+      rec.supersedesCarried = Object.fromEntries(tally.map(t => [t.url, t.refs]));
+    }
     const noBlocking = base.noBlocking && !withheld && rec.fallback !== 'head';
 
     const sha = short(entry.reviewedAt);

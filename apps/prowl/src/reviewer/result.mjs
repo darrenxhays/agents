@@ -278,3 +278,61 @@ export function refutedLines(reviews) {
   }
   return out;
 }
+
+/**
+ * The PR-Owl reviews on a PR that still stand as requesting changes (`reviews`: [{ id, user, state, at, body }]): one
+ * whose state is CHANGES_REQUESTED and that its author has not followed with a PR-Owl review in state APPROVED (later
+ * by submit time, then by id). That approval was given with the earlier review's findings accounted for, and lifts
+ * it, though the API goes on listing its state. Nothing else lifts one: not a later request for changes, a
+ * comment-only review, a verdict given by hand, or a review since withdrawn. One whose author is unknown always stands.
+ */
+export function standingReviews(reviews) {
+  const owl = (reviews || []).filter(r => isProwlReview(r.body));
+  const later = (a, b) => Date.parse(a.at) > Date.parse(b.at) || (Date.parse(a.at) === Date.parse(b.at) && Number(a.id) > Number(b.id));
+  const known = r => r.user && String(r.user).toLowerCase() !== 'ghost';
+  return owl.filter(r => r.state === 'CHANGES_REQUESTED' && !(known(r) && owl.some(x => x.state === 'APPROVED' && String(x.user || '').toLowerCase() === String(r.user).toLowerCase() && later(x, r))))
+    .sort((a, b) => (later(a, b) ? 1 : -1));
+}
+
+// ---- An earlier review superseded by this one ----
+
+const DONE = ['fixed', 'no-longer-applies'];
+/** An earlier finding is accounted for when its entry is done with (fixed, no longer applies) or carried in this review's own lists. */
+export const accountedFor = f => DONE.includes(f.status) || ['still-present', 'answered', 'needs-person'].includes(f.status) || (f.status === 'unverifiable' && Boolean(f.earlier?.parked));
+
+/** The id in a review's URL (<prUrl>#pullrequestreview-<id>), read loosely (surrounding space, leading zeros), or 0. Tells which review an entry is about, never which to dismiss. */
+export function reviewIdOf(url, prUrl) {
+  const u = String(url ?? '').trim();
+  const head = `${prUrl}#pullrequestreview-`;
+  return u.startsWith(head) && /^\d+$/.test(u.slice(head.length)) ? Number(u.slice(head.length)) : 0;
+}
+
+/**
+ * The earlier PR-Owl reviews this result supersedes (on `prUrl`, or on every PR): [{ url, carried, refs }], `refs`
+ * the findings of that review this one carries as still open or parked. A review is superseded when it lists at
+ * least one finding and every finding it lists is accounted for by a C- entry on the same PR. Never: a review
+ * listing no findings, one Prowl couldn't read in full (`unread`), one another entry with the same URL lists with an
+ * owed finding, or any review of a PR that has an entry whose URL isn't written exactly in GitHub's form.
+ */
+export function supersededTally(result, prUrl) {
+  const seen = new Map(); // "<pr> <ref>" -> 'done' | 'carried' | 'owed'
+  for (const f of result.findings || []) {
+    if (f.earlier?.by !== 'prowl' || !f.earlier.ref) continue;
+    const k = `${f.pr} ${f.earlier.ref.trim()}`;
+    const now = !accountedFor(f) ? 'owed' : DONE.includes(f.status) ? 'done' : 'carried';
+    const was = seen.get(k);
+    seen.set(k, was === 'owed' || now === 'owed' ? 'owed' : was === 'carried' || now === 'carried' ? 'carried' : 'done');
+  }
+  return (result.prs || []).filter(p => !prUrl || p.url === prUrl).flatMap(p => {
+    const state = ref => seen.get(`${p.url} ${ref.trim()}`) ?? 'owed';
+    const cleared = r => !r.unread && Boolean(r.findings?.length) && r.findings.every(ref => state(ref) !== 'owed');
+    const all = Array.isArray(p.earlierReviews) ? p.earlierReviews : [];
+    const exact = r => reviewIdOf(r?.url, p.url) > 0 && r.url === `${p.url}#pullrequestreview-${reviewIdOf(r.url, p.url)}`;
+    if (!all.every(exact)) return [];
+    const urls = [...new Set(all.filter(r => all.filter(x => x.url === r.url).every(cleared)).map(r => r.url))];
+    return urls.map(url => {
+      const refs = [...new Set(all.filter(x => x.url === url).flatMap(x => x.findings.map(ref => ref.trim())).filter(ref => state(ref) === 'carried'))];
+      return { url, carried: refs.length, refs };
+    });
+  });
+}

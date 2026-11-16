@@ -11,9 +11,9 @@ import { outputTemplates, staleHeadings, template } from '../templates.mjs';
 import { commentable, commentableLines, disposition, planPublish, reviewMarker, saidStillOpen, splitAt, withThreads } from './publish-plan.mjs';
 import { attempt, publishReview, retryable, WAITS } from './publish.mjs';
 import { cut, esc, fenceFor, fillTemplate, flat, LIMIT, reportMd, stateNote } from './render.mjs';
-import { checkResult, counts, eventFor, isCounted, isParked, isProwlReview, notCarried, notChecked, NOT_FULLY, refutedLines, TODO, todoPaths, verdictLabels } from './result.mjs';
+import { checkResult, counts, eventFor, isCounted, isParked, isProwlReview, notCarried, notChecked, NOT_FULLY, refutedLines, reviewIdOf, standingReviews, supersededTally, TODO, todoPaths, verdictLabels } from './result.mjs';
 import { createReviewer } from './reviewer.mjs';
-import { buildPrompt, checkerCommand, createReview, newBatchId, priorFindings } from './reviews.mjs';
+import { buildPrompt, checkerCommand, createReview, dismissalMessage, dismissBlocker, newBatchId, ownReview, postMarker, priorFindings, reviewsToDismiss, sameCommit } from './reviews.mjs';
 
 const SHA = 'a'.repeat(40);
 const BATCH = 'rb-20261110-ab42-r1-1432-9f3a';
@@ -443,6 +443,23 @@ export async function run(assert, { appDir }) {
     assert.ok(got.logs.some(l => l.includes("acme/widgets#12 gets no approval: something wasn't checked (its review says what)")) && got.logs.some(l => /your output\.md lacks Review banner, .* so those use the default's templates/.test(l)));
   }
 
+  /** Settles a review that wrote `result`, through the Reviewer's finish path, over a fake GitHub and tracker. */
+  const settleWith = async (result, ghOrOpts = {}) => {
+      const { gh = fakeGh(), runOver = {}, failures = {} } = typeof ghOrOpts.prNow === 'function' ? { gh: ghOrOpts } : ghOrOpts;
+      const cfg = { ...loadConfig(), githubOwner: 'acme', workDir: tmp };
+      const seen = { retags: [], logs: [] };
+      const tracker = { name: 'Azure DevOps', retag: async (c, ref, drop, add) => { seen.retags.push(add); } };
+      const app = { cfg, me: 'octocat', sideOn: () => true, tracker: () => tracker, boards: () => [], dryRun: () => false };
+      const side = createReviewer(app, { log: (level, msg) => { seen.logs.push(`${level} ${msg}`); return true; }, forget() {}, hoot() {}, appDir, trackers: { ado: tracker }, github: gh, labels: { own() {}, set() {}, refused: () => '', pending: () => false } });
+      const id = `AB42-settle-${Math.random().toString(36).slice(2, 8)}`;
+      const run = { ...baseRun({ id, logPath: path.join(tmp, `${id}.ndjson`), reportPath: path.join(tmp, `${id}.md`) }), tracker: 'ado', ref: { id: 42 }, status: 'running', pid: null, resultMode: 1, batchId: BATCH, resultPath: path.join(tmp, `${id}.result.json`), resultPrs: [A],
+        _result: { subtype: 'success', is_error: false, total_cost_usd: 1 }, ...runOver };
+      if (result !== undefined) fs.writeFileSync(run.resultPath, typeof result === 'string' ? result : JSON.stringify(result));
+      side.state = { runs: [run], failures };
+      await side.finish(run);
+      return { run, seen, gh, side };
+  };
+
   // ---- A thread a person answered is parked (and what else is) ----
   {
     const answered = finding('C-02', { status: 'answered', outcome: { answer: `${A}#discussion_r999` } });
@@ -485,6 +502,96 @@ export async function run(assert, { appDir }) {
       [['u1', 'The caller checks it.'], ['u2', 'Another reason.']], "the lines of two reviews' blocks; a block quoted in a body that isn't a PR-Owl review is ignored");
   }
 
+  // ---- An earlier PR-Owl review is dismissed once a new review accounts for all of it ----
+  {
+    const R = n => `${A}#pullrequestreview-${n}`;
+    const ref = n => `rb-20261109-ab42-r1-0910-77aa F-0${n}`;
+    const carried = (n, status, over = {}) => finding(`C-0${n}`, { status, outcome: { commit: 'abc1234', note: 'x', answer: `${A}#discussion_r9` }, ...over });
+    const tally = (findings, earlierReviews, prs = null) => supersededTally(resultOf(findings, prs || [prEntry(A, { earlierReviews })]), A);
+    assert.deepEqual(tally([carried(1, 'fixed'), carried(2, 'no-longer-applies')], [{ url: R(5), findings: [ref(1), ref(2)] }]), [{ url: R(5), carried: 0, refs: [] }], 'fixed and no-longer-applies, matched by ref');
+    assert.deepEqual(tally([carried(1, 'still-present'), carried(2, 'answered'), carried(3, 'needs-person'), carried(4, 'fixed')], [{ url: R(5), findings: [ref(1), ref(2), ref(3), ref(4)] }]), [{ url: R(5), carried: 3, refs: [ref(1), ref(2), ref(3)] }], 'carried, and named');
+    const parkedUnver = carried(1, 'unverifiable');
+    parkedUnver.earlier.parked = true;
+    assert.equal(tally([parkedUnver], [{ url: R(5), findings: [ref(1)] }]).length, 1, 'unverifiable and parked before: carried');
+    for (const [why, findings, reviews] of [['unverifiable, not parked', [carried(1, 'unverifiable')], [{ url: R(5), findings: [ref(1)] }]], ['deferred', [carried(1, 'deferred')], [{ url: R(5), findings: [ref(1)] }]],
+      ['no entry', [], [{ url: R(5), findings: [ref(1)] }]], ['a review listing no findings', [carried(1, 'fixed')], [{ url: R(5), findings: [] }]],
+      ['unread', [carried(1, 'fixed')], [{ url: R(5), findings: [ref(1)], unread: true }]]]) assert.deepEqual(tally(findings, reviews), [], `kept: ${why}`);
+    assert.deepEqual(tally([carried(1, 'fixed'), carried(2, 'fixed')], [{ url: R(5), findings: [ref(1)] }, { url: `${R(6)} `, findings: [ref(2)] }]), [], 'an entry with a loosely written URL keeps every review of that PR');
+    assert.deepEqual(tally([carried(1, 'fixed', { pr: B })], null, [prEntry(A, { earlierReviews: [{ url: R(5), findings: [ref(1)] }] }), prEntry(B)]), [], 'a ref carried only on another PR is owed');
+    assert.deepEqual(tally([carried(1, 'fixed'), carried(2, 'fixed')], [{ url: R(5), findings: [ref(1)] }, { url: R(5), findings: [ref(9)] }]), [], 'another entry with the same URL lists an owed finding');
+    assert.deepEqual([reviewIdOf(` ${R('007')} `, A), reviewIdOf(R(5), B), reviewIdOf(`${A}#discussion_r5`, A)], [7, 0, 0]);
+    // The plan records what an approving review supersedes; one that doesn't approve supersedes nothing.
+    const withEarlier = resultOf([carried(1, 'still-present', { severity: 'low' })], [prEntry(A, { earlierReviews: [{ url: R(5), findings: [ref(1)] }] })]);
+    const rec = plan(withEarlier, {}, { [A]: info({ threads: [{ id: 'PRRT_C-01', commentId: 100, resolved: false, outdated: false }] }) }).prs[0];
+    assert.deepEqual([rec.event, rec.supersedes, rec.supersedesCarried], ['APPROVE', [R(5)], { [R(5)]: [ref(1)] }]);
+    assert.deepEqual(plan(resultOf([carried(1, 'still-present')], withEarlier.prs)).prs[0].supersedes, [], 'a request for changes supersedes nothing');
+    let gh = fakeGh();
+    gh.comeBack = 'COMMENTED';
+    let run = baseRun();
+    await publish(run, withEarlier, gh);
+    assert.equal(run.supersedes, undefined, 'asked as APPROVE, came back COMMENTED: nothing superseded is recorded');
+    gh = fakeGh();
+    run = baseRun();
+    await publish(run, withEarlier, gh);
+    assert.deepEqual([run.supersedes, run.supersedesCarried], [[R(5)], { [R(5)]: [ref(1)] }]);
+    // Which reviews still stand.
+    const owl = (id, user, state, at, body = `\`\`\`text\n│ PR-Owl Review\n│ ${BATCH}\n\`\`\`\n<!-- prowl-review x review -->`) => ({ id, user, state, at, body, commit: SHA, url: R(id) });
+    assert.deepEqual(standingReviews([owl(1, 'ann', 'CHANGES_REQUESTED', '2026-11-01T10:00:00Z'), owl(2, 'ann', 'APPROVED', '2026-11-02T10:00:00Z')]).map(r => r.id), [], "lifted by its author's later PR-Owl approval");
+    assert.deepEqual(standingReviews([owl(1, 'ann', 'CHANGES_REQUESTED', '2026-11-01T10:00:00Z'), owl(2, 'ann', 'CHANGES_REQUESTED', '2026-11-02T10:00:00Z'), owl(3, 'ann', 'COMMENTED', '2026-11-03T10:00:00Z')]).map(r => r.id), [1, 2], 'a later request for changes or comment leaves both standing');
+    assert.deepEqual(standingReviews([owl(1, 'ann', 'CHANGES_REQUESTED', '2026-11-01T10:00:00Z'), owl(2, 'ann', 'APPROVED', '2026-11-02T10:00:00Z', 'LGTM')]).map(r => r.id), [1], 'an approval given by hand (no banner) lifts nothing');
+    assert.deepEqual(standingReviews([owl(1, 'ghost', 'CHANGES_REQUESTED', '2026-11-01T10:00:00Z'), owl(2, 'ghost', 'APPROVED', '2026-11-02T10:00:00Z'), owl(3, 'bob', 'CHANGES_REQUESTED', '2026-11-01T10:00:00Z', 'please fix')]).map(r => r.id), [1], 'an unknown author always stands; a person\'s review is not a PR-Owl review');
+    // The guard, against GitHub as it is now.
+    const start = Date.parse('2026-11-10T14:32:00Z');
+    const mineNow = (over = {}) => ({ ...owl(9, 'octocat', 'APPROVED', '2026-11-10T15:00:00Z', `x\n${postMarker('AB42-20261110T143200-r1')}`), commit: SHA, ...over });
+    const approvedRun = (over = {}) => baseRun({ startedAt: start, published: { [`review:${A}`]: R(9) }, approved: { [A]: SHA }, supersedes: [R(5)], supersedesCarried: { [R(5)]: [ref(1)] }, ...over });
+    const old = owl(5, 'ann', 'CHANGES_REQUESTED', '2026-11-09T10:00:00Z');
+    const pr = prOf(A);
+    assert.equal(dismissBlocker(approvedRun(), pr, [old, mineNow()], SHA), '');
+    assert.equal(dismissBlocker(approvedRun(), pr, [old, mineNow()], SHA.slice(0, 10).toUpperCase()), '', 'short and long SHAs match, in either case');
+    assert.ok(sameCommit('ABCDEF1234', 'abcdef1') && !sameCommit('abc', 'abc') && !sameCommit('abcdef1', 'abcdef2'));
+    for (const [why, r, list, head, p2] of [["this review didn't approve it", approvedRun({ approved: {} })], ["this review didn't approve it", approvedRun({ published: {} })], ["your GitHub login isn't known", approvedRun({ me: '' })],
+      ["it's your own PR, so a teammate's review is theirs to clear", approvedRun(), null, SHA, { ...pr, author: 'OctoCat' }],
+      ["this review's post wasn't found on it", approvedRun(), [old]], ["this review's post wasn't found on it", approvedRun(), [old, mineNow({ user: 'teammate' })]], ["this review's post wasn't found on it", approvedRun(), [old, mineNow({ at: '2026-11-10T14:00:00Z' })]],
+      ['this review posted as CHANGES_REQUESTED, not APPROVED', approvedRun(), [old, mineNow({ state: 'CHANGES_REQUESTED' })]], ['this review posted as APPROVED, not COMMENTED', approvedRun({ awaitingHuman: [A] }), [old, mineNow()]],
+      ['this review posted on a newer commit than the one it verified', approvedRun(), [old, mineNow({ commit: 'c'.repeat(40) })]], ['the PR has new commits since this review verified it', approvedRun(), [old, mineNow()], 'c'.repeat(40)]]) {
+      assert.equal(dismissBlocker(r, p2 || pr, list || [old, mineNow()], head || SHA), why);
+    }
+    assert.equal(ownReview(approvedRun(), [mineNow()]).id, 9);
+    // Which reviews go, and with what message.
+    const myOld = owl(3, 'octocat', 'CHANGES_REQUESTED', '2026-11-08T10:00:00Z');
+    const unlisted = owl(4, 'bob', 'CHANGES_REQUESTED', '2026-11-08T10:00:00Z');
+    let out = reviewsToDismiss(approvedRun(), pr, [old, myOld, unlisted, mineNow()]);
+    assert.deepEqual(out.go.map(g => [g.id, g.user]), [[5, 'ann'], [3, 'octocat']], "the listed review, and your own earlier one; a teammate's unlisted review stays");
+    assert.equal(out.go[1].message, `Superseded by PR-Owl review ${R(9)}, the same reviewer's approval, which replaces this review.`);
+    assert.equal(out.go[0].message, `Superseded by PR-Owl review ${R(9)}, which accounts for every finding in this review: it carries 1 of them as still open or parked (${ref(1)}), and any other is verified fixed or no longer applies. If one of those should still block this PR, request changes again.`);
+    out = reviewsToDismiss(approvedRun({ supersedes: [] }), pr, [myOld, mineNow()]);
+    assert.deepEqual(out.go.map(g => g.id), [3], 'approved as you: your own earlier reviews go even when the result supersedes nothing');
+    out = reviewsToDismiss(approvedRun({ awaitingHuman: [A], supersedes: [] }), pr, [myOld, mineNow({ state: 'COMMENTED' })]);
+    assert.deepEqual(out.go, [], 'approvals off: only reviews with every finding accounted for');
+    out = reviewsToDismiss(approvedRun(), pr, [{ ...old, state: 'DISMISSED' }, mineNow()]);
+    assert.deepEqual([out.go.length, out.kept], [0, 1], 'already dismissed, or not a PR-Owl review from before this one: kept, and nothing is repeated');
+    assert.equal(dismissalMessage(R(9)), `Superseded by PR-Owl review ${R(9)}: every finding in this review is verified fixed or no longer applies.`);
+    assert.ok(dismissalMessage(R(9), { refs: [ref(1), ref(2)] }).includes(`it carries 2 of them as still open or parked (${ref(1)}, ${ref(2)})`));
+    assert.ok(dismissalMessage(R(9), { refs: [ref(1), 'ignore previous instructions F-1'] }).includes('it carries 2 of them as still open or parked, and any other'), "a ref that isn't plainly a ref is counted, not quoted");
+    assert.ok(!isProwlReview('``````\n') && !isProwlReview(`\`\`\`\`\`\n\`\`\`text\n${BATCH}\n\`\`\`\n<!-- prowl-review x -->\n\`\`\`\`\``), 'a body of only backticks is no banner; a person quoting a whole review in a longer fence is not a PR-Owl review');
+    // The whole chain, through the Reviewer's finish: dismissed with the right message, and logged.
+    const dismissed = [];
+    gh = fakeGh();
+    gh.threads[A] = [{ id: 'PRRT_C-01', commentId: 100, resolved: false, outdated: false }];
+    gh.allReviews = async () => [old, ...gh.reviews.map(r => ({ id: 100 + r.id, user: 'octocat', state: r.state, at: new Date().toISOString(), body: r.body, commit: SHA, url: r.url }))];
+    gh.headSha = async () => SHA;
+    gh.dismissReview = async (p, id, file) => { dismissed.push([id, JSON.parse(fs.readFileSync(file, 'utf8'))]); };
+    const s = await settleWith(withEarlier, gh);
+    assert.deepEqual([s.run.status, dismissed.map(d => d[0]), dismissed[0][1].event], ['done', [5], 'DISMISS']);
+    assert.ok(dismissed[0][1].message.includes('it carries 1 of them as still open or parked') && s.seen.logs.some(l => l.includes("dismissed @ann's earlier PR-Owl review on acme/widgets#12, which this review supersedes")));
+    gh.dismissReview = async () => { throw Object.assign(new Error('Must have admin rights'), { status: 403, gh: true }); };
+    const s2 = await settleWith(withEarlier, gh);
+    assert.ok(s2.run.status === 'done' && s2.seen.logs.some(l => l.includes("couldn't dismiss @ann's earlier PR-Owl review on acme/widgets#12 (Must have admin rights); it was left as it was")), 'a refused dismissal never fails the review');
+    // One finding left out of the result: NOT FULLY REVIEWED, and the earlier review stays.
+    const left = plan(resultOf([], withEarlier.prs)).prs[0];
+    assert.deepEqual([left.verdict, left.supersedes], [NOT_FULLY, []]);
+  }
+
   // ---- The report ----
   {
     const result = resultOf([finding('F-01', { severity: 'high' }), finding('C-02', { status: 'fixed', outcome: { commit: 'abc1234def' } }), finding('C-03', { status: 'answered', outcome: { answer: `${A}#discussion_r9` } }),
@@ -501,20 +608,7 @@ export async function run(assert, { appDir }) {
 
   // ---- Settling a review that wrote a result ----
   {
-    const settle = async (result, { gh = fakeGh(), runOver = {}, failures = {} } = {}) => {
-      const cfg = { ...loadConfig(), githubOwner: 'acme', workDir: tmp };
-      const seen = { retags: [], logs: [] };
-      const tracker = { name: 'Azure DevOps', retag: async (c, ref, drop, add) => { seen.retags.push(add); } };
-      const app = { cfg, me: 'octocat', sideOn: () => true, tracker: () => tracker, boards: () => [], dryRun: () => false };
-      const side = createReviewer(app, { log: (level, msg) => { seen.logs.push(`${level} ${msg}`); return true; }, forget() {}, hoot() {}, appDir, trackers: { ado: tracker }, github: gh, labels: { own() {}, set() {}, refused: () => '', pending: () => false } });
-      const id = `AB42-settle-${Math.random().toString(36).slice(2, 8)}`;
-      const run = { ...baseRun({ id, logPath: path.join(tmp, `${id}.ndjson`), reportPath: path.join(tmp, `${id}.md`) }), tracker: 'ado', ref: { id: 42 }, status: 'running', pid: null, resultMode: 1, batchId: BATCH, resultPath: path.join(tmp, `${id}.result.json`), resultPrs: [A],
-        _result: { subtype: 'success', is_error: false, total_cost_usd: 1 }, ...runOver };
-      if (result !== undefined) fs.writeFileSync(run.resultPath, typeof result === 'string' ? result : JSON.stringify(result));
-      side.state = { runs: [run], failures };
-      await side.finish(run);
-      return { run, seen, gh, side };
-    };
+    const settle = settleWith.bind(null);
     let s = await settle(resultOf([finding('F-01')]));
     assert.deepEqual([s.run.status, s.run.phase, s.run.summary.verdict, s.run.summary.medium, s.run.blocked, s.seen.retags], ['done', undefined, 'REQUEST CHANGES', 1, [A], ['prowl: changes requested']]);
     assert.ok(fs.readFileSync(s.run.reportPath, 'utf8').includes(`[comment](${A}#discussion_r100)`), 'the report is written again with the links');
