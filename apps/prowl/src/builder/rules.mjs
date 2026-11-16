@@ -7,6 +7,7 @@ import { actionable, questionShape } from '../feedback.mjs';
 import { checksState } from '../github.mjs';
 import { insideRoots } from '../fence.mjs';
 import { norm, tagMatches } from '../match.mjs';
+import { OLD_DONE, reviewTags } from '../names.mjs';
 
 /**
  * The Builder's tag matchers: the start tag loosely (with the typo tolerance), the ones it sets itself exactly. Its
@@ -16,7 +17,10 @@ export function builderTags(cfg) {
   const { start, inProgress } = cfg.builder.tags;
   const { trigger: done, inProgress: reviewing } = cfg.tags;
   const ours = t => [inProgress, done, reviewing].some(x => norm(x) === norm(t));
-  const isStart = t => !ours(t) && tagMatches(t, start, cfg.tagMatchMaxTypos);
+  // The Reviewer's outcome tags are never the start tag, however close a user names them. They aren't `ours` either:
+  // the Builder neither sets nor removes them, and they hold no round.
+  const outcome = t => [reviewTags(cfg).approved, reviewTags(cfg).changes, OLD_DONE].some(x => x && norm(x) === norm(t));
+  const isStart = t => !ours(t) && !outcome(t) && tagMatches(t, start, cfg.tagMatchMaxTypos);
   // `owned`: every tag a claim swaps for In Development. `mine`: the Builder's own two, all that a stop or a dropped round takes off.
   return { isStart, ours, owned: t => isStart(t) || ours(t), mine: t => isStart(t) || norm(t) === norm(inProgress), has: (tags, tag) => tags.some(t => norm(t) === norm(tag)) };
 }

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { CHECKS_PATH, readChecks, saveConfig, writeJson } from '../config.mjs';
 import * as github from '../github.mjs';
 import { createLabels, refusal } from '../labels.mjs';
-import { askLabel, labelNames, labelsOf, labelWrite } from '../names.mjs';
+import { askLabel, labelNames, labelsOf, labelWrite, OLD_DONE, outcomeTag, reviewTags } from '../names.mjs';
 import { norm, tagMatches } from '../match.mjs';
 import { acceptOffer, offerFor } from '../offers.mjs';
 import { autoName, cleanName, notARef, parsePaste, ticketKey } from '../paste.mjs';
@@ -64,7 +64,8 @@ export function createReviewer(app, deps) {
   }
 
   // Tags this side sets itself are matched exactly; only the trigger tag is matched loosely.
-  const ours = t => [cfg().tags.inProgress, cfg().tags.done].some(x => norm(x) === norm(t));
+  const tagsNow = () => reviewTags(cfg());
+  const ours = t => [tagsNow().inProgress, tagsNow().approved, tagsNow().changes, OLD_DONE].some(x => x && norm(x) === norm(t));
   const isTrigger = t => !ours(t) && tagMatches(t, cfg().tags.trigger, cfg().tagMatchMaxTypos);
 
   // ---- Build and test before reviews: a review's checks phase, run here before its session starts ----
@@ -299,7 +300,7 @@ export function createReviewer(app, deps) {
       }
       if (!on()) return undefined; // switched off meanwhile: nothing is claimed yet
     }
-    const to = toReview.length ? c.tags.inProgress : c.tags.done; // nothing to re-review: straight to done, in one write a teammate's poller can't race
+    const to = toReview.length ? c.tags.inProgress : tagsNow().approved; // nothing to re-review: straight to approved, in one write a teammate's poller can't race
     try {
       await tracker.claim(c, ticket, t => isTrigger(t) || ours(t), to);
     } catch (e) {
@@ -314,7 +315,7 @@ export function createReviewer(app, deps) {
       if (r.pendingTag != null) { (state.releases ??= []).push(r); save(); }
     };
     if (!toReview.length) {
-      hoot(`Every PR for ${ticket.title} is already approved, marking as '${c.tags.done}'`, 'cheer');
+      hoot(`Every PR for ${ticket.title} is already approved, marking as '${to}'`, 'cheer');
       return log('ok', `${ticket.key}: every PR is already approved and unchanged since; nothing to re-review`);
     }
     if (!on()) {
@@ -760,10 +761,10 @@ export function createReviewer(app, deps) {
     let retry = false;
     if (run.status === 'done') {
       delete failures[run.ticket];
-      run.pendingTag = tags.done;
+      run.pendingTag = outcomeTag(run, tagsNow());
       const s = run.summary || {};
       log('ok', `${run.ticket}: review ${run.reviewNo} finished: ${s.verdict || 'no verdict'} (C${s.critical ?? '?'} H${s.high ?? '?'} M${s.medium ?? '?'} L${s.low ?? '?'} N${s.nit ?? '?'}) · ${run.reportPath}`);
-      hoot(run.quick ? `Done with ${run.ticket}` : `Done reviewing PRs for ${run.title}, marking as '${tags.done}'`, 'cheer');
+      hoot(run.quick ? `Done with ${run.ticket}` : `Done reviewing PRs for ${run.title}, marking as '${run.pendingTag}'`, 'cheer');
     } else if (run.status === 'failed') {
       failures[run.ticket] = (failures[run.ticket] || 0) + 1;
       retry = (!run.quick || run.labels) && rv.retryFailed(run, failures[run.ticket]); // one automatic retry, then wait for a human
@@ -803,6 +804,8 @@ export function createReviewer(app, deps) {
   /** Writes run.pendingTag to the ticket (replacing the tags this side owns); retried every minute until it lands. */
   async function applyTag(run) {
     run._tagging = true;
+    // A write left pending under the old single done tag (a review that finished before the update): its outcome tag.
+    if (run.pendingTag && norm(run.pendingTag) === norm(OLD_DONE) && ![tagsNow().approved, tagsNow().changes].some(t => norm(t) === norm(OLD_DONE))) run.pendingTag = outcomeTag(run, tagsNow());
     try {
       await trackers[run.tracker].retag(cfg(), run.ref, ours, run.pendingTag);
       run.pendingTag = null;

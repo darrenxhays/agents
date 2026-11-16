@@ -10,7 +10,9 @@ import { branchHadPr, fromOwnBranch, otherKeys, prForBranch, titleNamesOnly } fr
 import { ticketsFrom } from './ado.mjs';
 import { createLabels } from './labels.mjs';
 import { norm, tagMatches } from './match.mjs';
-import { askLabel, labelNames, labelRole, labelWrite, renamedWrite, sameLabel } from './names.mjs';
+import { askLabel, labelNames, labelRole, labelWrite, outcomeTag, renamedWrite, reviewTags, sameLabel, splitDone } from './names.mjs';
+import { label as jiraLabel } from './jira.mjs';
+import { builderTags } from './builder/rules.mjs';
 import { baseSteps, checkPlan, checksLine, prChecks } from './reviewer/checks.mjs';
 import { createReviewer } from './reviewer/reviewer.mjs';
 import { MODELS } from './config.mjs';
@@ -582,6 +584,48 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
       await h.side.poll();
       assert.equal(h.side.state.runs.length > before, starts, `labelled '${label}': ${starts ? 'the re-review starts' : 'no re-review'}`);
     }
+  }
+
+  // ---- C-16: the Reviewer's done tag says how the review went ----
+  {
+    const tags = reviewTags(loadConfig());
+    const [a, b] = [prOf(1), prOf(2)];
+    assert.deepEqual([tags.approved, tags.changes], ['prowl: approved', 'prowl: changes requested']);
+    assert.equal(outcomeTag({ prs: [a, b], approved: { [a.url]: 'x', [b.url]: 'y' } }, tags), 'prowl: approved');
+    assert.equal(outcomeTag({ prs: [a, b], approved: { [a.url]: 'x' } }, tags), 'prowl: changes requested', 'one PR not approved');
+    assert.equal(outcomeTag({ prs: [], approved: {} }, tags), 'prowl: changes requested', 'no PRs');
+    assert.deepEqual([true, false].map(all => outcomeTag({ prs: [a], approved: all ? { [a.url]: 'x' } : {} }, { approved: 'QA Done', changes: 'QA Done' })), ['QA Done', 'QA Done']);
+    const split = saved => { splitDone(saved); return saved.tags; };
+    assert.deepEqual(split({ tags: { done: 'Reviewed' } }), {}, "still Reviewed: dropped, so the defaults apply");
+    assert.deepEqual(split({ tags: { done: 'QA Done' } }), { approved: 'QA Done', changes: 'QA Done' }, 'renamed: kept for both outcomes');
+    assert.deepEqual(split({ tags: { done: 'QA Done', approved: 'Good' } }), { approved: 'Good', changes: 'QA Done' });
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify({ tags: { done: 'QA Done' } }));
+    assert.deepEqual([loadConfig().tags.approved, loadConfig().tags.changes, 'done' in loadConfig().tags, /"done"/.test(fs.readFileSync(CONFIG_PATH, 'utf8'))], ['QA Done', 'QA Done', false, false], 'a saved config moves once, and is written back');
+    restoreConfig();
+    assert.deepEqual(['prowl: approved', 'prowl: changes requested'].map(jiraLabel), ['prowl-approved', 'prowl-changes-requested'], 'the Jira form');
+    // The Reviewer: the tag written says how the review went; Reviewed is still taken off, and never written.
+    for (const [approves, tag] of [[2, 'prowl: approved'], [1, 'prowl: changes requested']]) {
+      const h = reviewerOver({ open: [a, b] });
+      let dropped = null;
+      h.tracker.claim = async (c, t, drop, add) => { dropped = ['Reviewed', 'prowl: approved', 'prowl: changes requested', 'backend'].filter(drop); h.seen.claims.push(add); };
+      await h.side.poll();
+      assert.deepEqual(dropped, ['Reviewed', 'prowl: approved', 'prowl: changes requested'], 'a claim takes the outcome tags and Reviewed off');
+      const run = h.side.state.runs[0];
+      fs.writeFileSync(run.reportPath, `---\nverdict: X\napproved: ${[a, b].slice(0, approves).map(p => `${p.url}@s`).join(' ')}\n---\n`);
+      run._result = { subtype: 'success', is_error: false };
+      await h.side.finish(run);
+      assert.deepEqual(h.seen.retags, [tag], `${approves} of 2 approved: ${tag}`);
+    }
+    // A write left pending under Reviewed by a Prowl from before the update: its outcome tag.
+    const h = reviewerOver({ open: [], tickets: [] });
+    h.side.state.runs.push({ id: 'old', tracker: 'ado', ref: { id: 1 }, ticket: 'AB#1', status: 'done', endedAt: 1, prs: [a], approved: { [a.url]: 's' }, pendingTag: 'Reviewed' });
+    h.side.tick();
+    await sleep(5);
+    assert.deepEqual(h.seen.retags, ['prowl: approved']);
+    // The Builder's start tag is never one of the Reviewer's outcome tags, however close it is named.
+    const base = loadConfig();
+    const near = builderTags({ ...base, tags: { ...base.tags, changes: 'Ready to Starts' } });
+    assert.ok(!near.isStart('Ready to Starts') && near.isStart('Ready to Start') && !builderTags(base).isStart('Reviewed') && !builderTags(base).ours('prowl: changes requested'), "refused as the start tag, and not the Builder's to remove");
   }
 
   // ---- C-06: verifier model and effort ----

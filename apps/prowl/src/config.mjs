@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { LABELS, REVIEW_LABEL } from './names.mjs';
+import { LABELS, REVIEW_LABEL, splitDone } from './names.mjs';
 
 export const HOME = process.env.PROWL_HOME || path.join(os.homedir(), '.prowl');
 export const CONFIG_PATH = path.join(HOME, 'config.json');
@@ -20,7 +20,7 @@ const DEFAULTS = {
   ado: { org: '', boards: [] },
   jira: { site: '', email: '', boards: [], fields: { acceptanceCriteria: '', reproSteps: '' } },
   reviewer: { enabled: true },
-  tags: { trigger: 'Ready for Review', inProgress: 'In Review', done: 'Reviewed' },
+  tags: { trigger: 'Ready for Review', inProgress: 'In Review', approved: LABELS.approved, changes: LABELS.changes },
   tagMatchMaxTypos: 2,
   githubOwner: '',
   pollSeconds: 300,
@@ -97,7 +97,8 @@ const NOTES = {
   tags: 'The Reviewer\'s tags (labels on Jira).',
   'tags.trigger': 'Tickets carrying this get reviewed. The Builder sets it once its PRs open (see builder.requestReview).',
   'tags.inProgress': 'Set while a review runs.',
-  'tags.done': 'Set when a review finishes. Re-add the trigger tag to ask for a re-review.',
+  'tags.approved': 'Set when a review finishes with every PR approved.',
+  'tags.changes': 'Set when a review finishes with a PR not approved. Re-add the trigger tag to ask for a re-review.',
   tagMatchMaxTypos: 'Typos still treated as the review trigger or build start tag. Case, spaces and punctuation are always ignored. 0 = exact.',
   githubOwner: 'GitHub org (or user) whose PRs are searched for the ticket key, and whose repos the Builder works in.',
   pollSeconds: 'How often the boards are checked, in seconds (30 or more).',
@@ -217,6 +218,8 @@ export function loadConfig() {
     delete saved.builder.tags.done;
     delete saved.builder.tags.reviewing;
   }
+  // The Reviewer's one done tag became two, which say how the review went.
+  const done = splitDone(saved);
   // 2.14.0 removed builder.command: Prowl always builds with its own skill, shaped by build.md.
   const command = isObj(saved.builder) && 'command' in saved.builder;
   if (command) delete saved.builder.command;
@@ -225,7 +228,7 @@ export function loadConfig() {
   if (!wrong.length && !['ado', 'jira'].includes(cfg.taskBoard)) wrong.push('taskBoard must be "ado" or "jira"');
   if (!wrong.length && cfg.pollSeconds < 30) wrong.push('pollSeconds must be 30 or more');
   if (wrong.length) throw new Error(`Can't use ${CONFIG_PATH}: ${wrong.join('; ')}`);
-  if (old || ownTags || command || !fs.existsSync(CONFIG_PATH)) saveConfig(cfg);
+  if (old || ownTags || command || done || !fs.existsSync(CONFIG_PATH)) saveConfig(cfg);
   return cfg;
 }
 

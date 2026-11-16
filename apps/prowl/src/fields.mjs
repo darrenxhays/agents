@@ -65,8 +65,10 @@ export const CONFIG_FIELDS = [
     jira: { label: 'Review trigger label', help: 'Issues carrying this label, or a near-miss spelling of it, get reviewed. The Builder sets it once its PRs are open, and after each feedback round. Spaces become dashes.' } },
   { key: 'tags.inProgress', label: 'Review in-progress tag', type: 'text', help: "Set when a review starts. While a ticket carries it or the trigger tag, the Builder starts no feedback round. Colour it yellow in board settings > Cards > Tag colors.",
     jira: { label: 'Review in-progress label', help: 'Set when a review starts. While an issue carries it or the trigger label, the Builder starts no feedback round. Spaces become dashes (In-Review).' } },
-  { key: 'tags.done', label: 'Review done tag', type: 'text', help: 'Set when a review finishes. Re-add the trigger tag to ask for a re-review.',
-    jira: { label: 'Review done label', help: 'Set when a review finishes. Spaces become dashes. Re-add the trigger label to ask for a re-review.' } },
+  { key: 'tags.approved', label: 'Review approved tag', type: 'text', help: 'Set when a review finishes with every PR approved. Re-add the trigger tag to ask for a re-review.',
+    jira: { label: 'Review approved label', help: 'Set when a review finishes with every PR approved. Written as prowl-approved. Re-add the trigger label to ask for a re-review.' } },
+  { key: 'tags.changes', label: 'Review changes tag', type: 'text', help: 'Set when a review finishes with at least one PR not approved. The Builder then works through the feedback; re-add the trigger tag to ask for a re-review.',
+    jira: { label: 'Review changes label', help: 'Set when a review finishes with at least one PR not approved. The Builder then works through the feedback; re-add the trigger label to ask for a re-review. Written as prowl-changes-requested.' } },
   { key: 'tagMatchMaxTypos', label: 'Tag typo tolerance', type: 'int', min: 0, max: 3, help: 'Typos (wrong, missing, extra or swapped letters) still treated as the review trigger or build start tag. Case, spaces and punctuation are always ignored. 0 = exact.',
     jira: { label: 'Label typo tolerance', help: 'Typos (wrong, missing, extra or swapped letters) still treated as the review trigger or build start label. Case, spaces and punctuation are always ignored. 0 = exact.' } },
 

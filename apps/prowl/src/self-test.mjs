@@ -776,7 +776,7 @@ assert.match(seen.logs.at(-1), /AB#42: the claim failed \(Jira GET \/changelog: 
 // Re-reviews: the PRs the last review approved, unchanged since, are context; all of them, and the ticket goes straight to Reviewed.
 const both = [prOf(1), prOf(2)];
 seen = await reviewOnce(both, { runs: [doneRun(both, { approved: { [prOf(1).url]: 'sha1', [prOf(2).url]: 'sha2' } })] });
-assert.deepEqual([seen.claims, seen.started], [['Reviewed'], []], 'every PR approved and unchanged: Reviewed in one write, and no session');
+assert.deepEqual([seen.claims, seen.started], [['prowl: approved'], []], 'every PR approved and unchanged: approved in one write, and no session');
 seen = await reviewOnce(both, { runs: [doneRun(both, { approved: { [prOf(1).url]: 'sha1', [prOf(2).url]: 'an-older-commit' } })] });
 assert.deepEqual([seen.claims, seen.started[0].prs.map(p => p.number), seen.started[0].approvedPrs.map(p => p.number)], [['In Review'], [2], [1]], 'new commits since its approval: re-reviewed, the other as context');
 // Your own ready PR leaves the whole ticket for a teammate, unless Review my own PRs is on. A dry run claims nothing.
@@ -1048,7 +1048,7 @@ assert.deepEqual(headings, order, 'every setting of the app, each category in it
 assert.equal(cardLines.filter(l => /^ {2}╰─*╯$/.test(l.trimEnd())).length, order.length, 'each card closed');
 assert.ok(cardLines.filter(l => /^ {2}│ .*│$/.test(l.trimEnd())).every(l => l.trimEnd().length === 79), 'each row inside its card, its right edge lined up');
 assert.ok(builderConfig.includes('Max parallel builds') && builderConfig.includes('Max parallel reviews'), "the Builder's settings show while it is off");
-const tagRows = ['Build start tag', 'Build in-progress tag', 'Review trigger tag', 'Review in-progress tag', 'Review done tag'];
+const tagRows = ['Build start tag', 'Build in-progress tag', 'Review trigger tag', 'Review in-progress tag', 'Review approved tag', 'Review changes tag'];
 assert.ok(tagRows.every((t, i) => !i || builderConfig.indexOf(tagRows[i - 1]) < builderConfig.indexOf(t)) && !/Done tag|Reviewing tag/.test(builderConfig), 'one set of tags, in the order a ticket meets them');
 tui.key('tab');
 tui.key('4');

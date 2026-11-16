@@ -92,3 +92,28 @@ export function renamedWrite(cfg, op, outcome = '') {
       : labelWrite(cfg, add, ['building', 'ask', 'approved', 'changes'], ['building', 'ask']);
   return { ...w, old: [...new Set([...w.old, ...(op.remove || []).filter(n => !(op.loose || []).includes(n))])] };
 }
+
+// ---- Tags ----
+
+/** The Reviewer's single done tag, from before it said how the review went. Still read (and taken off), never written. */
+export const OLD_DONE = 'Reviewed';
+
+/** The Reviewer's tags as it uses them. */
+export const reviewTags = cfg => ({ trigger: cfg.tags.trigger, inProgress: cfg.tags.inProgress,
+  approved: cfg.tags.approved || cfg.tags.done || '', changes: cfg.tags.changes || cfg.tags.done || '' });
+
+/** Approved when the review approved every PR it reviewed; else changes requested (a PR it couldn't review counts too). */
+export const outcomeTag = (run, tags) => ((run.prs || []).length && run.prs.every(p => run.approved?.[p.url]) ? tags.approved : tags.changes);
+
+/**
+ * A saved config's tags.done, split in two: one still `Reviewed` (or empty) is dropped, so the two defaults apply;
+ * one the user renamed is kept for both outcomes, unless already saved. Returns true when `saved` changed.
+ */
+export function splitDone(saved) {
+  const tags = saved?.tags;
+  if (!tags || typeof tags !== 'object' || !('done' in tags)) return false;
+  const renamed = typeof tags.done === 'string' && tags.done.trim() && norm(tags.done) !== norm(OLD_DONE) ? tags.done : '';
+  if (renamed) for (const k of ['approved', 'changes']) if (!(k in tags)) tags[k] = renamed;
+  delete tags.done;
+  return true;
+}
