@@ -95,7 +95,8 @@ export function createReview(cfg, { tracker, ticket, prs, approvedPrs = [], left
     try { priorReport = fs.readFileSync(prior.reportPath, 'utf8'); } catch { priorReport = '(the previous report file is missing)'; }
   }
   fs.writeFileSync(run.promptPath, buildPrompt({ ...run, prior, priorReport, approvals: cfg.approvals, reReviewScope: cfg.reReviewScope, heads, parkHumanOnly: cfg.parkHumanOnly, ticketText,
-    verifierModel: cfg.claude.verifierModel, verifierEffort: cfg.claude.verifierEffort }));
+    verifierModel: cfg.claude.verifierModel, verifierEffort: cfg.claude.verifierEffort,
+    smallReReview: { lines: cfg.smallReReviewLines, model: cfg.smallReReviewModel, effort: cfg.smallReReviewEffort } }));
   return run;
 }
 
@@ -230,7 +231,7 @@ export function finalize(run) {
 }
 
 /** The prompt (the agent's brief): the PR list for prowl-review, the ticket, the re-review brief and the report spec. */
-export function buildPrompt({ ticket, title: rawTitle, ticketUrl, prs, contextPrs = [], leftOut = [], reviewNo, reportPath, prior, priorReport, approvals = true, reReviewScope = 'full', heads = {}, parkHumanOnly = false, ticketText = '', marker = '', quick = false, verifierModel = '', verifierEffort = '' }) {
+export function buildPrompt({ ticket, title: rawTitle, ticketUrl, prs, contextPrs = [], leftOut = [], reviewNo, reportPath, prior, priorReport, approvals = true, reReviewScope = 'full', heads = {}, parkHumanOnly = false, ticketText = '', marker = '', quick = false, verifierModel = '', verifierEffort = '', smallReReview = null }) {
   const title = String(rawTitle ?? '').replace(/"/g, "'"); // someone else's words, shown in quotes: they can't close the quotes themselves
   const lines = [
     `/prowl:prowl-review ${[...prs, ...contextPrs].map(p => p.url).join(' ')}`,
@@ -267,7 +268,7 @@ export function buildPrompt({ ticket, title: rawTitle, ticketUrl, prs, contextPr
   }
   // A delta re-review needs the commits the last review saw; reviews from before 2.8.0 didn't record them.
   const steps = parkHumanOnly ? [...PRIOR_STEPS, PARK_STEP] : PRIOR_STEPS;
-  if (prior && reReviewScope === 'delta' && prior.reviewedHeads) lines.push('', ...deltaBrief(prior, priorReport, prs, heads, steps));
+  if (prior && reReviewScope === 'delta' && prior.reviewedHeads) lines.push('', ...deltaBrief(prior, priorReport, prs, heads, steps, smallStep(smallReReview)));
   else if (prior) lines.push('', ...reReviewBrief(prior, priorReport, steps));
   lines.push('', ...reportSpec(ticket, reviewNo, reportPath));
   return `${lines.join('\n')}\n`;
@@ -310,8 +311,19 @@ const reReviewBrief = (prior, report, steps) => [
   '</previous-report>',
 ];
 
+/**
+ * The delta brief's step that puts a small change's reviewer on a cheaper model (Small re-review lines, model and
+ * effort), or '' when it is off: 0 lines, or a model the Agent tool doesn't take. The session counts the lines, per PR.
+ */
+function smallStep(small) {
+  const { lines, model, effort } = small || {};
+  if (!(Number.isInteger(lines) && lines > 0 && AGENT_MODELS.includes(model))) return '';
+  const e = EFFORTS.includes(effort) ? effort : '';
+  return `A small change gets the small re-review model. First check each PR's range for a force-push, as in step 1. Then count the lines each range above changes (added plus deleted, only in files the PR itself changes, as in step 2; \`git diff --numstat <last>..<head>\`, or the compare API's \`files[].changes\`). The compare API lists at most 300 files: when its list is at that cap the count is incomplete, so count with \`git diff --numstat\` instead, and if you can't, launch that PR's reviewer as usual and give its count as unknown. A PR with no new commits counts as 0 lines. A PR whose range changes at most ${lines} lines gets its reviewer launched with \`model\` \`${model}\`${e && ` and \`effort\` \`${e}\``} on the Agent tool. Every other reviewer is launched as usual: one over ${lines} lines, one reviewed in full (not reviewed at a known commit before, or force-pushed since), and verifiers, which follow the skill's Step 6. In the report's Summary, give each PR's line count and its reviewer's model${e && ' and effort'}, one line per PR.`;
+}
+
 /** A re-review of only the commits since the last review, carrying the last report's front matter and findings. */
-function deltaBrief(prior, report, prs, heads, steps) {
+function deltaBrief(prior, report, prs, heads, steps, small = '') {
   const since = prs.map(({ url }) => {
     const [last, now] = [prior.reviewedHeads[url], heads[url]];
     if (!last || !now) return `- ${url}: not reviewed at a known commit before; review it in full`;
@@ -322,9 +334,9 @@ function deltaBrief(prior, report, prs, heads, steps) {
     '',
     `The previous review (review ${prior.reviewNo}, finished ${finished(prior)} UTC) found what is below. The ticket has been tagged for review again, so the authors believe they have addressed it. Prowl's Re-review scope is set to delta: review only what changed since then. On top of the normal prowl-review steps:`,
     '',
-    '1. Review each PR only from the commit the previous review saw to its head now (listed below): give its reviewer those commits (`git diff <last>..<head>`, or `gh api repos/{o}/{r}/compare/<last>...<head>`) and its still-open prior findings, and have it read the rest of the PR as context for them. If a last commit is no longer in the PR\'s history (a force-push), review that PR in full.',
+    '1. Review each PR only from the commit the previous review saw to its head now (listed below): give its reviewer those commits (`git diff <last>..<head>`, or `gh api repos/{o}/{r}/compare/<last>...<head>`) and its still-open prior findings, and have it read the rest of the PR as context for them. If a last commit is no longer in the PR\'s history (a force-push or rebase: the compare API\'s `status` is `diverged` or `behind`, not `ahead` or `identical`, or `git merge-base --is-ancestor <last> <head>` fails), review that PR in full.',
     "2. If the author merged the base branch into the PR since then, that range includes the base branch's changes: raise new findings only in files the PR itself changes (`gh pr diff <PR> --name-only`).",
-    ...numbered(steps, 3),
+    ...numbered([...(small ? [small] : []), ...steps], 3),
     '',
     'Commits since the previous review:',
     '',

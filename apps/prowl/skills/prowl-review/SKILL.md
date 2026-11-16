@@ -116,6 +116,8 @@ Fill `<SKILL_DIR>/references/review-spec-template.md` once per open PR and save 
 3. The requirement to return the structured report defined in reviewer-instructions.md **as its final message**, verbatim structure — you file it unchanged in `reports/<repo>-<n>.md`.
 4. The three prohibitions, restated: **post nothing on the PR; change no code; never run `git checkout`/`git switch` or any mutating git command in the user's clone** (read via `gh pr diff`, `gh api`, `gh pr view`; if local inspection is unavoidable, use an isolated `git worktree add <tmpdir> <sha>` or temp shallow clone and remove it after).
 
+**A reviewer's model.** Launch each reviewer with no `model` or `effort` on the Agent tool, unless Prowl's context says otherwise. When Prowl's context names a model for a PR's reviewer (a small change in a delta re-review), that reviewer gets that `model`, and the `effort` it names beside it, if any; with none named there, the effort every other reviewer gets.
+
 ## Step 5 — Triage and dedupe into the ledger
 
 When all reports are in, build `ledger.md`. For every finding, assign a global ID `F-nn` and carry: PR, file:line, in-diff (yes/no per the reviewer), severity, title, axis, reviewer agent, fix-owner PR (for cross-PR findings), status `PENDING`.

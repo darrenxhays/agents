@@ -128,5 +128,24 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
     assert.ok(skill.includes('**Verifier model and effort.**') && skill.includes('`UNINVESTIGATED` entries go in groups of their own'));
   }
 
+  // ---- C-07: small re-reviews ----
+  {
+    const re = promptCases.reReview;
+    const [u1, u2] = re.prs.map(x => x.url);
+    const deltaCase = { ...re, prior: { ...re.prior, reviewedHeads: { [u1]: 'aaa111', [u2]: 'bbb222' } }, reReviewScope: 'delta', heads: { [u1]: 'aaa111', [u2]: 'ccc333' } };
+    const none = buildPrompt(deltaCase);
+    const small = buildPrompt({ ...deltaCase, smallReReview: { lines: 50, model: 'sonnet' } });
+    assert.ok(small.includes('\n3. A small change gets the small re-review model.') && small.includes('at most 50 lines gets its reviewer launched with `model` `sonnet` on the Agent tool') && small.includes('\n4. '));
+    const nums = small.slice(0, small.indexOf('<previous-findings>')).split('\n').map(l => /^(\d+)\. /.exec(l)?.[1]).filter(Boolean).map(Number);
+    assert.deepEqual(nums, nums.map((_, i) => i + 1), 'the numbered steps are 1..n with no gap');
+    assert.ok(nums.length >= 4 && small.includes('when its list is at that cap the count is incomplete') && small.includes('A PR with no new commits counts as 0 lines'));
+    assert.ok(small.includes("give each PR's line count and its reviewer's model, one line per PR") && none.includes('`git merge-base --is-ancestor <last> <head>` fails'));
+    for (const off of [{ lines: 0, model: 'sonnet' }, { lines: 50, model: 'claude-sonnet-4-6' }, { lines: '50', model: 'sonnet' }]) assert.equal(buildPrompt({ ...deltaCase, smallReReview: off }), none, `off: ${JSON.stringify(off)}`);
+    assert.equal(buildPrompt({ ...re, smallReReview: { lines: 50, model: 'sonnet' } }), fixture('reReview.prompt.md'), 'scope full: the re-review prompt is as before');
+    const low = buildPrompt({ ...deltaCase, smallReReview: { lines: 50, model: 'sonnet', effort: 'low' } });
+    assert.ok(low.includes('with `model` `sonnet` and `effort` `low` on the Agent tool') && low.includes("its reviewer's model and effort"));
+    assert.deepEqual([loadConfig().smallReReviewLines, loadConfig().smallReReviewModel, loadConfig().smallReReviewEffort], [50, 'sonnet', '']);
+  }
+
   fs.rmSync(tmp, { recursive: true, force: true });
 }
