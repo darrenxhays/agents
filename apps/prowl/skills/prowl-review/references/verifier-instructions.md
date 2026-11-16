@@ -33,11 +33,12 @@ For `UNINVESTIGATED` entries (out-of-scope observations or unaddressed hypothese
 
 ## Prior findings
 
-An entry marked `PRIOR` is a finding an earlier PR-Owl review raised, with every comment on its thread. It was verified when it was raised, so the question is not whether it was ever real but what is true of it at the head SHA you were given. Read the whole thread first, then the code. A comment carrying a `prowl-fix` marker is the author's own account: "Fixed in <sha>" (confirm the fix in the code; the comment is not evidence) or "Not changed" with a reason (weigh the reason like any other evidence: it holds or it doesn't). It gets one of these verdicts, not the ones below:
+An entry marked `PRIOR` is a finding an earlier PR-Owl review raised, with every comment on its thread. It was verified when it was raised, so the question is not whether it was ever real but what is true of it at the head SHA you were given. Read the whole thread first, every later comment on it, then the code. A comment carrying a `prowl-fix` marker is the author's own account: "Fixed in <sha>" (confirm the fix in the code; the comment is not evidence) or "Not changed" with a reason (weigh the reason like any other evidence: it holds or it doesn't). It gets one of these verdicts, not the ones below:
 
 - **FIXED** — the defect is gone at head. Name the commit that fixed it: the one a `prowl-fix` comment names, once you have confirmed it, or the one that last changed the lines (`gh api "repos/<o>/<r>/commits?path=<file>&sha=<head sha>&per_page=5"`).
 - **STILL-OPEN** — the defect is still in the code at head. Give its `file:line` now, one line on why it still fails, and its severity against the definitions (step 5).
 - **NO-LONGER-APPLIES** — there is nothing left to fix: the code is gone or rewritten so the scenario can't arise, the PR was merged or closed, or the author's reason holds and it is not a defect. Say which, and quote what shows it.
+- **ANSWERED** — it still happens at head, and a later comment on its thread, from the author or another reviewer (a person, not a `prowl-fix` comment), declines it, accepts the risk, defers it to a ticket, or argues it isn't a defect, with no later comment disputing that. Link and quote that answer. Whether the answer is right is a person's call, not yours. "Fixed" or "done" is not an answer when it is still in the code: that is `STILL-OPEN`. A `prowl-fix` comment is Prowl's Builder, not a person: its evidence gives `FIXED`, `NO-LONGER-APPLIES` (the dispute holds) or `STILL-OPEN`, never `ANSWERED`.
 
 `UNVERIFIABLE` stays available when you can't tell.
 
@@ -71,7 +72,7 @@ Your **final message is the report**. It is consumed verbatim by the orchestrato
   - Suggested-fix check: sound | risky: <why>
   - Already raised: no | <link> — open | resolved | outdated | summary | conversation — understated: yes | no   (CONFIRMED/ADJUSTED only)
 
-- **F-<nn>** (prior) — VERDICT: FIXED in <sha> | STILL-OPEN | NO-LONGER-APPLIES | UNVERIFIABLE   (`PRIOR` entries)
+- **C-<nn>** (prior) — VERDICT: FIXED in <sha> | STILL-OPEN | NO-LONGER-APPLIES | ANSWERED <link to the answer> | UNVERIFIABLE   (`PRIOR` entries)
   - Location check: <file>:<line> at head   (STILL-OPEN only)
   - Evidence:
     ```

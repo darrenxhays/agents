@@ -121,7 +121,7 @@ const NOTES = {
   smallReReviewModel: 'That reviewer\'s model: "sonnet", "opus", "haiku" or "fable" (short names only).',
   smallReReviewEffort: 'That reviewer\'s reasoning effort: "low", "medium", "high", "xhigh", "max". "" = the other reviewers\' effort.',
   maxReviewRounds: 'Reviews per ticket before it is left, tagged, for a person. 0 = no cap.',
-  parkHumanOnly: 'true: re-reviews park earlier findings only a person can fix outside the code: not re-posted, not counted in the verdict.',
+  parkHumanOnly: 'true: earlier findings only a person can settle outside the code are parked: no reply, not counted in the verdict. A thread a person answered is parked either way.',
   reviewTimeoutMinutes: 'Stop a review running longer than this. It fails and isn\'t retried. 0 = no limit.',
   reviewOwnPrs: 'true: review tickets with PRs you authored, as comment reviews (GitHub won\'t let you approve your own).',
   approvals: 'true: approve PRs with no blocking findings. false: comment that there are none and leave approving to a person.',

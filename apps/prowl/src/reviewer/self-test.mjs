@@ -443,6 +443,28 @@ export async function run(assert, { appDir }) {
     assert.ok(got.logs.some(l => l.includes("acme/widgets#12 gets no approval: something wasn't checked (its review says what)")) && got.logs.some(l => /your output\.md lacks Review banner, .* so those use the default's templates/.test(l)));
   }
 
+  // ---- A thread a person answered is parked (and what else is) ----
+  {
+    const answered = finding('C-02', { status: 'answered', outcome: { answer: `${A}#discussion_r999` } });
+    assert.match(checkResult(resultOf([finding('F-01', { status: 'answered', outcome: { answer: `${A}#discussion_r999` } })]))[0], /status: must be one of confirmed/, 'answered is for an earlier finding only');
+    assert.match(checkResult(resultOf([{ ...answered, outcome: { answer: 'declined in chat' } }]))[0], /outcome\.answer: must be the link to the person's answer on GitHub/);
+    for (const parkHumanOnly of [true, false]) {
+      const rec = plan(resultOf([answered]), { parkHumanOnly }).prs[0];
+      assert.deepEqual([rec.event, rec.severity, rec.ops.map(o => o.kind)], ['APPROVE', '', ['review']], `answered is parked with Park human-only findings ${parkHumanOnly ? 'on' : 'off'}: no reply, and with nothing else counted the PR is approved`);
+    }
+    const needs = finding('C-03', { status: 'needs-person', outcome: { note: 'Create the CI pipeline.' } });
+    assert.deepEqual([plan(resultOf([needs])).prs[0].event, plan(resultOf([needs]), { parkHumanOnly: true }).prs[0].event, plan(resultOf([{ ...needs, earlier: { ...needs.earlier, parked: true } }])).prs[0].event], ['REQUEST_CHANGES', 'APPROVE', 'APPROVE'],
+      'needs-person counts with the setting off, is parked with it on, and stays parked when it was parked before');
+    const unver = finding('C-04', { status: 'unverifiable', outcome: { note: 'needs the staging data' } });
+    assert.deepEqual([plan(resultOf([unver])).prs[0].withheld, plan(resultOf([{ ...unver, earlier: { ...unver.earlier, parked: true } }])).prs[0].event], ["something wasn't checked", 'APPROVE'], "unverifiable withholds the approval, unless it was parked before");
+    // The Parked line: the note without the line's own title, ref and link.
+    const noisy = { ...needs, earlier: { ...needs.earlier, parked: true }, outcome: { note: `Title C-03 (rb-20261109-ab42-r1-0910-77aa F-03): create the CI pipeline · ${A}#discussion_r300` } };
+    const file = detailsFromBodies([{ body: reviewOp(plan(resultOf([noisy, answered])).prs[0]).payload.body, at: '' }], [], 'widgets-12');
+    assert.ok(file.includes(`- Title C-03 (rb-20261109-ab42-r1-0910-77aa F-03): create the CI pipeline · ${A}#discussion_r300\n- Title C-02 (rb-20261109-ab42-r1-0910-77aa F-02): answered: ${A}#discussion_r999 · ${A}#discussion_r200`), file.slice(file.indexOf('## Parked'), file.indexOf('## Coverage')));
+    assert.deepEqual(parkedUrls(file).filter(u => /r(200|300)$/.test(u)), [`${A}#discussion_r300`, `${A}#discussion_r200`], "the Builder's reader finds the parked threads");
+    assert.ok(fs.readFileSync(path.join(appDir, 'skills', 'prowl-review', 'references', 'verifier-instructions.md'), 'utf8').includes('- **ANSWERED** — it still happens at head'));
+  }
+
   // ---- The report ----
   {
     const result = resultOf([finding('F-01', { severity: 'high' }), finding('C-02', { status: 'fixed', outcome: { commit: 'abc1234def' } }), finding('C-03', { status: 'answered', outcome: { answer: `${A}#discussion_r9` } }),
