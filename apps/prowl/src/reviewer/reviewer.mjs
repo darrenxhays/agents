@@ -390,6 +390,32 @@ export function createReviewer(app, deps) {
   };
 
   /**
+   * v in History: reviews a finished review's PRs again, as a quick review under the same ticket or name, as saved.
+   * Its PRs and context PRs are read again; one merged or closed since is left out. No tag is written and nothing is
+   * claimed; its earlier done reviews under the same key make it a re-review. Rejects when it can't start.
+   */
+  side.reReview = async function reReview(past) {
+    const c = cfg();
+    if (!on()) throw new Error('the Reviewer is off');
+    if (busy() >= c.maxConcurrentReviews) throw new Error(`${c.maxConcurrentReviews} reviews are already running (Max parallel reviews)`);
+    const free = hold();
+    try {
+      app.me ||= await gh.me();
+      const paste = { prs: [...past.prs, ...(past.contextPrs || [])].map(p => ({ repo: p.repo, number: p.number })), tickets: [] };
+      const prs = await resolve(paste);
+      for (const p of prs.filter(x => x.gone)) log('info', `${past.ticket}: ${p.repo}#${p.number} is ${p.state}; left out`);
+      // The key is reused as saved, never parsed again (a QUICK#n stays that one). A ticket of the task board set
+      // now gets its title read again; if that fails, the saved title is used.
+      let { title } = past;
+      const key = ticketKey(past.ticket, c.taskBoard);
+      if (key) title = await app.tracker().lookup(c, key).then(t => t.title || title, () => title);
+      return await startQuick(c, { key: past.ticket, title, ticketUrl: past.ticketUrl || '', paste }, prs, free);
+    } finally {
+      free();
+    }
+  };
+
+  /**
    * An answer to an offer from quickReview(): 'tag' (tag the tickets for review, adding their boards with `add`),
    * 'review' (a quick review now) or 'cancel'. Resolves with what quickReview() does, or the keys tagged.
    */

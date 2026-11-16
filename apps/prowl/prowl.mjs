@@ -274,6 +274,10 @@ tui = startTui(app, {
     log('reviewer', 'error', `Couldn't start the quick review: ${e.message}`);
     throw e;
   }),
+  reReview: run => reviewer.reReview(run).catch(e => {
+    log('reviewer', 'error', `Couldn't start the review: ${e.message}`);
+    throw e;
+  }),
   quickBuild: (text, opts) => builder.quickBuild(text, opts).catch(e => {
     log('builder', 'error', `Couldn't start the quick build: ${e.message}`);
     throw e;

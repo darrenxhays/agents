@@ -14,6 +14,7 @@ import { createReviewer } from './reviewer/reviewer.mjs';
 import { MODELS } from './config.mjs';
 import { agentModel, buildPrompt, CHECKS_SLOT, createReview, fenced, fillChecks, finalize, reviewArgs, reviewRoles, rolesWarning } from './reviewer/reviews.mjs';
 import { readActivity, sessionEnded } from './sessions.mjs';
+import { startTui } from './tui.mjs';
 
 const WIN = process.platform === 'win32';
 const sh = (cwd, cmd, args, env) => spawnSync(cmd, args, { cwd, encoding: 'utf8', env: { ...process.env, ...env } });
@@ -437,6 +438,69 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
     h.side.state.runs.find(r => r.id === 'other').status = 'done';
     await h.side.poll();
     assert.ok(h.side.state.runs.some(r => r.ticket === 'QUICK#1' && r.status === 'running'), 'and starts on the poll after that review ends');
+  }
+
+  /** A headless TUI over fake sides: { tui, app, sides, calls (what the actions were asked), text(w, h) (a frame as one string) }. */
+  function tuiOver({ reviewer = {}, builder = {}, cfgOver = {}, actions = {}, io = {} } = {}) {
+    const app = { cfg: { ...loadConfig(), ...cfgOver }, me: 'octocat', log: [], notes: null, override: {}, sideOn: n => app.override[n] ?? Boolean(app.cfg[n]?.enabled),
+      tracker: () => ({ name: 'Azure DevOps', boardLabel: b => `${b.project} / ${b.team}` }), boards: () => [{ project: 'Shop', team: 'Web' }], dryRun: () => false, hasToken: () => false, speech: () => null, offers: [] };
+    const mk = extra => ({ paused: false, polling: false, nextPoll: Date.now() + 60_000, lastError: '', running: () => [], needs: () => [], finished: () => [], history: () => [], waits: () => [], preparing: () => [], state: { runs: [] }, tagVariants: {}, stopText: r => `Stop the review of ${r.ticket}?`, ...extra });
+    const sides = { reviewer: mk(reviewer), builder: mk(builder) };
+    const calls = [];
+    const act = name => async (...a) => { calls.push([name, ...a]); return null; };
+    const tui = startTui(app, { sides, pollNow() {}, togglePause() {}, saveConfig: () => calls.push(['saveConfig']), saveToken: () => '', quit: () => calls.push(['quit']), stop: (...a) => calls.push(['stop', ...a]),
+      quickReview: act('quickReview'), quickBuild: act('quickBuild'), reReview: act('reReview'), answerOffer: act('answerOffer'), stopWait: wt => calls.push(['stopWait', wt.key]), toggleSide: () => true,
+      answer: act('answer'), discuss: act('discuss'), skip: act('skip'), handBack: act('handBack'), follow: act('follow'), stopFollowing: act('stopFollowing'), ...actions }, { headless: true, ...io });
+    return { tui, app, sides, calls, text: (w = 100, h = 30) => tui.frame(w, h).join('\n') };
+  }
+
+  // ---- C-20: v in History reviews the PRs again ----
+  {
+    const past = (over = {}) => ({ id: 'AB42-r1', tracker: 'ado', ref: { id: 42 }, ticket: 'AB#42', title: 'Saved title', ticketUrl: 'https://dev.azure.com/o/Shop/_workitems/edit/42', status: 'done', endedAt: 5, reviewNo: 1,
+      prs: [prOf(1), prOf(2)], contextPrs: [], approved: {}, reportPath: '/nowhere.md', ...over });
+    let h = reviewerOver({ open: [prOf(1), prOf(2)], tickets: [], runs: [past()], cfgOver: { quickLabels: false }, trackerOver: { lookup: async (c, key) => ({ key, title: 'Fresh title' }) } });
+    let run = await h.side.reReview(h.side.state.runs[0]);
+    assert.deepEqual([run.ticket, run.quick, run.reviewNo, run.priorId, run.ref, run.title], ['AB#42', true, 2, 'AB42-r1', null, 'Fresh title'], "a quick re-review under the saved key, the first review as its prior, the ticket's title read again");
+    fs.writeFileSync(run.reportPath, '---\nverdict: APPROVE\n---\n');
+    run._result = { subtype: 'success', is_error: false };
+    await h.side.finish(run);
+    assert.deepEqual([run.status, h.seen.retags, h.seen.claims], ['done', [], []], 'finishing it writes no tag');
+    // A QUICK#2 keeps its number, and the next pasted quick review still becomes QUICK#3.
+    h = reviewerOver({ open: [prOf(1), prOf(2, { title: 'other' })], tickets: [], runs: [past({ id: 'q2', ticket: 'QUICK#2', title: 'Named', ticketUrl: '', prs: [prOf(1)], quick: true })], cfgOver: { quickLabels: false, quickName: 'number', maxConcurrentReviews: 5 }, trackerOver: { lookup: async () => { throw new Error('not a ticket'); } } });
+    run = await h.side.reReview(h.side.state.runs[0]);
+    assert.deepEqual([run.ticket, run.reviewNo, run.title], ['QUICK#2', 2, 'Named']);
+    assert.equal((await h.side.quickReview('octo-org/r2#2')).ticket, 'QUICK#3');
+    // One PR merged since: left out, with the Log line. All merged: refused.
+    h = reviewerOver({ open: [prOf(1), prOf(2, { state: 'merged' })], tickets: [], runs: [past()], cfgOver: { quickLabels: false } });
+    run = await h.side.reReview(h.side.state.runs[0]);
+    assert.ok(run.prs.length === 1 && h.seen.logs.includes('AB#42: octo-org/r2#2 is merged; left out'));
+    h = reviewerOver({ open: [prOf(1, { state: 'merged' }), prOf(2, { state: 'closed' })], tickets: [], runs: [past()] });
+    await assert.rejects(h.side.reReview(h.side.state.runs[0]), /none of its PRs is open/);
+    h = reviewerOver({ open: [prOf(1), prOf(2)], tickets: [], runs: [past()], cfgOver: { maxReviewRounds: 1 } });
+    await assert.rejects(h.side.reReview(h.side.state.runs[0]), /it has had 1 reviews, the round cap \(Max review rounds\)/);
+    h = reviewerOver({ open: [prOf(1), prOf(2)], tickets: [], runs: [past(), { id: 'now', ticket: 'AB#42', status: 'running', prs: [], pid: null }] });
+    await assert.rejects(h.side.reReview(h.side.state.runs[0]), /AB#42 is being reviewed already/);
+    // The TUI: v asks first; no starts nothing; a wait row or a row of the old fix feature takes no v.
+    const done = past({ contextPrs: [prOf(3)] });
+    const fix = { id: 'f1', kind: 'Fix my PRs', ticket: 'PROJ-1', title: 'Old fix', pr: prOf(5), status: 'stopped', endedAt: 4, replies: [] };
+    const t = tuiOver({ reviewer: { finished: () => [done], state: { runs: [done], fixes: [fix] }, waits: () => [{ key: 'QUICK#9', title: 'w', since: 1 }] } });
+    t.tui.key('2');
+    assert.ok(t.text().includes('AB#42'));
+    t.tui.key('v');
+    assert.ok(t.text(160).includes('Review AB#42 again? A quick review of the same 3 PRs starts under AB#42; no tags change.'));
+    t.tui.key('n');
+    assert.deepEqual(t.calls, [], 'no starts nothing');
+    t.tui.key('v');
+    t.tui.key('y');
+    assert.deepEqual(t.calls.map(c => [c[0], c[1].id]), [['reReview', 'AB42-r1']]);
+    t.tui.key('down');
+    t.tui.key('v');
+    t.tui.key('y');
+    assert.equal(t.calls.length, 1, 'a row of the old fix feature takes no v');
+    t.tui.key('1');
+    t.tui.key('v');
+    t.tui.key('y');
+    assert.equal(t.calls.length, 1, 'nor does a wait row in Running');
   }
 
   // ---- C-06: verifier model and effort ----

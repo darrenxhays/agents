@@ -772,7 +772,7 @@ export function startTui(app, actions, io = {}) {
   const VIEW_KEYS = {
     reviewer: [
       [['s', 'stop', "Stop the selected review (its in-progress tag comes off, so re-tag the ticket to run it again), or stop a quick review waiting on its PRs (◷; its labels stay as they are)"], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser']],
-      [['enter', 'report', "Open the review's report"], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser']],
+      [['enter', 'report', "Open the review's report"], ['v', 'review again', "Review the selected review's PRs again, as a quick review under the same ticket or name (asks first; no tags change)"], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser']],
       [], CONFIG_KEYS, [],
     ],
     builder: [
@@ -1212,6 +1212,13 @@ export function startTui(app, actions, io = {}) {
     else if (k === 'a' && r.ticketUrl) openExternal(r.ticketUrl);
     else if (k === 'enter' && view() === HISTORY && r.pr) openExternal(r.briefDir || r.pr.url);
     else if (k === 'enter' && view() === HISTORY && r.status === 'done') openExternal(r.reportPath);
+    else if (k === 'v' && view() === HISTORY && !r.pr && r.prs?.length) { // not a row of the old fix feature
+      const n = r.prs.length + (r.contextPrs?.length || 0);
+      ui.confirm = { text: `Review ${r.ticket} again? A quick review of the same ${plural(n, 'PR')} starts under ${r.ticket}; no tags change.`, yes: () => {
+        flash(`Re-review of ${r.ticket}: looking up its PRs. The Log says how it goes.`);
+        actions.reReview(r).catch(e => flash(`Couldn't start the review: ${e.message}`));
+      } };
+    }
     else if (k === 's' && view() === RUNNING && r.status === 'running') {
       ui.confirm = { text: reviewer.stopText(r), yes: () => actions.stop('reviewer', r) };
     }
