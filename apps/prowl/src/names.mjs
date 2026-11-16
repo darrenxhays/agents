@@ -95,6 +95,17 @@ export function renamedWrite(cfg, op, outcome = '') {
 
 // ---- Tags ----
 
+/** The tags' defaults: the same names as the GitHub labels, so a ticket on the board and a PR on GitHub read alike. */
+export const TAGS = {
+  reviewer: { trigger: REVIEW_LABEL, inProgress: LABELS.inReview, approved: LABELS.approved, changes: LABELS.changes },
+  builder: { start: 'prowl: build', inProgress: LABELS.building },
+};
+/** The tags' defaults before they took the labels' names. Still read on tickets, never written. */
+export const OLD = {
+  reviewer: { trigger: 'Ready for Review', inProgress: 'In Review', done: 'Reviewed' },
+  builder: { start: 'Ready to Start', inProgress: 'In Development' },
+};
+
 /** The Reviewer's single done tag, from before it said how the review went. Still read (and taken off), never written. */
 export const OLD_DONE = 'Reviewed';
 
@@ -116,4 +127,93 @@ export function splitDone(saved) {
   if (renamed) for (const k of ['approved', 'changes']) if (!(k in tags)) tags[k] = renamed;
   delete tags.done;
   return true;
+}
+
+/**
+ * Moves a saved config (as read, before the defaults are merged in) to the prowl: tag names, once: a tag still at
+ * its old default is deleted, so the new default applies; one the user renamed stays (a renamed done tag for both
+ * outcomes), unless it now reads the same as another tag of its own side, which is reset and recorded in tagsWere.
+ * Returns the Log's lines for what moved ([] for a config that had no saved tags, or was moved before).
+ */
+export function migrateNames(saved) {
+  if (saved.namesVersion >= 2) return [];
+  const notes = [];
+  const fresh = !saved.tags && !saved.builder?.tags;
+  const move = (tags, old, defaults, side) => {
+    if (!tags || typeof tags !== 'object') return;
+    for (const [role, was] of Object.entries(old)) {
+      if (!(role in tags) || norm(tags[role]) !== norm(was)) continue;
+      const to = role === 'done' ? `${defaults.approved}' or '${defaults.changes}` : defaults[role];
+      notes.push(`${side}'s tag '${tags[role]}' is now '${to}'`);
+      delete tags[role];
+    }
+  };
+  move(saved.tags, OLD.reviewer, TAGS.reviewer, 'Reviewer');
+  move(saved.builder?.tags, OLD.builder, TAGS.builder, 'Builder');
+  splitDone(saved); // a renamed done tag: kept for both outcomes
+  // A renamed tag that now reads the same as another tag of its own side can't stay: Prowl couldn't tell them apart.
+  const clash = (tags, defaults, side, key) => {
+    if (!tags || typeof tags !== 'object') return;
+    const now = () => ({ ...defaults, ...tags });
+    for (const role of Object.keys(defaults)) {
+      if (!(role in tags)) continue;
+      const twin = Object.keys(defaults).find(other => other !== role && norm(now()[other]) === norm(tags[role]) && !(['approved', 'changes'].includes(role) && ['approved', 'changes'].includes(other)));
+      if (!twin) continue;
+      ((saved.tagsWere ??= {})[key] ??= {})[role] = tags[role];
+      notes.push(`${side}'s tag '${tags[role]}' read the same as another of its tags, so it is now '${defaults[role]}'`);
+      delete tags[role];
+    }
+  };
+  clash(saved.tags, TAGS.reviewer, 'Reviewer', 'reviewer');
+  clash(saved.builder?.tags, TAGS.builder, 'Builder', 'builder');
+  saved.namesVersion = 2;
+  return fresh ? [] : notes;
+}
+
+/** The role `t` had, when it is a name the move reset (`were`: that side's tagsWere), limited to `roles` if given; else ''. */
+export function wasRole(were, tags, t, ...roles) {
+  const same = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
+  if (!were || !String(t ?? '').trim() || Object.values(tags).some(x => same(x, t))) return '';
+  return Object.keys(were).find(r => (!roles.length || roles.includes(r)) && same(were[r], t)) || '';
+}
+
+/**
+ * How Prowl reads a ticket's tags: { role(t), exactRole(t), has(tags, tag) }. A role is '<side>.<role>':
+ * reviewer.trigger, .inProgress, .approved, .changes, .done (the old Reviewed); builder.start, .inProgress. A tag that
+ * reads (letters and digits) as any of Prowl's names, today's or an old one, on either side, has that name's role and
+ * no other; only then is the typo tolerance tried, for the trigger and the start tag alone. `has(tags, tag)`: true
+ * when `tags` holds one with the role `tag` has, old names included.
+ */
+export function tagReader(cfg) {
+  const r = reviewTags(cfg);
+  const bt = cfg.builder?.tags || {};
+  const today = { 'reviewer.trigger': r.trigger, 'reviewer.inProgress': r.inProgress, 'reviewer.approved': r.approved, 'reviewer.changes': r.changes, 'builder.start': bt.start, 'builder.inProgress': bt.inProgress };
+  const old = { 'reviewer.trigger': OLD.reviewer.trigger, 'reviewer.inProgress': OLD.reviewer.inProgress, 'reviewer.done': OLD.reviewer.done, 'builder.start': OLD.builder.start, 'builder.inProgress': OLD.builder.inProgress };
+  const exactRole = t => {
+    // A name the move reset reads the same as one of today's tags: matched to the letter, and first.
+    const was = wasRole(cfg.tagsWere?.reviewer, r, t);
+    if (was) return `reviewer.${was}`;
+    const built = wasRole(cfg.tagsWere?.builder, bt, t);
+    if (built) return `builder.${built}`;
+    const n = norm(t);
+    return Object.keys(today).find(k => today[k] && norm(today[k]) === n) || Object.keys(old).find(k => norm(old[k]) === n) || '';
+  };
+  const near = (t, ...names) => names.some(name => name && tagMatches(t, name, cfg.tagMatchMaxTypos));
+  const role = t => exactRole(t) || (near(t, r.trigger, OLD.reviewer.trigger) ? 'reviewer.trigger' : near(t, bt.start, OLD.builder.start) ? 'builder.start' : '');
+  const has = (tags, tag) => { const want = exactRole(tag); return (tags || []).some(t => (want ? exactRole(t) === want : norm(t) === norm(tag))); };
+  return { role, exactRole, has };
+}
+
+/**
+ * A tag write left pending by the Prowl from before the update, under today's name for its role: the old in-progress
+ * names become today's, the old Reviewed `outcome` (that run's outcome tag), the old trigger tags.trigger. One of
+ * today's tags, an empty one and any other name are left as they are.
+ */
+export function pendingTag(cfg, tag, outcome = '') {
+  if (!tag) return tag;
+  const r = reviewTags(cfg);
+  const bt = cfg.builder?.tags || {};
+  if ([...Object.values(r), ...Object.values(bt)].some(x => x === tag)) return tag;
+  return { 'reviewer.trigger': r.trigger, 'reviewer.inProgress': r.inProgress, 'reviewer.done': outcome || tag, 'reviewer.approved': r.approved, 'reviewer.changes': r.changes,
+    'builder.start': bt.start, 'builder.inProgress': bt.inProgress }[tagReader(cfg).exactRole(tag)] || tag;
 }

@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CONFIG_DIR, HOME } from './config.mjs';
+import { CONFIG_DIR, CONFIG_PATH as CONFIG_FILE, HOME } from './config.mjs';
 import { alive, awaitingHuman, buildPrompt, failUnposted, finalize, findingsOnly, isOwn, overdue, postMarker, REPORTS_DIR, retryFailed, reviewArgs, reviewEnv, roundCapped, runId, tidyLogs } from './reviewer/reviews.mjs';
 import { processStart } from './proc.mjs';
 import { noHooksEnv } from './git.mjs';
@@ -29,6 +29,11 @@ const assert = new Proxy(nodeAssert, {
   get(target, k) { const v = target[k]; return typeof v === 'function' ? (...a) => { count++; return v.apply(target, a); } : v; },
 });
 assert.ok(HOME !== path.join(os.homedir(), '.prowl'), 'the self-test never runs against your own ~/.prowl');
+// The tests below this point were written when the tags were named Ready for Review, In Review, Ready to Start and
+// In Development. They run on a config that names them so (a user's own names, kept by the move to the prowl: names);
+// src/features-self-test.mjs covers the defaults, the move, and the old names read on tickets.
+fs.mkdirSync(HOME, { recursive: true });
+fs.writeFileSync(CONFIG_FILE, JSON.stringify({ namesVersion: 2, tags: { trigger: 'Ready for Review', inProgress: 'In Review' }, builder: { tags: { start: 'Ready to Start', inProgress: 'In Development' } } }));
 
 const T = 'Ready for Review';
 for (const t of ['Ready for Review', 'ready for review', 'Ready-For-Review', 'READY  FOR REVIEW', 'ReadyForReview', 'Ready for Reveiw', 'Redy for Review', 'Ready fro Reviw']) {
@@ -759,7 +764,7 @@ assert.deepEqual([seen.retags, seen.side.state.releases.length], [['Ready for Re
 for (const tags of [['In Review', 'Ready for Review'], ['in-review', 'Ready-for-Review']]) {
   seen = await reviewOnce([prOf(1)], { tags });
   assert.deepEqual([seen.claims, seen.started], [[], []], `tagged while ${tags[0]}: not claimed`);
-  assert.match(seen.logs.at(-1), /AB#42: tagged 'Ready for Review' while it is 'In Review'; reviewed once that review ends/);
+  assert.match(seen.logs.at(-1), /AB#42: tagged 'Ready for Review' while it is '(In Review|in-review)'; reviewed once that review ends/);
 }
 // The repos are cloned before the claim, so nothing slow sits between the claim and the session's start.
 seen = await reviewOnce([prOf(1)]);

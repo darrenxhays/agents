@@ -3,14 +3,14 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { CONFIG_PATH, HOME, loadConfig, newSettings } from './config.mjs';
+import { CONFIG_PATH, HOME, loadConfig, newSettings, takeNameNotes } from './config.mjs';
 import { killChecks, reviewSteps, runChecks, runCommand, runSteps } from './checks.mjs';
 import { addWorktree, noHooks, noHooksEnv } from './git.mjs';
 import { branchHadPr, fromOwnBranch, otherKeys, prForBranch, titleNamesOnly } from './github.mjs';
 import { ticketsFrom } from './ado.mjs';
 import { createLabels } from './labels.mjs';
 import { norm, tagMatches } from './match.mjs';
-import { askLabel, labelNames, labelRole, labelWrite, outcomeTag, renamedWrite, reviewTags, sameLabel, splitDone } from './names.mjs';
+import { askLabel, labelNames, labelRole, labelWrite, migrateNames, outcomeTag, pendingTag, renamedWrite, reviewTags, sameLabel, splitDone, tagReader, wasRole } from './names.mjs';
 import { label as jiraLabel } from './jira.mjs';
 import { builderTags } from './builder/rules.mjs';
 import { baseSteps, checkPlan, checksLine, prChecks } from './reviewer/checks.mjs';
@@ -25,6 +25,9 @@ const sh = (cwd, cmd, args, env) => spawnSync(cmd, args, { cwd, encoding: 'utf8'
 
 export async function run(assert, { appDir }) { // eslint-disable-line no-unused-vars
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'prowl-feat-'));
+  fs.rmSync(CONFIG_PATH, { force: true }); // these checks run on the defaults: the older tests pin the tags to their old names
+  loadConfig();
+  takeNameNotes();
   const gitIn = (cwd, ...args) => { const r = sh(cwd, 'git', args); if (r.status) throw new Error(`git ${args.join(' ')}: ${r.stderr}`); return r.stdout.trim(); };
 
   // ---- C-35: git hooks are off in every worktree Prowl makes ----
@@ -626,6 +629,68 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
     const base = loadConfig();
     const near = builderTags({ ...base, tags: { ...base.tags, changes: 'Ready to Starts' } });
     assert.ok(!near.isStart('Ready to Starts') && near.isStart('Ready to Start') && !builderTags(base).isStart('Reviewed') && !builderTags(base).ours('prowl: changes requested'), "refused as the start tag, and not the Builder's to remove");
+  }
+
+  // ---- C-15: tags carry the labels' names ----
+  {
+    assert.deepEqual(['prowl: in review', 'prowl: changes requested', 'In Review', 'QA: done'].map(jiraLabel), ['prowl-in-review', 'prowl-changes-requested', 'In-Review', 'QA-done']);
+    const cfg = loadConfig();
+    assert.deepEqual([cfg.tags, cfg.builder.tags, cfg.namesVersion], [{ trigger: 'prowl: review', inProgress: 'prowl: in review', approved: 'prowl: approved', changes: 'prowl: changes requested' }, { start: 'prowl: build', inProgress: 'prowl: building' }, 2]);
+    assert.deepEqual([cfg.tags.trigger, cfg.tags.inProgress, cfg.tags.approved, cfg.tags.changes, cfg.builder.tags.inProgress], [cfg.reviewLabel, cfg.labels.inReview, cfg.labels.approved, cfg.labels.changes, cfg.labels.building], 'the same strings as the labels');
+    // The move of a saved config.
+    let saved = { tags: { trigger: 'Ready for Review', inProgress: 'in-review', done: 'Reviewed' } };
+    let notes = migrateNames(saved);
+    assert.deepEqual([saved, notes.length], [{ tags: {}, namesVersion: 2 }, 3], 'tags still at their old defaults are dropped, so the new ones apply');
+    assert.ok(notes.includes("Reviewer's tag 'Ready for Review' is now 'prowl: review'") && notes.includes("Reviewer's tag 'Reviewed' is now 'prowl: approved' or 'prowl: changes requested'"));
+    assert.deepEqual(migrateNames(saved), [], 'run twice: nothing more');
+    saved = { tags: { trigger: 'Review me' } };
+    assert.deepEqual([migrateNames(saved), saved.tags], [[], { trigger: 'Review me' }], 'a renamed tag stays as named');
+    saved = { tags: { done: 'QA Done' } };
+    migrateNames(saved);
+    assert.deepEqual(saved.tags, { approved: 'QA Done', changes: 'QA Done' }, 'a renamed done tag is kept for both outcomes');
+    saved = { tags: { inProgress: 'Prowl Review' }, builder: { tags: { start: 'Ready to Start' } } };
+    notes = migrateNames(saved);
+    assert.deepEqual([saved.tags, saved.tagsWere, saved.builder.tags], [{}, { reviewer: { inProgress: 'Prowl Review' } }, {}], 'a clash with another tag of its side: reset, and recorded');
+    assert.ok(notes.includes("Reviewer's tag 'Prowl Review' read the same as another of its tags, so it is now 'prowl: in review'") && notes.includes("Builder's tag 'Ready to Start' is now 'prowl: build'"));
+    assert.deepEqual(migrateNames({}), [], 'no saved tags: no notes');
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify({ tags: { trigger: 'Ready for Review', inProgress: 'In Review', done: 'Reviewed' }, builder: { tags: { start: 'Ready to Start', inProgress: 'Dev' } } }));
+    const moved = loadConfig();
+    assert.deepEqual([moved.tags.trigger, moved.builder.tags, moved.namesVersion], ['prowl: review', { start: 'prowl: build', inProgress: 'Dev' }, 2]);
+    const lines = takeNameNotes();
+    assert.ok(lines[0] === 'config.json moved to the new tag names:' && lines.length === 5 && !takeNameNotes().length, 'the Log lines, once');
+    loadConfig();
+    assert.deepEqual(takeNameNotes(), [], 'the file was written back: not moved again');
+    restoreConfig();
+    // The matchers, with the defaults.
+    const { role, has } = tagReader(cfg);
+    const isTrigger = t => role(t) === 'reviewer.trigger';
+    assert.deepEqual(['prowl: review', 'Prowl-Review', 'prowl: reveiw', 'Ready for Review', 'prowl: in review', 'In Review', 'prowl: approved', 'Reviewed', 'prowl: build'].map(isTrigger), [true, true, true, true, false, false, false, false, false]);
+    const { isStart, ours, mine } = builderTags(cfg);
+    assert.deepEqual(['prowl: build', 'Ready to Start', 'prowl: building', 'In Development', 'prowl: review'].map(isStart), [true, true, false, false, false]);
+    assert.ok(ours('In Review') && ours('prowl-in-review') && mine('In Development') && has(['web', 'In-Review'], cfg.tags.inProgress) && has(['Ready for Review'], cfg.tags.trigger) && !has(['Reviewed'], cfg.tags.trigger));
+    assert.deepEqual([wasRole({ inProgress: 'Prowl Review' }, cfg.tags, 'prowl review'), wasRole({ inProgress: 'Prowl Review' }, cfg.tags, 'prowl: review')], ['inProgress', '']);
+    const withWere = tagReader({ ...cfg, tagsWere: { reviewer: { inProgress: 'Prowl Review' } } });
+    assert.deepEqual([withWere.role('Prowl Review'), withWere.role('prowl: review')], ['reviewer.inProgress', 'reviewer.trigger'], 'a reset name is a review running; the trigger spelled as today is a request for one');
+    assert.deepEqual(['In Review', 'Reviewed', 'In Development', 'Ready for Review', 'prowl: in review', '', 'Other'].map(t => pendingTag(cfg, t, 'prowl: approved')),
+      ['prowl: in review', 'prowl: approved', 'prowl: building', 'prowl: review', 'prowl: in review', '', 'Other'], 'a pending tag write goes under today\'s name for its role');
+    // The Reviewer: a ticket tagged the old way is claimed under the new name, the old one taken off; one in review the old way isn't.
+    let h = reviewerOver({ open: [prOf(1)] });
+    h.ticket.tags = ['Ready for Review', 'backend'];
+    let claim = null;
+    h.tracker.claim = async (c, t, drop, add) => { claim = { off: ['Ready for Review', 'Ready-for-Review', 'In Review', 'Reviewed', 'backend'].filter(drop), add }; };
+    await h.side.poll();
+    assert.deepEqual(claim, { off: ['Ready for Review', 'Ready-for-Review', 'In Review', 'Reviewed'], add: 'prowl: in review' });
+    assert.equal(jiraLabel(claim.add), 'prowl-in-review', 'on Jira the label is written prowl-in-review');
+    h = reviewerOver({ open: [prOf(1)] });
+    h.ticket.tags = ['prowl: review', 'In Review'];
+    await h.side.poll();
+    assert.ok(!h.seen.claims.length && h.seen.logs.some(l => l.includes("while it is 'In Review'")), 'carrying the old in-progress tag: under a review, not claimed');
+    // Config: no two tags of one side may read the same; on Jira a tag row shows the form it is written in.
+    const t = tuiOver({ cfgOver: { taskBoard: 'jira' } });
+    t.tui.key('4');
+    let frame = '';
+    for (let i = 0; i < 60 && !frame.includes('(written prowl-in-review)'); i++) { t.tui.key('down'); frame = t.text(120, 40); }
+    assert.ok(frame.includes('(written prowl-in-review)'), 'the Jira form beside the saved name');
   }
 
   // ---- C-06: verifier model and effort ----

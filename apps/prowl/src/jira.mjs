@@ -41,7 +41,6 @@ export function forgetToken() {
   token = '';
 }
 
-/** Jira labels can't contain spaces, so a configured tag like "In Review" is written as In-Review. */
 /** Jira labels can't hold spaces, and a colon is unsafe in JQL, so "prowl: in review" is written as prowl-in-review. */
 export const label = tag => tag.trim().replace(/:/g, '').replace(/\s+/g, '-');
 

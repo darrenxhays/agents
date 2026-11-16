@@ -1,5 +1,5 @@
-// The Builder: picks up tickets tagged Ready to Start, builds them in a fenced Claude Code session, then Prowl's own
-// code checks, pushes and opens one PR per repo, tags the ticket Ready for Review and follows the PRs through review,
+// The Builder: picks up tickets tagged the start tag, builds them in a fenced Claude Code session, then Prowl's own
+// code checks, pushes and opens one PR per repo, tags the ticket the review trigger tag and follows the PRs through review,
 // fixing feedback in rounds. src/shell.mjs drives poll() and tick(); the Reviewer never reads its state (work.json, work/).
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
@@ -11,7 +11,7 @@ import { addWorktree, attrSource, fetchBranch, git, hooksOff, ownNumstat, push, 
 import * as github from '../github.mjs';
 import { branchRefusal, guardFailures, prRefusal } from '../guards.mjs';
 import { createLabels } from '../labels.mjs';
-import { askLabel, labelNames, labelsOf, labelWrite } from '../names.mjs';
+import { askLabel, labelNames, labelsOf, labelWrite, pendingTag } from '../names.mjs';
 import { mentions } from '../match.mjs';
 import { offerFor, acceptOffer } from '../offers.mjs';
 import { autoName, cleanName, parsePaste, ticketKey } from '../paste.mjs';
@@ -105,7 +105,7 @@ export function createBuilder(app, deps) {
 
   const touch = w => { w.updatedAt = Date.now(); save(); };
 
-  /** Puts a Needs-you item up for `w`. The ticket keeps In Development. */
+  /** Puts a Needs-you item up for `w`. The ticket keeps the in-progress tag. */
   function raise(w, kind, question, fields = {}) {
     const item = rules.needItem(kind, { key: w.key, question, ...fields });
     item.recordId = w.uid;
@@ -221,7 +221,7 @@ export function createBuilder(app, deps) {
     if (w) await step(w, survey);
   }
 
-  /** Claims `ticket` (start tag → In Development); the loser backs off. Resolves with its record, or null. */
+  /** Claims `ticket` (start tag → the in-progress tag); the loser backs off. Resolves with its record, or null. */
   async function claim(ticket, source, w = null) {
     const tracker = trackerOf(w);
     const { owned } = tags();
@@ -258,16 +258,16 @@ export function createBuilder(app, deps) {
   /**
    * A claim that failed with `e`, but not because someone else won (`e.lost`): its write may have reached the tracker
    * (the check after it failed, say), so the ticket may be ours, or a rival's. A person judges it in Needs you, so it
-   * is neither stranded In Development nor built twice; enter goes on with `retry`.
+   * is neither stranded the in-progress tag nor built twice; enter goes on with `retry`.
    */
   function unsure(w, ticket, e, retry) {
     w.unsureOf = retry; // what enter goes on with, through reclaim()
     const item = raise(w, 'conflict', `Prowl couldn't confirm its claim on ${ticket.key} (${e.message}). If no one else is working on it, enter goes on (claiming it again if it isn't '${b().tags.inProgress}'); s ends it and leaves the tags as they are.`, { retry: 'reclaim' });
-    item.keepTags = true; // the In Development there may be someone else's
+    item.keepTags = true; // the the in-progress tag there may be someone else's
     save();
   }
 
-  /** enter on an unconfirmed claim: the ticket In Development is taken as ours; one that isn't is claimed again. */
+  /** enter on an unconfirmed claim: the ticket the in-progress tag is taken as ours; one that isn't is claimed again. */
   async function reclaim(w) {
     const ticket = await trackerOf(w).readItem(cfg(), w.ref);
     const held = tags().has(ticket.tags, b().tags.inProgress);
@@ -292,8 +292,8 @@ export function createBuilder(app, deps) {
   }
 
   /**
-   * In Development → the done tag (Ready for Review), the Reviewer's trigger; never takes the reviewing tag off.
-   * With builder.requestReview off, In Development just comes off.
+   * the in-progress tag → the done tag (the review trigger tag), the Reviewer's trigger; never takes the reviewing tag off.
+   * With builder.requestReview off, the in-progress tag just comes off.
    * A retry after a try that may have landed (its answer lost) leaves the ticket as it is if that try shows: In
    * Development gone (when it was there), or the done or reviewing tag on (when it wasn't), as a review may have
    * claimed it since. Resolves with the time of the first try, from which feedback counts.
@@ -307,7 +307,7 @@ export function createBuilder(app, deps) {
     const tracker = trackerOf(w);
     const item = await tracker.readItem(cfg(), w.ref);
     const now = item.tags;
-    // Without In Development to go by, the history says whether the done tag went on since (a review may have come and gone).
+    // Without the in-progress tag to go by, the history says whether the done tag went on since (a review may have come and gone).
     const ask = b().requestReview;
     const landed = w.handOff && (w.handOff.held ? !has(now, b().tags.inProgress)
       : !ask || has(now, cfg().tags.trigger) || has(now, cfg().tags.inProgress) || (await tracker.tagAddedSince(cfg(), w.ref, w.handOff.rev, t => has([t], cfg().tags.trigger))));
@@ -1041,7 +1041,7 @@ export function createBuilder(app, deps) {
     for (const w of records().filter(r => r.status === 'following' && !r.step && !r._busy)) {
       if (!b().followUp) continue;
       try {
-        // A review asked for or under way finishes first, and so does work someone else claimed (In Development).
+        // A review asked for or under way finishes first, and so does work someone else claimed (the in-progress tag).
         // (Tags compare without case or punctuation, so Jira's Ready-for-Review matches.) Without a ticket: its PRs' labels.
         const held = byLabels(w) ? [] : (await trackerOf(w).readItem(cfg(), w.ref)).tags;
         const waiting = byLabels(w) ? Boolean(await labelHold(w)) : [cfg().tags.trigger, cfg().tags.inProgress, b().tags.inProgress].some(t => tags().has(held, t));
@@ -1384,12 +1384,12 @@ export function createBuilder(app, deps) {
 
   // ---- Stopping, and Needs you ----
 
-  // Whether `w` holds its ticket's In Development now: from its claim until its PRs open, and for a round it claimed.
+  // Whether `w` holds its ticket's the in-progress tag now: from its claim until its PRs open, and for a round it claimed.
   // A ticket still waiting to be claimed, or only followed, carries nobody's tags of this run's.
   const holdsClaim = w => Boolean((w.claimedAt && !w.prsOpenedAt) || w.roundClaimed || w.round);
 
   /**
-   * Stops `w` where it is: removes the In Development it holds (unless `untag` is false) and its worktrees, and
+   * Stops `w` where it is: removes the the in-progress tag it holds (unless `untag` is false) and its worktrees, and
    * records the cost.
    */
   async function stopNow(w, why = 'stopped by you', untag = true) {
@@ -1525,7 +1525,7 @@ export function createBuilder(app, deps) {
   /**
    * A quick build (n or a paste in the Builder, or prowl --build): it starts at once, whether the Builder is on or not,
    * and outside Max parallel builds. What's pasted decides it. A ticket (and any text, as your instructions): picked up
-   * at whatever stage it is, without its start tag, claimed In Development, its tags driving the cycle. PRs: those PRs;
+   * at whatever stage it is, without its start tag, claimed the in-progress tag, its tags driving the cycle. PRs: those PRs;
    * one ticket among what they mention makes it that ticket's build, otherwise it runs on its PRs' labels. Text only: a
    * build without a ticket, named per Quick names, on labels. `opts`: { as (a ticket or a name), name (typed, for ask),
    * oneShot (prowl --once: an offer is only logged), offered (the offer was turned down) }. Resolves with the record,
@@ -1628,7 +1628,7 @@ export function createBuilder(app, deps) {
   // ---- Driven by the shell ----
 
   const STEPS = { claim: claimQueued, adopt: survey, finish, read, turn, settle, repos, approve, publish, round, 'push-round': pushRound, ci, 'end-round': endRound,
-    retag: w => retagSoon(w, w.retagTo), reclaim };
+    retag: w => retagSoon(w, pendingTag(cfg(), w.retagTo)), reclaim }; // a write left pending by an older Prowl goes under today's name
 
   /** Once a second, on or off: tails sessions, settles ended turns, runs due steps. Claims and turns wait while off or paused. */
   side.tick = function tick() {

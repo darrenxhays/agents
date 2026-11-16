@@ -6,23 +6,20 @@ import { globRe } from '../checks.mjs';
 import { actionable, questionShape } from '../feedback.mjs';
 import { checksState } from '../github.mjs';
 import { insideRoots } from '../fence.mjs';
-import { norm, tagMatches } from '../match.mjs';
-import { OLD_DONE, reviewTags } from '../names.mjs';
+import { tagReader } from '../names.mjs';
 
 /**
  * The Builder's tag matchers: the start tag loosely (with the typo tolerance), the ones it sets itself exactly. Its
- * done tag is the Reviewer's trigger tag, and a ticket the Reviewer has claimed carries the Reviewer's in-progress tag.
+ * done tag is the Reviewer's trigger tag, and a ticket the Reviewer has claimed carries the Reviewer's in-progress
+ * tag. The old names (Ready to Start, In Development, Ready for Review, In Review) count the same as the new. The
+ * Reviewer's outcome tags are nobody's here: never the start tag, never removed, and they hold no round.
  */
 export function builderTags(cfg) {
-  const { start, inProgress } = cfg.builder.tags;
-  const { trigger: done, inProgress: reviewing } = cfg.tags;
-  const ours = t => [inProgress, done, reviewing].some(x => norm(x) === norm(t));
-  // The Reviewer's outcome tags are never the start tag, however close a user names them. They aren't `ours` either:
-  // the Builder neither sets nor removes them, and they hold no round.
-  const outcome = t => [reviewTags(cfg).approved, reviewTags(cfg).changes, OLD_DONE].some(x => x && norm(x) === norm(t));
-  const isStart = t => !ours(t) && !outcome(t) && tagMatches(t, start, cfg.tagMatchMaxTypos);
-  // `owned`: every tag a claim swaps for In Development. `mine`: the Builder's own two, all that a stop or a dropped round takes off.
-  return { isStart, ours, owned: t => isStart(t) || ours(t), mine: t => isStart(t) || norm(t) === norm(inProgress), has: (tags, tag) => tags.some(t => norm(t) === norm(tag)) };
+  const { role, has } = tagReader(cfg);
+  const ours = t => ['builder.inProgress', 'reviewer.trigger', 'reviewer.inProgress'].includes(role(t));
+  const isStart = t => role(t) === 'builder.start';
+  // `owned`: every tag a claim swaps for the in-progress tag. `mine`: the Builder's own two, all that a stop or a dropped round takes off.
+  return { isStart, ours, owned: t => isStart(t) || ours(t), mine: t => isStart(t) || role(t) === 'builder.inProgress', has };
 }
 
 /** A branch-name slug of a ticket title: lowercase words joined by dashes, at most 40 characters. */

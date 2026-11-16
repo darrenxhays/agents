@@ -4,8 +4,7 @@ import path from 'node:path';
 import { CHECKS_PATH, readChecks, saveConfig, writeJson } from '../config.mjs';
 import * as github from '../github.mjs';
 import { createLabels, refusal } from '../labels.mjs';
-import { askLabel, labelNames, labelsOf, labelWrite, OLD_DONE, outcomeTag, reviewTags } from '../names.mjs';
-import { norm, tagMatches } from '../match.mjs';
+import { askLabel, labelNames, labelsOf, labelWrite, outcomeTag, pendingTag, reviewTags, tagReader } from '../names.mjs';
 import { acceptOffer, offerFor } from '../offers.mjs';
 import { autoName, cleanName, notARef, parsePaste, ticketKey } from '../paste.mjs';
 import { fill, outputTemplate } from '../templates.mjs';
@@ -63,10 +62,13 @@ export function createReviewer(app, deps) {
     return parts.length ? `Quick review: ${parts.join('; ')}; start it again once ${parts.length > 1 ? 'they end' : 'that one ends'}` : '';
   }
 
-  // Tags this side sets itself are matched exactly; only the trigger tag is matched loosely.
+  // Tags this side sets itself are matched exactly; only the trigger tag is matched loosely. The old names (Ready for
+  // Review, In Review, Reviewed) are still read, and taken off with the new, but never written.
   const tagsNow = () => reviewTags(cfg());
-  const ours = t => [tagsNow().inProgress, tagsNow().approved, tagsNow().changes, OLD_DONE].some(x => x && norm(x) === norm(t));
-  const isTrigger = t => !ours(t) && tagMatches(t, cfg().tags.trigger, cfg().tagMatchMaxTypos);
+  const roleOf = t => tagReader(cfg()).role(t);
+  const ours = t => ['reviewer.inProgress', 'reviewer.approved', 'reviewer.changes', 'reviewer.done'].includes(roleOf(t));
+  const isTrigger = t => roleOf(t) === 'reviewer.trigger';
+  const inReview = t => roleOf(t) === 'reviewer.inProgress';
 
   // ---- Build and test before reviews: a review's checks phase, run here before its session starts ----
 
@@ -212,8 +214,9 @@ export function createReviewer(app, deps) {
     const key = `ticket:${ticket.key}`;
     if (side.running().some(r => r.ticket === ticket.key)) return; // re-tagged mid-review: re-reviewed once this one ends
     // ...and so is a ticket someone else's Prowl is reviewing: claiming it now would review its PRs twice at once.
-    if ((ticket.tags || []).some(t => norm(t) === norm(c.tags.inProgress))) {
-      log('info', `${ticket.key}: tagged '${c.tags.trigger}' while it is '${c.tags.inProgress}'; reviewed once that review ends (if none is running, take '${c.tags.inProgress}' off)`, key);
+    const busyTag = (ticket.tags || []).find(inReview);
+    if (busyTag) {
+      log('info', `${ticket.key}: tagged '${c.tags.trigger}' while it is '${busyTag}'; reviewed once that review ends (if none is running, take '${busyTag}' off)`, key);
       return;
     }
     if (busy() >= c.maxConcurrentReviews) {
@@ -804,8 +807,8 @@ export function createReviewer(app, deps) {
   /** Writes run.pendingTag to the ticket (replacing the tags this side owns); retried every minute until it lands. */
   async function applyTag(run) {
     run._tagging = true;
-    // A write left pending under the old single done tag (a review that finished before the update): its outcome tag.
-    if (run.pendingTag && norm(run.pendingTag) === norm(OLD_DONE) && ![tagsNow().approved, tagsNow().changes].some(t => norm(t) === norm(OLD_DONE))) run.pendingTag = outcomeTag(run, tagsNow());
+    // A write left pending by the Prowl from before the update goes under today's name for its role.
+    run.pendingTag = pendingTag(cfg(), run.pendingTag, outcomeTag(run, tagsNow()));
     try {
       await trackers[run.tracker].retag(cfg(), run.ref, ours, run.pendingTag);
       run.pendingTag = null;

@@ -2,6 +2,7 @@ import { pathToFileURL } from 'node:url';
 import { CONFIG_PATH } from './config.mjs';
 import { CONFIG_FIELDS, JIRA } from './fields.mjs';
 import { askLabel, labelNames } from './names.mjs';
+import { label as jiraLabel } from './jira.mjs';
 import { cleanName, notARef, parsePaste } from './paste.mjs';
 import { createMascot, wrap } from './mascot.mjs';
 import { copyText, openExternal } from './proc.mjs';
@@ -573,6 +574,8 @@ export function startTui(app, actions, io = {}) {
     if (f.type === 'list') { const v = getPath(c, f.key); return Array.isArray(v) ? plural(v.length, 'pattern') : plural(Object.keys(v || {}).length, 'rule'); }
     if (f.empty && !getPath(c, f.key)) return f.emptyShows || '(none)';
     if (f.names) return f.names[getPath(c, f.key)] || String(getPath(c, f.key));
+    // On Jira a tag is a label, written without colons and with dashes for spaces: shown beside the saved name.
+    if (f.tag && JIRA(c) && jiraLabel(String(getPath(c, f.key))) !== String(getPath(c, f.key))) return `${getPath(c, f.key)}  (written ${jiraLabel(String(getPath(c, f.key)))})`;
     return String(getPath(c, f.key));
   }
 

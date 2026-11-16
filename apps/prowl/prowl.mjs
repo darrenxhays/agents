@@ -39,7 +39,7 @@ if (args.has('--reviewer-only') && args.has('--builder-only')) {
   process.exit(1);
 }
 
-const { HOME, configChanged, loadConfig, saveConfig, seedChecks } = await import('./src/config.mjs');
+const { HOME, configChanged, loadConfig, saveConfig, seedChecks, takeNameNotes } = await import('./src/config.mjs');
 const TRACKERS = { ado: await import('./src/ado.mjs'), jira: await import('./src/jira.mjs') };
 const secrets = await import('./src/secrets.mjs');
 const { lockHolder } = await import('./src/proc.mjs');
@@ -127,6 +127,7 @@ function log(side, level, msg, key) {
   return true;
 }
 const forget = (side, key) => lastByKey.delete(`${side}:${key}`);
+for (const line of takeNameNotes()) log('prowl', 'info', line); // once, at the launch that moved config.json to the prowl: tag names
 app.forget = forget;
 
 /** Gives Hoot something to say. `mood`: 'cheer' or 'error' changes how he looks while he says it. */

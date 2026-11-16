@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { LABELS, REVIEW_LABEL, splitDone } from './names.mjs';
+import { LABELS, migrateNames, REVIEW_LABEL, TAGS } from './names.mjs';
 
 export const HOME = process.env.PROWL_HOME || path.join(os.homedir(), '.prowl');
 export const CONFIG_PATH = path.join(HOME, 'config.json');
@@ -20,7 +20,7 @@ const DEFAULTS = {
   ado: { org: '', boards: [] },
   jira: { site: '', email: '', boards: [], fields: { acceptanceCriteria: '', reproSteps: '' } },
   reviewer: { enabled: true },
-  tags: { trigger: 'Ready for Review', inProgress: 'In Review', approved: LABELS.approved, changes: LABELS.changes },
+  tags: { ...TAGS.reviewer },
   tagMatchMaxTypos: 2,
   githubOwner: '',
   pollSeconds: 300,
@@ -47,7 +47,7 @@ const DEFAULTS = {
   labels: { ...LABELS },
   builder: {
     enabled: false,
-    tags: { start: 'Ready to Start', inProgress: 'In Development' },
+    tags: { ...TAGS.builder },
     assignedToMe: true,
     maxConcurrent: 1,
     approvePlans: 'auto',
@@ -79,6 +79,8 @@ const DEFAULTS = {
   dryRun: false,
   autoUpdate: true,
   hoot: true,
+  namesVersion: 2,
+  tagsWere: {},
 };
 
 // The comment above each setting in config.json, by dotted key: what it does, its options, and an example for lists.
@@ -94,7 +96,7 @@ const NOTES = {
   'jira.fields': 'Custom field ids the Builder reads into ticket.md, e.g. "customfield_10042". "" leaves the section out.',
   reviewer: 'The Reviewer: reviews the PRs of tickets tagged for review.',
   'reviewer.enabled': 'The switch. Off: nothing new is claimed or started, and running reviews finish.',
-  tags: 'The Reviewer\'s tags (labels on Jira).',
+  tags: 'The Reviewer\'s tags (labels on Jira, written without colons and with dashes for spaces: prowl-in-review). The same names as its GitHub labels.',
   'tags.trigger': 'Tickets carrying this get reviewed. The Builder sets it once its PRs open (see builder.requestReview).',
   'tags.inProgress': 'Set while a review runs.',
   'tags.approved': 'Set when a review finishes with every PR approved.',
@@ -175,6 +177,8 @@ const NOTES = {
   dryRun: 'true: log what would be reviewed or built, without changing tags or starting sessions.',
   autoUpdate: 'true: install a newer Prowl release before launching.',
   hoot: 'true: Hoot the owl sits at the top of the screen and says what Prowl is doing. false: no owl, and the Boards and Needs you cards take the full width of his strip.',
+  namesVersion: 'Set by Prowl once config.json has the prowl: tag names. Leave it.',
+  tagsWere: 'Tag names the move to the prowl: names reset because they read the same as another tag. Still read on tickets, never written.',
 };
 
 const isObj = v => v && typeof v === 'object' && !Array.isArray(v);
@@ -195,6 +199,10 @@ let known = '';
 const stamp = () => { try { const s = fs.statSync(CONFIG_PATH); return `${s.mtimeMs} ${s.size}`; } catch { return ''; } };
 /** True when config.json has changed since this process last read or wrote it: edited by hand, or by prowl --setup. */
 export const configChanged = () => stamp() !== known;
+
+const nameNotes = []; // what the move to the prowl: tag names changed, for the Log of the launch that made it
+/** The Log's lines for a config this launch moved to the prowl: tag names, once ([] otherwise). */
+export const takeNameNotes = () => nameNotes.splice(0);
 
 /** The settings: config.json over the defaults. Throws, naming the setting, when the file can't be read or a value can't be used. */
 export function loadConfig() {
@@ -218,8 +226,11 @@ export function loadConfig() {
     delete saved.builder.tags.done;
     delete saved.builder.tags.reviewing;
   }
-  // The Reviewer's one done tag became two, which say how the review went.
-  const done = splitDone(saved);
+  // The tags took the labels' prowl: names, and the Reviewer's one done tag became two: a saved config moves once.
+  const exists = fs.existsSync(CONFIG_PATH);
+  const moved = exists && !(saved.namesVersion >= 2);
+  const notes = exists ? migrateNames(saved) : [];
+  if (notes.length) nameNotes.push('config.json moved to the new tag names:', ...notes);
   // 2.14.0 removed builder.command: Prowl always builds with its own skill, shaped by build.md.
   const command = isObj(saved.builder) && 'command' in saved.builder;
   if (command) delete saved.builder.command;
@@ -228,7 +239,7 @@ export function loadConfig() {
   if (!wrong.length && !['ado', 'jira'].includes(cfg.taskBoard)) wrong.push('taskBoard must be "ado" or "jira"');
   if (!wrong.length && cfg.pollSeconds < 30) wrong.push('pollSeconds must be 30 or more');
   if (wrong.length) throw new Error(`Can't use ${CONFIG_PATH}: ${wrong.join('; ')}`);
-  if (old || ownTags || command || done || !fs.existsSync(CONFIG_PATH)) saveConfig(cfg);
+  if (old || ownTags || command || moved || !fs.existsSync(CONFIG_PATH)) saveConfig(cfg);
   return cfg;
 }
 

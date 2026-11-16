@@ -253,7 +253,7 @@ function commit(dir, files, message) {
  * A Builder over the fakes, in its own folders. `board`: 'ado' or 'jira'. Resolves with { b, app, server, gh, session,
  * logs, bares, cfg, root, poll() (one poll, then every step that follows) }.
  */
-function harness(board, script, { cfgOver = {}, trackerWrap = t => t } = {}) {
+function harness(board, script, { cfgOver = {}, trackerWrap = t => t, tagsOver = null } = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'prowl-builder-')));
   const projects = path.join(root, 'projects');
   fs.mkdirSync(projects);
@@ -267,6 +267,7 @@ function harness(board, script, { cfgOver = {}, trackerWrap = t => t } = {}) {
     jira: { site: 'https://example.atlassian.net', email: ME_ADO, boards: [{ board: 'Shop board' }], fields: { acceptanceCriteria: 'customfield_10042', reproSteps: '' } },
   });
   Object.assign(cfg.builder, { enabled: true, waitForChecksMinutes: 0 }, cfgOver);
+  if (tagsOver) Object.assign(cfg.tags, tagsOver);
   const logs = [];
   const app = { cfg, me: 'octocat', on: true, sideOn(n) { return n === 'builder' ? this.on : false; }, tracker: () => (board === 'ado' ? ado : jira), boards: () => cfg[board].boards, dryRun: () => false };
   const gh = githubFake(bares);
@@ -333,6 +334,7 @@ export async function run(assert) {
     await staleHits(assert);
     await forkBranches(assert);
     await pickupKeeps(assert);
+    await newNames(assert);
   } finally {
     globalThis.fetch = realFetch;
     for (const k of Object.keys(process.env)) if (!(k in envBefore)) delete process.env[k];
@@ -449,6 +451,33 @@ async function pickupKeeps(assert) {
   await h.b.drain();
   assert.ok(h.logs.some(l => l.includes("AB#123: GitHub still hasn't settled the checks or conflicts of octo-org/web#9 after 20 min; going on as if they were fixed")) && h.session.turns[1]?.prompt.startsWith('/prowl:prowl-build finish '));
   h.done();
+}
+
+// The tags' prowl: names: a ticket tagged the old way is still built, and written under the new names.
+async function newNames(assert) {
+  const names = { cfgOver: { tags: { start: 'prowl: build', inProgress: 'prowl: building' } }, tagsOver: { trigger: 'prowl: review', inProgress: 'prowl: in review' } };
+  for (const board of ['ado', 'jira']) {
+    const tagsNow = h => (board === 'ado' ? h.server.tags(123) : h.server.labels('PROJ-123'));
+    const form = t => (board === 'ado' ? t : jira.label(t));
+    let seenBuilding = false;
+    const h = harness(board, (w, prompt) => { seenBuilding ||= tagsNow(h).includes(form('prowl: building')) && !tagsNow(h).some(t => /ready.to.start/i.test(t)); return twoRepoBuild()(w, prompt); }, names);
+    await h.poll();
+    const w = h.b.history()[0];
+    assert.ok(seenBuilding, `${board}: a ticket tagged Ready to Start is claimed as ${form('prowl: building')}, the old tag taken off`);
+    assert.deepEqual([w.status, tagsNow(h).includes(form('prowl: review')), tagsNow(h).some(t => /building|development/i.test(t))], ['following', true, false], `${board}: handing on sets ${form('prowl: review')}`);
+    // A ticket carrying In Review holds a round exactly as prowl: in review does; the outcome tags hold nothing.
+    h.gh.prs[0].reviews.push({ user: 'lead', state: 'CHANGES_REQUESTED', at: new Date(Date.now() + 60_000).toISOString(), body: 'Fix it.' });
+    const set = tags => (board === 'ado' ? h.server.setTags(123, ['Web', ...tags]) : h.server.edit('PROJ-123', [...tagsNow(h).filter(t => t !== 'web').map(t => ({ remove: t })), ...tags.map(t => ({ add: form(t) }))]));
+    for (const held of ['In Review', 'prowl: in review', 'Ready for Review']) {
+      set([held]);
+      await h.poll();
+      assert.equal(w.rounds, 0, `${board}: carrying '${held}': no round`);
+    }
+    set(['prowl: changes requested']);
+    await h.poll();
+    assert.equal(w.rounds, 1, `${board}: after 'prowl: changes requested', the round`);
+    h.done();
+  }
 }
 
 async function staleHits(assert) {

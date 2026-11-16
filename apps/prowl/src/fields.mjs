@@ -6,7 +6,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { AGENT_MODELS, CHECKS_PATH, CONFIG_DIR, CONFIG_PATH, EFFORTS, MODELS } from './config.mjs';
-import { fiveLabels, sameLabel } from './names.mjs';
+import { norm } from './match.mjs';
+import { fiveLabels, reviewTags, sameLabel } from './names.mjs';
 
 const isDir = p => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
 const https = v => /^https:\/\/\S+$/.test(v) || 'must be an https:// URL';
@@ -15,6 +16,18 @@ export const JIRA = c => c.taskBoard === 'jira';
 const opens = 'enter opens it. Updates never overwrite your edits.';
 const inFile = 'Edit them in the settings file: enter opens it.';
 const capped = "It fails with the cap named and isn't retried, so a runaway review isn't paid for twice.";
+
+const TAG_ROWS = { 'tags.trigger': 'Review trigger', 'tags.inProgress': 'Review in-progress', 'tags.approved': 'Review approved', 'tags.changes': 'Review changes', 'builder.tags.start': 'Build start', 'builder.tags.inProgress': 'Build in-progress' };
+/** A tag setting's check: no two tags of one side may read the same (letters and digits), except the two outcome tags. */
+const oneTag = key => (v, cfg) => {
+  const side = key.startsWith('builder.') ? { 'builder.tags.start': cfg.builder.tags.start, 'builder.tags.inProgress': cfg.builder.tags.inProgress }
+    : Object.fromEntries(Object.entries(reviewTags(cfg)).map(([role, name]) => [`tags.${role}`, name]));
+  const outcomes = ['tags.approved', 'tags.changes'];
+  const clash = Object.keys(side).find(k => k !== key && norm(side[k]) === norm(v) && !(outcomes.includes(k) && outcomes.includes(key)));
+  return clash ? `reads the same as the ${TAG_ROWS[clash]} ${JIRA(cfg) ? 'label' : 'tag'}` : true;
+};
+const sameAsLabel = 'The same name as the GitHub label, so a ticket and a PR read alike.';
+const jiraForm = 'Written without colons and with dashes for spaces (prowl-in-review).';
 
 const LABEL_ROWS = { ask: 'Review label', inReview: 'In review label', approved: 'Approved label', changes: 'Changes requested label', building: 'Building label' };
 /** A label setting's check: no two of Prowl's five labels may read the same (ignoring case and outer spaces). */
@@ -55,20 +68,20 @@ export const CONFIG_FIELDS = [
 
   // In the order a ticket meets them: built, then reviewed. The Builder hands off by setting the review trigger tag.
   { heading: 'Build tags', jira: { heading: 'Build labels' } },
-  { key: 'builder.tags.start', label: 'Build start tag', type: 'text', help: 'Tickets carrying this tag, or a near-miss spelling of it, get built by the Builder.',
-    jira: { label: 'Build start label', help: 'Issues carrying this label, or a near-miss spelling of it, get built by the Builder. Spaces become dashes (Ready-to-Start).' } },
-  { key: 'builder.tags.inProgress', label: 'Build in-progress tag', type: 'text', help: 'Set while the Builder builds a ticket or works on its feedback, and while it needs you.',
-    jira: { label: 'Build in-progress label', help: 'Set while the Builder builds a ticket or works on its feedback, and while it needs you. Spaces become dashes.' } },
+  { key: 'builder.tags.start', label: 'Build start tag', type: 'text', tag: true, valid: oneTag('builder.tags.start'), help: 'Tickets carrying this tag, or a near-miss spelling of it, get built by the Builder.',
+    jira: { label: 'Build start label', help: `Issues carrying this label, or a near-miss spelling of it, get built by the Builder. ${jiraForm}` } },
+  { key: 'builder.tags.inProgress', label: 'Build in-progress tag', type: 'text', tag: true, valid: oneTag('builder.tags.inProgress'), help: `Set while the Builder builds a ticket or works on its feedback, and while it needs you. ${sameAsLabel}`,
+    jira: { label: 'Build in-progress label', help: `Set while the Builder builds a ticket or works on its feedback, and while it needs you. ${sameAsLabel} ${jiraForm}` } },
 
   { heading: 'Review tags', jira: { heading: 'Review labels' } },
-  { key: 'tags.trigger', label: 'Review trigger tag', type: 'text', help: 'Tickets carrying this tag, or a near-miss spelling of it, get reviewed. The Builder sets it once its PRs are open, and after each feedback round.',
-    jira: { label: 'Review trigger label', help: 'Issues carrying this label, or a near-miss spelling of it, get reviewed. The Builder sets it once its PRs are open, and after each feedback round. Spaces become dashes.' } },
-  { key: 'tags.inProgress', label: 'Review in-progress tag', type: 'text', help: "Set when a review starts. While a ticket carries it or the trigger tag, the Builder starts no feedback round. Colour it yellow in board settings > Cards > Tag colors.",
-    jira: { label: 'Review in-progress label', help: 'Set when a review starts. While an issue carries it or the trigger label, the Builder starts no feedback round. Spaces become dashes (In-Review).' } },
-  { key: 'tags.approved', label: 'Review approved tag', type: 'text', help: 'Set when a review finishes with every PR approved. Re-add the trigger tag to ask for a re-review.',
-    jira: { label: 'Review approved label', help: 'Set when a review finishes with every PR approved. Written as prowl-approved. Re-add the trigger label to ask for a re-review.' } },
-  { key: 'tags.changes', label: 'Review changes tag', type: 'text', help: 'Set when a review finishes with at least one PR not approved. The Builder then works through the feedback; re-add the trigger tag to ask for a re-review.',
-    jira: { label: 'Review changes label', help: 'Set when a review finishes with at least one PR not approved. The Builder then works through the feedback; re-add the trigger label to ask for a re-review. Written as prowl-changes-requested.' } },
+  { key: 'tags.trigger', label: 'Review trigger tag', type: 'text', tag: true, valid: oneTag('tags.trigger'), help: `Tickets carrying this tag, or a near-miss spelling of it, get reviewed. The Builder sets it once its PRs are open, and after each feedback round. ${sameAsLabel}`,
+    jira: { label: 'Review trigger label', help: `Issues carrying this label, or a near-miss spelling of it, get reviewed. The Builder sets it once its PRs are open, and after each feedback round. ${sameAsLabel} ${jiraForm}` } },
+  { key: 'tags.inProgress', label: 'Review in-progress tag', type: 'text', tag: true, valid: oneTag('tags.inProgress'), help: `Set when a review starts. While a ticket carries it or the trigger tag, the Builder starts no feedback round. ${sameAsLabel} Colour it yellow in board settings > Cards > Tag colors.`,
+    jira: { label: 'Review in-progress label', help: `Set when a review starts. While an issue carries it or the trigger label, the Builder starts no feedback round. ${sameAsLabel} ${jiraForm}` } },
+  { key: 'tags.approved', label: 'Review approved tag', type: 'text', tag: true, valid: oneTag('tags.approved'), help: `Set when a review finishes with every PR approved. Re-add the trigger tag to ask for a re-review. ${sameAsLabel}`,
+    jira: { label: 'Review approved label', help: `Set when a review finishes with every PR approved. Written as prowl-approved. Re-add the trigger label to ask for a re-review. ${sameAsLabel}` } },
+  { key: 'tags.changes', label: 'Review changes tag', type: 'text', tag: true, valid: oneTag('tags.changes'), help: `Set when a review finishes with at least one PR not approved. The Builder then works through the feedback; re-add the trigger tag to ask for a re-review. ${sameAsLabel}`,
+    jira: { label: 'Review changes label', help: `Set when a review finishes with at least one PR not approved. The Builder then works through the feedback; re-add the trigger label to ask for a re-review. Written as prowl-changes-requested. ${sameAsLabel}` } },
   { key: 'tagMatchMaxTypos', label: 'Tag typo tolerance', type: 'int', min: 0, max: 3, help: 'Typos (wrong, missing, extra or swapped letters) still treated as the review trigger or build start tag. Case, spaces and punctuation are always ignored. 0 = exact.',
     jira: { label: 'Label typo tolerance', help: 'Typos (wrong, missing, extra or swapped letters) still treated as the review trigger or build start label. Case, spaces and punctuation are always ignored. 0 = exact.' } },
 
@@ -149,7 +162,7 @@ export const CONFIG_FIELDS = [
   { key: 'builder.protectedPaths', label: 'Protected paths', type: 'list', help: `Globs, e.g. .github/workflows/**. A push that changes one goes to Needs you. ${inFile}` },
   { key: 'builder.maxChangedLines', label: 'Max lines per push', type: 'int', min: 1, max: 1000000, help: 'A push that changes more lines than this goes to Needs you.' },
   { key: 'builder.draftPrs', label: 'Open PRs as drafts', type: 'bool', help: 'on: PRs open as drafts, which the Reviewer leaves alone until you mark them ready. off: ready for review.' },
-  { key: 'builder.requestReview', label: 'Tag for review when done', type: 'bool', help: "on: once the PRs open, and after each feedback round, In Development is swapped for the Review trigger tag, so the Reviewer reviews them. off: In Development just comes off, and asking for a review is up to you." },
+  { key: 'builder.requestReview', label: 'Tag for review when done', type: 'bool', help: "on: once the PRs open, and after each feedback round, the Build in-progress tag is swapped for the Review trigger tag, so the Reviewer reviews them. off: the in-progress tag just comes off, and asking for a review is up to you." },
 
   { heading: 'Builder · Pick-up' },
   { key: 'builder.pickup.drafts', label: 'Pick up drafts', type: 'bool', help: "on: when the Builder claims a ticket, your draft PRs for it count as work started: continued, and given fix rounds. off: drafts are left alone, as they are by the Reviewer." },
