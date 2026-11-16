@@ -12,7 +12,10 @@ import { commentable, commentableLines, disposition, planPublish, reviewMarker, 
 import { attempt, publishReview, retryable, WAITS } from './publish.mjs';
 import { cut, esc, fenceFor, fillTemplate, flat, LIMIT, reportMd, stateNote } from './render.mjs';
 import { checkResult, counts, eventFor, isCounted, isParked, isProwlReview, notCarried, notChecked, NOT_FULLY, refutedLines, reviewIdOf, standingReviews, supersededTally, TODO, todoPaths, verdictLabels } from './result.mjs';
+import { fillSkeleton, findingsIndex, inParked, resultSkeleton, startingEntry, withBlocking, withKeys, writeHandover } from './handover.mjs';
+import { blockingReviews, carriedOver, detailsSections, heldSections, latestTrusted, nothingHidden, parkedParts, prepDir, renderPrior } from './prep.mjs';
 import { createReviewer } from './reviewer.mjs';
+import { heldResult, prepSection } from './reviews.mjs';
 import { buildPrompt, checkerCommand, createReview, dismissalMessage, dismissBlocker, newBatchId, ownReview, postMarker, priorFindings, reviewsToDismiss, sameCommit } from './reviews.mjs';
 
 const SHA = 'a'.repeat(40);
@@ -693,8 +696,181 @@ export async function run(assert, { appDir }) {
       if (c.prior) texts.push([`prompt ${name} (delta)`, strip(buildPrompt({ ...full, prior: { ...c.prior, reviewedHeads: Object.fromEntries(c.prs.map(p => [p.url, 'aaa'])) }, reReviewScope: 'delta', heads: Object.fromEntries(c.prs.map(p => [p.url, 'bbb'])), smallReReview: { lines: 50, model: 'sonnet' },
         leftOut: [{ url: B }], priorFindings: [{ ref: 'r F-1', title: 'post' }], priorUnverified: { [A]: 'the reply' } }))]);
     }
+    const keyedPrior = withKeys([{ ref: 'rb-20261101-aa11-r1-0900-1a2b F-01', pr: A, status: 'confirmed', severity: 'high', title: 'T', earlier: { threadState: 'open', parked: true } }]);
+    texts.push(['prompt with files', strip(buildPrompt({ ...cases.first, prior: { reviewNo: 1, endedAt: 1 }, contextPrs: [{ url: B }], priorFindings: keyedPrior, prepping: true, handover: { keyed: keyedPrior, all: '/p/priors.json', byPr: { [A]: '/p/x/priors.json' }, skeleton: '/p/result-skeleton.json' } }))]);
+    texts.push(['prepared section', strip(prepSection({ dir: '/p', skillDir: '/s', config: { review: '/c/review.md' }, comments: { unread: [B], index: {}, carried: { [A]: { file: '/p/x/carried.json', lines: ['C-02 | high | thread open | r F-1 | "T"'] } } },
+      prs: [{ url: A, role: 'review', head: SHA, mergeBase: SHA, worktree: '/wt', facts: '/p/x/facts.md', diff: '/p/x/diff.patch', files: '/p/x/files.txt', conventions: [], delta: { status: 'rewritten', last: SHA }, view: { state: 'open', title: 'T', author: 'a', branch: 'b', base: 'main', files: 1, additions: 1, deletions: 0, head: SHA } },
+        { url: B, role: 'context', head: SHA, worktree: '', error: 'no clone', facts: '', view: null, viewError: 'HTTP 502', conventions: [] }] }, []))]);
     texts.push(['prompt quick', strip(buildPrompt({ ...cases.first, quick: true, ticketUrl: '', prior: { reviewNo: 1, endedAt: 1 }, priorFindings: [] }))]);
     assert.deepEqual(texts.flatMap(([name, text]) => offending(name, text)), [], 'the skill, its references, review.md before Verdict (Prowl) and the prompts name no action on GitHub');
+  }
+
+  // ---- C-33: a re-review is handed its earlier findings as files ----
+  {
+    const R1 = 'rb-20261101-aa11-r1-0900-1a2b';
+    const given = [
+      { ref: `${R1} F-01`, id: 'F-01', ...(({ id, ...f }) => f)(finding('F-01', { title: 'Loses <the> cart' })), earlier: { ...finding('C-01').earlier, ref: `${R1} F-01`, url: `${A}#discussion_r100`, parked: true } },
+      { ref: `${R1} F-02`, id: 'C-07', ...(({ id, ...f }) => f)(finding('F-02')), earlier: { ...finding('C-02').earlier, ref: `${R1} F-02`, threadId: null, commentId: null, threadState: 'none', url: `${A}#pullrequestreview-9` } },
+      { ref: `${R1} F-03`, id: 'F-03', ...(({ id, ...f }) => f)(finding('F-03', { pr: B })), earlier: { ...finding('C-03').earlier, ref: `${R1} F-03` }, outcome: { commit: null, note: 'As it was.', answer: null, disputeHolds: null } },
+    ];
+    const hrun = { id: 'AB42-h1', logPath: path.join(tmp, 'logs', 'AB42-h1.ndjson'), batchId: BATCH, prs: [prOf(A)], resultPrs: [A, B] };
+    const keyed = withKeys(given);
+    assert.deepEqual(keyed.map(g => g.cid), ['C-01', 'C-02', 'C-03'], 'keys in the order given');
+    const files = writeHandover(hrun, given, { leftOut: { [B]: 'a draft now' } });
+    const dir = prepDir(hrun);
+    assert.deepEqual([files.all, files.byPr, files.skeleton], [path.join(dir, 'priors.json'), { [A]: path.join(dir, 'acme__widgets-12', 'priors.json'), [B]: path.join(dir, 'acme__api-7', 'priors.json') }, path.join(dir, 'result-skeleton.json')]);
+    assert.deepEqual([JSON.parse(fs.readFileSync(files.all, 'utf8')).map(g => g.cid), JSON.parse(fs.readFileSync(files.byPr[A], 'utf8')).map(g => g.cid), JSON.parse(fs.readFileSync(files.byPr[B], 'utf8'))[0].ref], [['C-01', 'C-02', 'C-03'], ['C-01', 'C-02'], `${R1} F-03`]);
+    const sk = JSON.parse(fs.readFileSync(files.skeleton, 'utf8'));
+    assert.deepEqual(sk.prs.map(p => [p.url, p.reviewedAt, p.earlierReviews, p.coverage.unverified]), [[A, TODO, TODO, TODO], [B, TODO, [], 'Not reviewed: a draft now.']]);
+    assert.deepEqual(sk.findings.map(f => [f.id, f.status, f.earlier.parked, f.outcome.note, 'ref' in f, 'cid' in f]), [['C-01', TODO, TODO, null, false, false], ['C-02', TODO, TODO, null, false, false], ['C-03', 'deferred', false, 'As it was.', false, false]],
+      "a covered PR's findings start as placeholders; a left-out PR's is deferred and complete");
+    assert.deepEqual(startingEntry(keyed[2], false).earlier, given[2].earlier);
+    assert.equal(resultSkeleton(hrun, keyed).prs[1].coverage.unverified, 'Not reviewed: context only.');
+    const opts = { batchId: BATCH, prUrls: [A, B] };
+    assert.ok(checkResult(sk, opts)[0].startsWith("skeleton: this is still Prowl's skeleton"), 'the skeleton as it is: refused');
+    const { skeleton: _, ...bare } = sk;
+    assert.ok(/batch\.goal, batch\.mergeOrder, .* and \d+ more: still "<prowl-todo>" from Prowl's skeleton: set each/.test(checkResult(bare, opts).join('\n')), checkResult(bare, opts).join('\n'));
+    // A session that swaps only the placeholders it was told about, leaving one: still refused, so no PR is cleared on it.
+    const fill = (r, parked) => ({ ...r, batch: { goal: 'g', mergeOrder: 'm', complete: 'c' }, prs: r.prs.map(p => ({ ...p, reviewedAt: SHA, summary: 's', role: 'r', coverage: p.url === A ? { axes: ['x'], clean: [], unverified: null } : p.coverage, earlierReviews: [] })),
+      findings: r.findings.map(f => (f.status === TODO ? { ...f, status: 'still-present', outcome: { ...f.outcome, note: 'Still there.' }, earlier: { ...f.earlier, parked: parked ?? f.earlier.parked } } : f)) });
+    assert.deepEqual(checkResult(fill(bare), opts), ['findings[0].earlier.parked, findings[1].earlier.parked: still "<prowl-todo>" from Prowl\'s skeleton: set each']);
+    assert.deepEqual(checkResult(fill(bare, false), opts), [], 'every part filled: accepted');
+
+    // inParked: matched whole, never by a part.
+    assert.ok(inParked(['- T (rb-20261101-x F-1): n · https://l'], { ref: 'rb-20261101-x F-1' }) && !inParked(['- T (rb-20261101-x F-12): n · https://l'], { ref: 'rb-20261101-x F-1' }), "(rb-x F-1): doesn't match a line about F-12");
+    assert.ok(inParked(['- T (other F-9): n · https://l/1'], { ref: 'r F-1', threadId: 'T', url: 'https://l/1' }) && !inParked(['- T (other F-9): n · https://l/12'], { ref: 'r F-1', threadId: 'T', url: 'https://l/1' })
+      && !inParked(['- https://l/1 · more'], { ref: 'r F-1', threadId: 'T', url: 'https://l/1' }), 'a thread link matches only as the whole text after the last ·');
+    assert.ok(!inParked(['T rb-20261101-x F-1 n'], { ref: 'rb-20261101-x F-1' }) && !inParked(['- T (r F-1): n · https://l/1'], { ref: 'r F-2', url: 'https://l/1' }), 'another form matches nothing; a link counts only for a finding with a thread');
+
+    // fillSkeleton: what the setup established goes in; the rest stays a placeholder.
+    const carriedFile = path.join(dir, 'acme__widgets-12', 'carried.json');
+    const carried = [{ id: 'C-04', pr: A, status: TODO, severity: 'high', title: 'Carried', earlier: { by: 'prowl', ref: `${R1} F-09` } }, { id: 'C-05', pr: A, status: TODO, earlier: { by: 'prowl', ref: `${R1} F-02` } }];
+    fs.writeFileSync(carriedFile, JSON.stringify(carried));
+    const prepOf = over => ({ prs: [{ url: A, role: 'review', worktree: '/wt', error: '', head: SHA }, { url: B, role: 'context', worktree: '/wt2', error: '', head: 'short' }],
+      comments: { blocking: { [A]: [{ url: `${A}#pullrequestreview-9`, findings: [`${R1} F-01`] }] }, partial: {}, state: { [A]: { parked: [`- Loses (${R1} F-01): answered · ${A}#discussion_r100`], threads: [{ ref: `${R1} F-01`, id: 'T-now', commentId: 4242, state: 'resolved' }] } },
+        carried: { [A]: { file: carriedFile, lines: [] }, [B]: { file: path.join(dir, 'missing.json'), lines: [] } } }, ...over });
+    assert.equal(fillSkeleton(files.skeleton, prepOf()), true);
+    let filled = JSON.parse(fs.readFileSync(files.skeleton, 'utf8'));
+    assert.deepEqual(filled.prs.map(p => p.reviewedAt), [SHA, TODO], 'reviewedAt only for a prepared PR with a full sha');
+    assert.deepEqual([filled.prs[0].earlierReviews, filled.prs[1].earlierReviews], [[{ url: `${A}#pullrequestreview-9`, findings: [`${R1} F-01`] }], []]);
+    assert.deepEqual([filled.findings[0].earlier.parked, filled.findings[0].earlier.threadId, filled.findings[0].earlier.commentId, filled.findings[0].earlier.threadState, filled.findings[1].earlier.parked, filled.findings[2].earlier.parked],
+      [true, 'T-now', 4242, 'resolved', false, false], 'parked and the thread from the PR as it is now');
+    assert.deepEqual(filled.findings.map(f => f.id), ['C-01', 'C-02', 'C-03', 'C-04'], 'carried-over findings added, but not one whose ref is there already; an unreadable carried file loses nothing else');
+    fillSkeleton(files.skeleton, prepOf());
+    assert.equal(JSON.parse(fs.readFileSync(files.skeleton, 'utf8')).findings.length, 4, 'added once');
+    fs.writeFileSync(files.skeleton, JSON.stringify(sk));
+    fillSkeleton(files.skeleton, prepOf({ comments: { partial: { [A]: { read: [], unread: ['u'] } } } }));
+    filled = JSON.parse(fs.readFileSync(files.skeleton, 'utf8'));
+    assert.deepEqual([filled.prs[0].earlierReviews, filled.findings[0].earlier.parked], [TODO, TODO], "what the setup couldn't establish stays a placeholder");
+    fs.writeFileSync(path.join(dir, 'not-a-skeleton.json'), JSON.stringify(bare));
+    assert.deepEqual([fillSkeleton(path.join(dir, 'not-a-skeleton.json'), prepOf()), fillSkeleton(path.join(dir, 'none.json'), prepOf())], [false, false]);
+
+    // The details files of earlier reviews.
+    const banner = batch => `\`\`\`text\n╭─ PR-OWL ───\n│ PR-Owl Review\n│ ${batch}\n╰───\n\`\`\`\n\n<!-- prowl-review ${batch} -->`;
+    const writeUp = (id, sev, title, ref = '') => [`### ${id} [${sev}] ${title}${ref}`, '', '- **Where:** `a.js:4`', '- **Axis:** Correctness', '', '**Code:**', '', '```md', 'x();', `### F-99 [LOW] quoted`, '**Fix:** quoted fix', '```', '', `**Problem:** ${title} breaks.`, '', '**Failure scenario:** When.', '', '**Fix:** Keep it.', '', '**How to check the fix:** Test.', '', '**Verified:** Yes.'].join('\n');
+    const plainUp = (id, sev, title, ref = '') => writeUp(id, sev, title, ref).replace('### F-99 [LOW] quoted\n**Fix:** quoted fix\n', '');
+    const detailsOf = (findings, parked = '') => ['# PR-Owl Review', '', '## Findings', '', findings || 'None.', '', '## Still open from the previous review', '', 'None.', ...(parked ? ['', '## Parked', '', parked] : []), '', '## Coverage', '', 'x'].join('\n');
+    const bodyOf = (batch, details, after = '') => `${banner(batch)}\n\n<details>\n<summary>📄 prowl-review-${batch}-widgets-12.md: the full review</summary>\n\n\`\`\`\`\`markdown\n${details}\n\`\`\`\`\`\n\n</details>${after}`;
+    const rev = (id, user, state, body, at) => ({ id, user, state, body, url: `${A}#pullrequestreview-${id}`, commit: `c${id}`, at: `2026-11-${String(at).padStart(2, '0')}T10:00:00Z` });
+    const pr = { ...prOf(A), author: 'author1' };
+    const discOf = (reviews, over = {}) => ({ threads: [], comments: [], reviews, issueComments: [], ...over });
+    const secs = detailsSections(detailsOf(writeUp('F-01', 'HIGH', 'Loses the cart')), R1);
+    assert.deepEqual([secs.length, secs[0].ref, secs[0].fix, secs[0].problem, secs[0].axis, secs[0].quote.language, secs[0].quote.code.includes('### F-99')], [1, `${R1} F-01`, 'Keep it.', 'Loses the cart breaks.', 'Correctness', 'md', true],
+      "markdown quoted in a write-up's code block gives no headings or labels");
+    assert.deepEqual(parkedParts(`- A (b) title (${R1} F-02): note · https://l`), { title: 'A (b) title', ref: `${R1} F-02`, link: 'https://l' });
+
+    // Blocking reviews: lifted only by the same author's later PR-Owl approval.
+    const blocker = rev(9, 'octocat', 'CHANGES_REQUESTED', bodyOf(R1, detailsOf(plainUp('F-01', 'HIGH', 'Loses the cart'))), 1);
+    const R2 = 'rb-20261102-aa11-r2-0900-2b3c';
+    const R3 = 'rb-20261103-aa11-r3-0900-3c4d';
+    let b = blockingReviews(discOf([blocker, rev(10, 'teammate', 'APPROVED', bodyOf(R2, detailsOf('')), 2), rev(11, 'octocat', 'CHANGES_REQUESTED', bodyOf(R3, detailsOf(plainUp('C-01', 'HIGH', 'Loses the cart', ` (${R1} F-01)`))), 3), rev(12, 'octocat', 'APPROVED', 'LGTM by hand', 4)]), pr);
+    assert.deepEqual(b.read, [{ url: `${A}#pullrequestreview-9`, findings: [`${R1} F-01`] }, { url: `${A}#pullrequestreview-11`, findings: [`${R1} F-01`] }], "someone else's approval, a later request and a verdict by hand lift nothing");
+    assert.deepEqual(blockingReviews(discOf([blocker, rev(13, 'octocat', 'APPROVED', bodyOf(R2, detailsOf('')), 2)]), pr).reviews, [], "the same author's later PR-Owl approval lifts it");
+    const notWhole = (details, after = '', issueComments = []) => blockingReviews(discOf([rev(9, 'octocat', 'CHANGES_REQUESTED', bodyOf(R1, details, after), 1)], { issueComments }), pr);
+    const part2 = `\n\n_The details file continues in [part 2](${A}#issuecomment-555), a comment on this PR._`;
+    assert.deepEqual([notWhole(detailsOf(plainUp('F-01', 'HIGH', 'A')), part2).unread.length, notWhole(detailsOf(plainUp('F-01', 'HIGH', 'A')), part2).reviews[0].why], [1, 'part2'], 'a part 2 comment that is gone');
+    const part2Comment = { id: 555, user: 'octocat', body: `<details>\n<summary>📄 prowl-review-${R1}-widgets-12.md (part 2): the rest</summary>\n\n\`\`\`\`\`markdown\n${plainUp('F-02', 'LOW', 'B')}\n\`\`\`\`\`\n\n</details>`, url: 'x', at: '2026-11-01T09:00:00Z' };
+    assert.deepEqual(notWhole(detailsOf(plainUp('F-01', 'HIGH', 'A')), part2, [part2Comment]).read[0].findings, [`${R1} F-01`, `${R1} F-02`], 'a part 2 still on the PR is joined');
+    assert.equal(notWhole(detailsOf(`${plainUp('F-01', 'HIGH', 'A')}\n\n\`\`\`js\nnever closed`)).reviews[0].why, 'hidden', 'an open fence');
+    assert.equal(notWhole(detailsOf(writeUp('F-01', 'HIGH', 'A'))).reviews[0].why, 'hidden', 'a heading hidden in a fence');
+    assert.ok(!nothingHidden('```\n### F-02 [LOW] x\n```') && nothingHidden('### F-02 [LOW] x\n```\ncode\n```'));
+    assert.equal(notWhole(detailsOf('### Finding 1: something odd')).reviews[0].why, 'headings', 'unrecognised headings');
+    const crlf = blockingReviews(discOf([{ ...blocker, body: blocker.body.replace(/\n/g, '\r\n') }]), pr);
+    assert.deepEqual(crlf.read, [{ url: `${A}#pullrequestreview-9`, findings: [`${R1} F-01`] }], 'a body saved with CRLF is read as any other');
+    assert.equal(blockingReviews(discOf([{ ...blocker, body: bodyOf(R1, detailsOf(`${plainUp('F-01', 'HIGH', 'A')}\n\n\`\`\`js\nnever closed`)).replace(/\n/g, '\r\n') }]), pr).unread.length, 1, 'and an open fence in one is still seen');
+    // The latest review: one with only parked findings hides nothing; one with odd headings is named.
+    const onlyParked = discOf([rev(20, 'octocat', 'COMMENTED', bodyOf(R2, detailsOf('', `- Old thing (rb-20261001-zz99-r1-0900-0000 F-02): answered · https://example.invalid/t`)), 5)]);
+    assert.ok(!heldSections(onlyParked, pr, 'octocat').join('\n').includes('### Latest review'));
+    const odd = heldSections(discOf([rev(21, 'octocat', 'COMMENTED', bodyOf(R2, detailsOf('### Finding 1: something odd')), 5)]), pr, 'octocat').join('\n');
+    assert.ok(odd.includes(`### Latest review\n\nProwl couldn't read the finding list of the latest PR-Owl review (${A}#pullrequestreview-21) in full: its findings are not under headings Prowl recognises`), odd);
+    const held = heldSections(discOf([blocker, { ...rev(22, 'octocat', 'COMMENTED', `${bodyOf(R2, detailsOf(''))}\n\n<!-- prowl-state\nrefuted: a.js:4 | Not a bug | guarded upstream\n-->`, 2) }]), pr, 'octocat').join('\n');
+    assert.ok(held.includes(`### Blocking reviews\n\n- ${A}#pullrequestreview-9, by octocat, at commit c9, batch ${R1}\n  - ${R1} F-01 [high] Loses the cart · no thread`) && held.includes(`### Earlier refutations\n\n- refuted: a.js:4 | Not a bug | guarded upstream · ${A}#pullrequestreview-22`), held);
+    assert.equal(latestTrusted(discOf([blocker, rev(30, 'author1', 'COMMENTED', bodyOf(R2, detailsOf('')), 9)]), 'author1', 'octocat').id, 9, "the PR author's own review isn't trusted");
+
+    // Carried-over findings.
+    const thread = (id, commentId, ref, over = {}) => [{ id, resolved: false, outdated: false, path: 'a.js', line: 4, originalLine: 4, commentId, ...over }, { id: commentId, inReplyTo: null, user: 'octocat', body: `The cart is lost.\n\n<!-- prowl-review ${ref} -->`, url: `${A}#discussion_r${commentId}`, commit: 'craised', at: '2026-11-01T10:00:00Z' }];
+    const [t1, c1] = thread('T1', 101, `${R1} F-05`);
+    const [t2, c2] = thread('T2', 102, 'short F-01');
+    const [t3, c3] = thread('T3', 103, `${R1} F-06`, { outdated: true, line: null });
+    const [t4, c4] = thread('T4', 104, `${R1} F-07`, { resolved: true });
+    let got = carriedOver(discOf([], { threads: [t1, t2, t3, t4], comments: [c1, c2, c3, c4] }), pr, 'octocat', []);
+    assert.deepEqual(got.map(f => f.ref), [`${R1} F-05`, `${R1} F-06`], 'open threads come with no details file; a ref no result may hold, and a resolved thread, do not');
+    assert.deepEqual([got[0].severity, got[0].title, got[0].detail.explanation, got[0].earlier.threadId, got[0].earlier.threadState, got[0].location, got[1].location.line, got[1].earlier.threadState, got[0].status],
+      [TODO, TODO, 'The cart is lost.', 'T1', 'open', { path: 'a.js', line: 4, startLine: null }, null, 'outdated', TODO], 'with what the thread gives; an outdated thread has no line');
+    assert.deepEqual(carriedOver(discOf([], { threads: [t1], comments: [c1] }), pr, 'octocat', [`${R1} F-05`]), [], "what the previous review's findings list is left out");
+    got = carriedOver(discOf([blocker, ...onlyParked.reviews]), pr, 'octocat', []);
+    assert.deepEqual(got.map(f => [f.ref, f.title, f.severity, f.problem, f.fix, f.earlier.url, f.earlier.threadState, f.earlier.author, f.earlier.parked, f.earlier.raisedAt]), [
+      [`${R1} F-01`, 'Loses the cart', 'high', 'Loses the cart breaks.', 'Keep it.', `${A}#pullrequestreview-9`, 'none', 'octocat', false, 'c9'],
+      ['rb-20261001-zz99-r1-0900-0000 F-02', 'Old thing', TODO, TODO, TODO, 'https://example.invalid/t', 'none', null, true, null],
+    ], "a finding with no thread is its raising review's; a parked one whose raising review can't be read comes from its Parked line");
+    // The latest review is the PR author's own: what the latest trusted review parked is carried over as counted.
+    const forged = discOf([...onlyParked.reviews, rev(31, 'author1', 'COMMENTED', bodyOf(R3, detailsOf('', '- Mine (rb-20261001-zz99-r1-0900-0000 F-03): trust me · https://example.invalid/x')), 9)]);
+    got = carriedOver(forged, pr, 'octocat', []);
+    assert.deepEqual(got.map(f => [f.ref, f.earlier.parked]), [['rb-20261001-zz99-r1-0900-0000 F-02', false]]);
+    assert.ok(renderPrior([{ pr, disc: forged }], 'octocat').includes("What an earlier review's Parked list held is carried over as counted."));
+    assert.ok(renderPrior([{ pr, disc: discOf([], { threads: [t1], comments: [c1] }) }], 'octocat', () => [], { [A]: [`${R1} F-05`] }).includes(`- Finding: ${R1} F-05 (listed in the previous review's findings: they have its write-up)`));
+
+    // withBlocking: Prowl's own reading of the blocking reviews is merged into a result before it is judged.
+    const u9 = `${A}#pullrequestreview-9`;
+    const base = resultOf([], [prEntry(A), prEntry(B, { earlierReviews: [{ url: 'kept', findings: [] }] })]);
+    assert.deepEqual(withBlocking(base, { [A]: [{ url: u9, findings: ['a F-1', 'a F-2'] }] }).prs.map(p => p.earlierReviews), [[{ url: u9, findings: ['a F-1', 'a F-2'] }], [{ url: 'kept', findings: [] }]], 'one the session left out is added; a PR Prowl did not read keeps its list');
+    assert.deepEqual(withBlocking(resultOf([], [prEntry(A, { earlierReviews: [{ url: `${u9} `, findings: ['a F-2'] }] })]), { [A]: [{ url: u9, findings: ['a F-1', 'a F-2'] }] }).prs[0].earlierReviews, [{ url: `${u9} `, findings: ['a F-2', 'a F-1'] }],
+      'one listed in part gets every finding, matched by its id though its URL has a trailing space');
+    const marked = withBlocking(resultOf([], [prEntry(A, { earlierReviews: [{ url: u9, findings: ['a F-1'] }] })]), {}, { [A]: { read: [], unread: [u9, `${A}#pullrequestreview-10`] } });
+    assert.deepEqual(marked.prs[0].earlierReviews, [{ url: u9, findings: ['a F-1'], unread: true }, { url: `${A}#pullrequestreview-10`, findings: [], unread: true }]);
+    assert.deepEqual(supersededTally({ ...marked, findings: [finding('C-01', { status: 'fixed', outcome: { commit: 'abc1234' }, earlier: { ...finding('C-01').earlier, ref: 'a F-1' } })] }, A), [], 'an unread one is never cleared');
+    assert.ok(notChecked(marked, A).some(r => r.includes("couldn't be read in full")));
+    assert.equal(withBlocking(base, {}, {}), base);
+    assert.deepEqual(heldResult({ prep: { comments: { blocking: { [A]: [{ url: u9, findings: ['a F-1'] }] }, partial: {} } } }, base).prs[0].earlierReviews, [{ url: u9, findings: ['a F-1'] }]);
+    assert.equal(heldResult({}, base), base);
+
+    // The prompt of a re-review with files: a line per finding, no JSON block, a fraction of the size.
+    const many = Array.from({ length: 12 }, (_, i) => ({ ...given[0], ref: `${R1} F-${i + 1}`, detail: { ...given[0].detail, explanation: 'Long write-up. '.repeat(120) } }));
+    const prior = { reviewNo: 1, endedAt: 1 };
+    const common = { ticket: 'AB#42', title: 'Thing', ticketUrl: 'u', prs: [prOf(A)], contextPrs: [prOf(B)], reviewNo: 2, prior, priorFindings: many, batchId: BATCH, resultPath: '/r.json', checker: 'check', prepping: true };
+    const inline = buildPrompt(common);
+    const handed = buildPrompt({ ...common, handover: { keyed: withKeys(many), all: '/p/priors.json', byPr: { [A]: '/p/acme__widgets-12/priors.json' }, skeleton: '/p/result-skeleton.json' } });
+    assert.ok(inline.includes('json\n[') && !handed.includes('json\n[') && !handed.includes('Long write-up.'));
+    assert.ok(handed.includes(`- C-01 | ${A} | confirmed | medium | thread open, parked | ${R1} F-1 | Loses &lt;the> cart`) && handed.includes('- C-12 | '), handed);
+    assert.ok(handed.includes("They are in files, not in this prompt: `/p/priors.json` has every one whole") && handed.includes("Start the review result from Prowl's skeleton, `/p/result-skeleton.json`")
+      && handed.includes("Each is in Prowl's result skeleton already, as `deferred` under its key: leave it there as it is, and add no copy.") && handed.includes('a prior finding "given below" is its entry in Prowl\'s files'));
+    assert.ok(handed.length < inline.length / 3, `${handed.length} against ${inline.length}`);
+    const idx = findingsIndex(withKeys([{ ...given[1], title: 'two\nlines' }]), { all: '/a', byPr: {} });
+    assert.equal(idx.lines[1], `- C-01 | ${A} | confirmed | medium | thread none | ${R1} F-02 | two lines`);
+    // Under Prepared by Prowl: the carried-over findings, and nothing there names an action on GitHub.
+    const section = prepSection({ dir: '/p', skillDir: '/s', config: { review: '/c/review.md' }, prs: [], comments: { index: {}, carried: { [A]: { file: '/p/acme__widgets-12/carried.json', lines: ['C-04 | high | thread open | rb-20251201-proj-r1 F-03 | "Missing <null> check"'] } } } }, []);
+    assert.ok(section.includes(`  - ${A}: \`acme__widgets-12/carried.json\`\n    - C-04 | high | thread open | rb-20251201-proj-r1 F-03 | "Missing &lt;null> check"`) && section.includes("- Carried over from earlier PR-Owl reviews (the skill's Step 5):"));
+
+    // createReview: a prepared re-review writes the files and names them; an unprepared one keeps the findings in its prompt.
+    const priorRun = { id: 'AB42-r1', reviewNo: 1, endedAt: 1, me: 'octocat', parkHumanOnly: false, resultPath: path.join(tmp, 'c33-prior.result.json'), published: {} };
+    fs.writeFileSync(priorRun.resultPath, JSON.stringify(resultOf([finding('F-01')])));
+    const made = prepping => createReview(loadConfig(), { tracker: 'ado', ticket: { key: 'AB#42', title: 'Thing', url: 'u', ref: null }, prs: [prOf(A)], prior: priorRun, me: 'octocat', appDir, prepping });
+    const withFiles = made(true);
+    assert.deepEqual([withFiles.skeletonPath, Object.keys(withFiles.handover.byPr)], [path.join(prepDir(withFiles), 'result-skeleton.json'), [A]]);
+    assert.ok(fs.existsSync(withFiles.skeletonPath) && fs.readFileSync(withFiles.promptPath, 'utf8').includes(`- C-01 | ${A} | confirmed | medium | thread none | ${BATCH} F-01 | Title F-01`));
+    assert.notEqual(path.dirname(withFiles.skeletonPath), path.dirname(withFiles.resultPath), 'the skeleton is never written where Prowl reads results');
+    const without = made(false);
+    assert.ok(!without.skeletonPath && !without.handover && fs.readFileSync(without.promptPath, 'utf8').includes('json\n['));
   }
 
   fs.rmSync(tmp, { recursive: true, force: true });

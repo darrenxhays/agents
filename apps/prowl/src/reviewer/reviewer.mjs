@@ -12,6 +12,7 @@ import { frontMatter } from '../match.mjs';
 import { fill, loadOutputTemplates, outputTemplate } from '../templates.mjs';
 import * as rv from './reviews.mjs';
 import { checkPlan, checksLine, prChecks } from './checks.mjs';
+import { fillSkeleton } from './handover.mjs';
 import { prepareReview, removePrep, sweepWorktrees } from './prep.mjs';
 import { planPublish } from './publish-plan.mjs';
 import { publishReview } from './publish.mjs';
@@ -197,6 +198,7 @@ export function createReviewer(app, deps) {
     }
     if (!prep) return { run, stand };
     run.prep = prep;
+    if (run.skeletonPath) { try { fillSkeleton(run.skeletonPath, prep); } catch { /* the skeleton keeps its placeholders, for the session */ } }
     const name = p => `${p.repo}#${p.number}`;
     for (const p of prep.prs) if (p.replaced && p.role === 'review') run.reviewedHeads[p.url] = p.head; // force-pushed since the review started: the new head is the one reviewed
     const bare = prep.prs.filter(p => !p.worktree);
@@ -955,7 +957,7 @@ export function createReviewer(app, deps) {
       const text = fs.readFileSync(run.resultPath, 'utf8');
       const problems = checkResult(text, { batchId: run.batchId, prUrls: run.resultPrs });
       if (problems.length) failed(`its review result has ${problems.length} problem${problems.length > 1 ? 's' : ''}, so nothing was posted: ${problems.slice(0, 5).join('; ')} (${run.resultPath})`);
-      else result = JSON.parse(text);
+      else result = rv.heldResult(run, JSON.parse(text)); // with Prowl's own reading of each PR's blocking reviews
     } catch (e) {
       failed(`its review result has 1 problem, so nothing was posted: can't read it: ${e.message} (${run.resultPath})`);
     }

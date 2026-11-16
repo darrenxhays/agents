@@ -859,6 +859,15 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
     await h.side.poll();
     assert.ok(h.seen.logs.includes(`AB#42: couldn't read the comments on ${prOf(1).url}; the session fetches them itself`));
 
+    // C-33: after the setup, the result skeleton is filled with what it established.
+    const skFile = path.join(tmp, 'flow-skeleton.json');
+    fs.writeFileSync(skFile, JSON.stringify({ skeleton: 'x', prs: [{ url: prOf(1).url, reviewedAt: '<prowl-todo>', earlierReviews: '<prowl-todo>' }], findings: [] }));
+    h = prepped({ prepare: r => prepOf(r, { head: 'a'.repeat(40) }) });
+    const plainCreate = h.side.createReview;
+    h.side.createReview = (...a) => Object.assign(plainCreate(...a), { skeletonPath: skFile });
+    await h.side.poll();
+    assert.deepEqual(JSON.parse(fs.readFileSync(skFile, 'utf8')).prs[0], { url: prOf(1).url, reviewedAt: 'a'.repeat(40), earlierReviews: '<prowl-todo>' });
+
     // Switched off during the setup: no claim, no session, worktrees removed, the ticket still tagged.
     h = prepped({ prepare: (r, hh) => { hh.app.on = false; return prepOf(r); } });
     await h.side.poll();
