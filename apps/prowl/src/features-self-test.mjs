@@ -12,7 +12,7 @@ import { createLabels } from './labels.mjs';
 import { norm, tagMatches } from './match.mjs';
 import { askLabel, labelNames, labelRole, labelWrite, migrateNames, outcomeTag, pendingTag, renamedWrite, reviewTags, sameLabel, splitDone, tagReader, wasRole } from './names.mjs';
 import { label as jiraLabel } from './jira.mjs';
-import { builderTags } from './builder/rules.mjs';
+import { builderTags, gateDecision, workState } from './builder/rules.mjs';
 import { baseSteps, checkPlan, checksLine, prChecks } from './reviewer/checks.mjs';
 import { createReviewer } from './reviewer/reviewer.mjs';
 import { MODELS } from './config.mjs';
@@ -691,6 +691,49 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
     let frame = '';
     for (let i = 0; i < 60 && !frame.includes('(written prowl-in-review)'); i++) { t.tui.key('down'); frame = t.text(120, 40); }
     assert.ok(frame.includes('(written prowl-in-review)'), 'the Jira form beside the saved name');
+  }
+
+  // ---- C-21: a quick build reads the state of its work before it starts ----
+  {
+    const d = (state, mine, followUp, instructions, canAsk, extra = {}) => gateDecision({ state, mine, followUp, instructions, canAsk, ...extra }).act;
+    // Every row of the table: [state, mine, follow, instructions] -> in the TUI, with --once.
+    for (const [state, mine, follow, ins, tui, once] of [
+      ['', 1, true, false, 'build', 'build'], ['building', 1, true, false, 'refuse', 'refuse'],
+      ['running', 1, true, false, 'follow', 'follow'], ['running', 1, true, true, 'ask', 'refuse'], ['running', 0, true, false, 'refuse', 'refuse'], ['running', 0, true, true, 'refuse', 'refuse'],
+      ['running', 1, false, true, 'ask', 'refuse'], ['running', 1, false, false, 'refuse', 'refuse'],
+      ['pending', 1, true, false, 'ask', 'follow'], ['pending', 1, true, true, 'ask', 'refuse'], ['pending', 0, true, false, 'ask', 'refuse'], ['pending', 1, false, false, 'ask', 'refuse']]) {
+      assert.deepEqual([d(state, mine, follow, ins, true), d(state, mine, follow, ins, false)], [tui, once], `gate: ${state || 'none'}, mine ${mine}, follow ${follow}, instructions ${ins}`);
+    }
+    assert.equal(d('pending', 1, true, false, true, { answer: 'now', asked: 'pending' }), 'build', 'build now, asked about the pending review that is still pending');
+    assert.equal(d('running', 1, true, false, true, { answer: 'now', asked: 'pending' }), 'ask', 'the review has started since: asked again');
+    assert.equal(d('running', 1, false, false, true, { answer: 'now', asked: 'pending' }), 'refuse');
+    assert.equal(d('running', 0, true, false, true, { answer: 'now', asked: 'pending' }), 'refuse');
+    assert.equal(d('', 1, true, false, true, { answer: 'wait' }), 'build', 'the review ended meanwhile: the build starts');
+    const again = gateDecision({ state: 'pending', mine: 0, followUp: true, instructions: false, canAsk: true, answer: 'wait' });
+    assert.deepEqual([again.act, again.can], ['ask', false], 'wait, with no PR of yours left: asked again, with one option');
+    assert.equal(d('pending', 1, true, false, true, { answer: 'now' }), 'build', 'no recorded state counts as asked about pending');
+    const cfg = loadConfig();
+    const st = x => workState(x, cfg)?.state || 'none';
+    assert.deepEqual([st(['backend', 'prowl: in review']), st(['In Review']), st(['prowl-in-review']), st(['prowl: review']), st(['Ready for Review']), st(['prowl: approved', 'prowl: changes requested', 'Reviewed']), st(['prowl: building', 'prowl: review'])],
+      ['running', 'running', 'running', 'pending', 'pending', 'none', 'building']);
+    assert.equal(workState(['web', 'In Review'], cfg).why, "it carries 'In Review': a review is running", 'the tag as it is on the ticket');
+    const rows = (...labels) => [{ name: 'acme/web#90', labels }];
+    assert.deepEqual([st(rows('prowl: review', 'In Review')), st(rows('prowl-review', 'prowl in review', 'prowl: approved', 'prowl: changes requested')), st(rows('prowl: building'))], ['running', 'none', 'building'], 'labels are matched exactly; running wins');
+    assert.equal(workState([{ name: 'acme/web#90', labels: ['prowl: review'] }, { name: 'acme/api#4', labels: ['prowl: review'] }], cfg).why, "acme/web#90, acme/api#4 are labelled 'prowl: review': a review is pending");
+    // Needs you: a gate question takes only its options; s cancels the build, and there is nothing to hand back.
+    const gateItem = { id: 'g1', recordId: 'u1', ticket: 'AB#123', kind: 'question', question: 'A review is pending. Wait for it, or build now?', context: [], options: ['Wait for the review, then address its feedback', 'Build now: the review request comes off the ticket until the build hands them on again'],
+      recommended: 'Wait for the review, then address its feedback', createdAt: 1, gate: { wait: 'Wait for the review, then address its feedback', now: 'Build now: the review request comes off the ticket until the build hands them on again', state: 'pending' } };
+    const t = tuiOver({ builder: { needs: () => [gateItem], history: () => [{ uid: 'u1', key: 'AB#123', title: 'T', status: 'needs-you', sessionStarted: true }] }, cfgOver: { builder: { ...cfg.builder, enabled: true } } });
+    t.tui.key('B');
+    t.tui.key('3');
+    const frame = t.text(140, 30);
+    assert.ok(frame.includes('Wait for the review, then address its feedback') && frame.includes('Recommended') && !frame.includes('Your answer') && !frame.includes('Ask about this'), 'only its options are answers');
+    t.tui.key('s');
+    assert.ok(t.text(140, 30).includes('Cancel the quick build of AB#123?'));
+    t.tui.key('y');
+    assert.deepEqual(t.calls.map(c => c[0]), ['skip']);
+    t.tui.key('enter');
+    assert.deepEqual(t.calls.at(-1).slice(0, 1).concat(t.calls.at(-1)[2]), ['answer', 'Wait for the review, then address its feedback'], 'enter submits the recommended option');
   }
 
   // ---- C-06: verifier model and effort ----

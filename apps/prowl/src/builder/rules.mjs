@@ -6,7 +6,7 @@ import { globRe } from '../checks.mjs';
 import { actionable, questionShape } from '../feedback.mjs';
 import { checksState } from '../github.mjs';
 import { insideRoots } from '../fence.mjs';
-import { tagReader } from '../names.mjs';
+import { labelRole, tagReader } from '../names.mjs';
 
 /**
  * The Builder's tag matchers: the start tag loosely (with the typo tolerance), the ones it sets itself exactly. Its
@@ -20,6 +20,42 @@ export function builderTags(cfg) {
   const isStart = t => role(t) === 'builder.start';
   // `owned`: every tag a claim swaps for the in-progress tag. `mine`: the Builder's own two, all that a stop or a dropped round takes off.
   return { isStart, ours, owned: t => isStart(t) || ours(t), mine: t => isStart(t) || role(t) === 'builder.inProgress', has };
+}
+
+/**
+ * The state of a quick build's work, read from its ticket's tags (a list of tag names) or, with no ticket, its PRs'
+ * labels (rows of { name, labels }): { state: 'building' | 'running' | 'pending', why }, or null when nothing holds
+ * it. Checked in that order. Tags are compared ignoring case and punctuation, old names included; labels exactly, as
+ * labels are. The Reviewer's outcome tags and labels hold nothing.
+ */
+export function workState(tagsOrRows, cfg) {
+  const rows = (tagsOrRows || []).length && typeof tagsOrRows[0] === 'object';
+  const said = { building: 'a build has it', running: 'a review is running', pending: 'a review is pending' };
+  if (!rows) {
+    const { exactRole } = tagReader(cfg);
+    for (const [state, role] of [['building', 'builder.inProgress'], ['running', 'reviewer.inProgress'], ['pending', 'reviewer.trigger']]) {
+      const tag = (tagsOrRows || []).find(t => exactRole(t) === role);
+      if (tag) return { state, why: `it carries '${tag}': ${said[state]}` };
+    }
+    return null;
+  }
+  for (const [state, role] of [['building', 'building'], ['running', 'inReview'], ['pending', 'ask']]) {
+    const hit = tagsOrRows.map(r => ({ name: r.name, label: (r.labels || []).find(l => labelRole(cfg, l) === role) })).filter(r => r.label);
+    if (hit.length) return { state, why: `${hit.map(r => r.name).join(', ')} ${hit.length > 1 ? 'are' : 'is'} labelled '${hit[0].label}': ${said[state]}` };
+  }
+  return null;
+}
+
+/** What a quick build does about a review of its work. `mine`: how many PRs of yours it would continue. Pure. */
+export function gateDecision({ state, mine, followUp, instructions, canAsk, answer = '', asked = '' }) {
+  if (!state) return { act: 'build' };
+  if (state === 'building') return { act: 'refuse' };
+  if (answer === 'now' && state === (asked || 'pending')) return { act: 'build' }; // "build now" answers the state it was asked about
+  const off = mine > 0 && !followUp;
+  const can = mine > 0 && followUp;
+  if (can && (answer === 'wait' || (!answer && !instructions && (state === 'running' || !canAsk)))) return { act: 'follow' };
+  if (state === 'running' && (!mine || (off && !(canAsk && instructions)))) return { act: 'refuse', can, off };
+  return { act: canAsk ? 'ask' : 'refuse', can, off };
 }
 
 /** A branch-name slug of a ticket title: lowercase words joined by dashes, at most 40 characters. */

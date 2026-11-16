@@ -335,6 +335,7 @@ export async function run(assert) {
     await forkBranches(assert);
     await pickupKeeps(assert);
     await newNames(assert);
+    await gates(assert);
   } finally {
     globalThis.fetch = realFetch;
     for (const k of Object.keys(process.env)) if (!(k in envBefore)) delete process.env[k];
@@ -478,6 +479,134 @@ async function newNames(assert) {
     assert.equal(w.rounds, 1, `${board}: after 'prowl: changes requested', the round`);
     h.done();
   }
+}
+
+// A quick build reads the state of its work before it starts.
+async function gates(assert) {
+  const prOfMine = (key, n = 9) => ({ repo: 'octo-org/web', number: n, url: `https://github.com/octo-org/web/pull/${n}`, title: `${key}: Save the cart`, body: '', head: 'feature/cart', base: 'main', draft: false, state: 'OPEN', author: 'octocat',
+    reviews: [], threads: [], checks: [], replies: [], labels: [] });
+  const setup = (board, opts = {}) => {
+    const h = harness(board, twoRepoBuild({ finish: finishOnTop }), opts);
+    pushTo(h, 'octo-org/web', 'feature/cart', { 'src/cart.js': 'mine\n' });
+    return h;
+  };
+  for (const board of ['ado', 'jira']) {
+    const key = board === 'ado' ? 'AB#123' : 'PROJ-123';
+    const h = setup(board);
+    const { tags } = h.cfg;
+    const tagsNow = () => (board === 'ado' ? h.server.tags(123) : h.server.labels('PROJ-123'));
+    const set = list => (board === 'ado' ? h.server.setTags(123, ['Web', ...list]) : h.server.edit('PROJ-123', [...tagsNow().filter(t => t !== 'web').map(t => ({ remove: t })), ...list.map(t => ({ add: jira.label(t) }))]));
+    // Under a running review, with a PR of yours: it only follows; the review's feedback starts a round, which claims then.
+    h.gh.prs.push(prOfMine(key));
+    set([tags.inProgress]);
+    const before = JSON.stringify(tagsNow());
+    const w = await h.b.quickBuild(key, { offered: true });
+    await h.b.drain();
+    assert.deepEqual([w.status, w.waitedFor, w.claimedAt, h.session.turns.length, JSON.stringify(tagsNow())], ['following', 'running', null, 0, before], `${board}: under a running review it only follows: no claim, no session`);
+    assert.ok(h.logs.some(l => l.includes(`${key}: it carries '`) && l.includes("a review is running, so nothing is started now: following octo-org/web#9, and the Builder takes up the review's feedback when it ends")), `${board}: and the Log says so`);
+    set(['prowl: changes requested']);
+    h.gh.prs[0].reviews.push({ user: 'lead', state: 'CHANGES_REQUESTED', at: new Date(Date.now() + 60_000).toISOString(), body: 'Fix it.' });
+    await h.poll();
+    assert.ok(w.rounds === 1, `${board}: when the review ends, its feedback starts a round`);
+    h.done();
+  }
+  // A review pending: one question, both options, the first recommended.
+  let h = setup('ado');
+  const trigger = h.cfg.tags.trigger;
+  h.gh.prs.push(prOfMine('AB#123'));
+  h.server.setTags(123, ['Web', trigger]);
+  let w = await h.b.quickBuild('AB#123', { offered: true });
+  await h.b.drain();
+  let item = h.b.needs()[0];
+  assert.deepEqual([h.b.needs().length, item.options.length, item.recommended, item.options[0]], [1, 2, item.options[0], 'Wait for the review, then address its feedback']);
+  assert.ok(item.question.endsWith('a review is pending. Wait for it and then fix what it finds on octo-org/web#9, or build now?') && item.options[1] === 'Build now: the review request comes off the ticket until the build hands them on again');
+  assert.equal(h.b.answer(item, 'something else'), 'Pick one of the options.', 'only the two option texts are answers');
+  h.b.answer(item, item.options[1]);
+  await h.b.drain();
+  assert.ok(w.claimedAt && h.session.turns.length > 0 && !h.logs.some(l => l.includes('not started')), 'build now: claimed, and built');
+  h.done();
+  h = setup('ado');
+  h.gh.prs.push(prOfMine('AB#123'));
+  h.server.setTags(123, ['Web', trigger]);
+  w = await h.b.quickBuild('AB#123', { offered: true });
+  await h.b.drain();
+  h.b.answer(h.b.needs()[0], h.b.needs()[0].options[0]);
+  await h.b.drain();
+  assert.deepEqual([w.status, w.waitedFor, h.session.turns.length, h.server.tags(123)], ['following', 'pending', 0, ['Web', trigger]], 'wait: it follows, the review request left on');
+  h.done();
+  // With instructions under a running review: asked, and the wait option says they aren't used. Follow PRs off, pending: one option.
+  h = setup('ado');
+  h.gh.prs.push(prOfMine('AB#123'));
+  h.server.setTags(123, ['Web', h.cfg.tags.inProgress]);
+  w = await h.b.quickBuild('AB#123 also rename the store');
+  await h.b.drain();
+  assert.ok(h.b.needs()[0].options[0].endsWith('(your instructions are not used)') && h.b.needs()[0].options[1] === 'Build now, under the running review');
+  h.b.skip(h.b.needs()[0]);
+  assert.ok(h.logs.some(l => l.includes('Quick build of AB#123: cancelled')) && w.status === 'ended' && !h.b.needs().length && !w.claimedAt, 'skip cancels: nothing was claimed');
+  assert.deepEqual(h.server.tags(123), ['Web', h.cfg.tags.inProgress], 'and no tag was written');
+  h.done();
+  h = setup('ado', { cfgOver: { followUp: false } });
+  h.gh.prs.push(prOfMine('AB#123'));
+  h.server.setTags(123, ['Web', trigger]);
+  await h.b.quickBuild('AB#123', { offered: true });
+  await h.b.drain();
+  assert.ok(h.b.needs()[0].options.length === 1 && h.b.needs()[0].question.includes("Follow PRs is off, so Prowl can't wait for it. Build now anyway?"));
+  h.done();
+  // --once can't ask: it follows where it may, and otherwise doesn't start.
+  h = setup('ado');
+  h.gh.prs.push(prOfMine('AB#123'));
+  h.server.setTags(123, ['Web', trigger]);
+  w = await h.b.quickBuild('AB#123', { offered: true, oneShot: true });
+  await h.b.drain();
+  assert.deepEqual([w.status, w.waitedFor, h.b.needs().length], ['following', 'pending', 0], '--once, pending, no instructions: follows');
+  h.done();
+  h = setup('ado');
+  h.gh.prs.push(prOfMine('AB#123'));
+  h.server.setTags(123, ['Web', trigger]);
+  w = await h.b.quickBuild('AB#123 also rename the store', { oneShot: true });
+  await h.b.drain();
+  assert.ok(w.status === 'ended' && h.logs.some(l => l.includes("AB#123: not started: it carries '") && l.includes("a review is pending, and waiting for it can't carry your instructions. Start it again once the review ends")), '--once with instructions: not started');
+  h.done();
+  // Work another build has is not started.
+  h = setup('ado');
+  h.server.setTags(123, ['Web', h.cfg.builder.tags.inProgress]);
+  w = await h.b.quickBuild('AB#123', { offered: true });
+  await h.b.drain();
+  assert.ok(w.status === 'ended' && h.logs.some(l => l.includes('a build has it. If no build is running, take that tag off and start it again')));
+  h.done();
+  // On labels: a PR labelled for review; the label changes while the question waits; another build takes it.
+  h = setup('ado');
+  h.gh.prs.push({ ...prOfMine('Tidy'), title: 'Tidy logging', labels: ['prowl: review'] });
+  w = await h.b.quickBuild('octo-org/web#9');
+  await h.b.drain();
+  item = h.b.needs()[0];
+  assert.ok(w.markers === 'labels' && item.question.startsWith("octo-org/web#9 is labelled 'prowl: review': a review is pending.") && item.options[1].includes('comes off its PRs'));
+  h.gh.prs[0].labels = ['prowl: in review'];
+  h.b.answer(item, item.options[1]);
+  await h.b.drain();
+  item = h.b.needs()[0];
+  assert.ok(item.options[1] === 'Build now, under the running review' && h.session.turns.length === 0, 'build now stood for the pending review: asked again about the running one, no session');
+  h.gh.prs[0].labels = ['prowl: building'];
+  h.b.answer(item, item.options[1]);
+  await h.b.drain();
+  assert.ok(w.status === 'ended' && h.logs.some(l => l.includes("BUILD#1: not started: octo-org/web#9 is labelled 'prowl: building': a build has it. If no build is running, take that label off and start it again")));
+  // A pasted PR a live build of this Prowl already holds is that build's.
+  h.gh.prs[0].labels = [];
+  const held = await h.b.quickBuild('octo-org/web#9');
+  await assert.rejects(h.b.quickBuild('octo-org/web#9'), new RegExp(`the Builder already has octo-org/web#9 \\(${held.key.replace('#', '#')}\\)`));
+  h.done();
+  // Dry run: one line saying what it would do.
+  h = setup('ado');
+  h.app.dryRun = () => true;
+  h.gh.prs.push(prOfMine('AB#123'));
+  for (const [tagList, paste, line] of [[[h.cfg.tags.inProgress], 'AB#123', 'AB#123: would follow octo-org/web#9 until the review ends: AB#123: it carries'], [[trigger], 'AB#123', 'AB#123: would ask whether to wait for the review (dry run)'],
+    [[h.cfg.builder.tags.inProgress], 'AB#123', 'AB#123: would not start (dry run)'], [[], 'AB#123', 'AB#123: would quick-build it (dry run)']]) {
+    h.server.setTags(123, ['Web', ...tagList]);
+    assert.equal(await h.b.quickBuild(paste, { offered: true }), null);
+    assert.ok(h.logs.some(l => l.includes(line)), `dry run: ${line}`);
+  }
+  assert.equal(h.b.history().length, 0, 'a dry run creates no record');
+  h.done();
 }
 
 async function staleHits(assert) {
@@ -1833,12 +1962,12 @@ async function quickBuilds(assert) {
   assert.deepEqual([w.key, w.markers, w.scope.map(p => p.number)], ['AB#123', 'tags', [9]], 'one ticket mentioned: its build, on its tags, scoped to the PR');
   await h.b.drain();
   assert.ok(h.session.turns[0].prompt.startsWith('/prowl:prowl-build finish ') && h.gh.prs.length === 2, 'picked up: a finish session, no new PR');
-  h.gh.prs[1].labels = ['prowl: changes requested', 'In Development']; // an earlier review's outcome, and an old-named label
+  h.gh.prs[1].labels = ['prowl: changes requested']; // an earlier review's outcome
   const q = await h.b.quickBuild('octo-org/api#10');
   assert.deepEqual([q.key, q.markers, q.title], ['BUILD#1', 'labels', 'Dark mode toggle'], 'none mentioned: named, on labels');
   await h.b.drain();
   await h.labels.drain();
-  assert.deepEqual(h.gh.prs[1].labels, ['prowl: review'], 'its PR labelled for review once finished: the outcome label and the old name are off');
+  assert.deepEqual(h.gh.prs[1].labels, ['prowl: review'], 'its PR labelled for review once finished: the outcome label is off');
   assert.ok(h.b.history().every(x => x.quick), 'marked quick');
   h.done();
   // Outside Max parallel builds: a quick build waiting on you holds no slot, and a tagged ticket is still picked up.

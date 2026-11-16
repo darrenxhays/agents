@@ -593,6 +593,7 @@ export function startTui(app, actions, io = {}) {
       : [{ label: FIRST[it.kind] || (it.kind !== 'question' ? 'Retry' : recs.length ? `Use its default: ${recs.join('; ')}` : 'Let the session decide'), answer: '', rec: true }];
     const own = it.options.length || it.kind !== 'question' ? OWN[it.kind] || 'Retry with a note' : 'Your answer';
     const asked = builder.history().find(w => w.uid === it.recordId)?.sessionStarted;
+    if (it.gate) return [...choices.map((c, i) => ({ type: 'choice', i, ...c })), { type: 'submit' }]; // a quick build's question before it starts: only its options are answers
     return [...choices.map((c, i) => ({ type: 'choice', i, ...c })), { type: 'text', field: 'other', label: own },
       ...(asked ? [{ type: 'text', field: 'ask', label: 'Ask about this' }] : []), { type: 'submit' }];
   }
@@ -650,7 +651,8 @@ export function startTui(app, actions, io = {}) {
     const picked = formRows(it).filter(r => r.type === 'choice' && f.picks.has(r.i));
     if (!f.other.trim() && !picked.length) return (f.error = 'Pick an option, write your own answer, or ask about it first.');
     const text = f.other.trim() || picked.map(r => r.answer).join('; ');
-    actions.answer(it, text);
+    const refused = actions.answer(it, text);
+    if (typeof refused === 'string' && refused) return (f.error = refused);
     forms.delete(it.id);
     if (ui.edit?.form) ui.edit = null;
     flash(it.kind === 'plan' ? (text ? 'Sent back with your note.' : 'Plan approved: the session builds it now.')
@@ -1183,6 +1185,9 @@ export function startTui(app, actions, io = {}) {
       sel()[NEEDS] = Math.max(0, Math.min(needs(ui.side).length - 1, sel()[NEEDS] + (k === ']' ? 1 : -1)));
       focusForm(currentItem());
     } else if (k === 'o') openExternal(it.pr || builder.history().find(w => w.uid === it.recordId)?.url || '');
+    else if (k === 's' && it.gate) { // a quick build's question before it started: s cancels it
+      ui.confirm = { text: `Cancel the quick build of ${it.ticket}? Nothing has been claimed or started.`, yes: () => { actions.skip(it); flash('Quick build cancelled.'); } };
+    } else if (k === 't' && it.gate) flash("Nothing to hand back: the quick build hasn't claimed it.");
     else if (k === 's') {
       ui.confirm = ['question', 'repos'].includes(it.kind) ? null
         : { text: `End the work on ${it.ticket} and take its '${app.cfg.builder.tags.inProgress}' tag off?`, yes: () => { actions.skip(it); flash('Ended.'); } };

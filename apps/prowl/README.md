@@ -148,6 +148,21 @@ A quick build starts at once, whether the Builder is on or not, and outside `bui
 
 **Without a ticket, labels are the markers**: every read, write and hold that would use the ticket's tags uses its PRs' GitHub labels instead (see the table under [The Reviewer](#the-reviewer)). The Builder sets **prowl: building** while it works and, with `builder.requestReview` on, **prowl: review** as it hands the PRs on; either write takes the other off, and both outcome labels too, as the PR is being changed or handed on again. It never touches **prowl: in review**: that is a Reviewer's claim. Before its PRs exist, Running shows where it is. A PR labelled **prowl: in review** (a review is running) or **prowl: review** (a review is pending) holds a round, and so does a label write still queued; the outcome labels hold nothing. So the whole loop runs on labels: the PRs open labelled **prowl: review**; you paste them into a quick review; the Builder's round labels them **prowl: building**, then **prowl: review** again; and the quick review's wait re-reviews them.
 
+**Before it starts, a quick build reads the state of its work**: its ticket's tags or, with no ticket, its pasted PRs' labels (a build from text only has nothing to look at). So it never pushes under a running review, or silently cancels a pending review request:
+
+| The work is | And | In Prowl | With `--once` |
+|---|---|---|---|
+| free, or reviewed already (`prowl: approved`, `prowl: changes requested`) | | builds | builds |
+| being built (`prowl: building`, or a live build of yours holds the PR) | | not started | not started |
+| under a running review (`prowl: in review`) | it has open PRs of yours and **Follow PRs** is on | follows only; with instructions of your own, Needs you asks first | follows only; with instructions, not started |
+| under a running review | it has no PR of yours, or **Follow PRs** is off | not started (with instructions and Follow PRs off, Needs you asks whether to build now) | not started |
+| waiting for a review (`prowl: review`) | | Needs you asks: wait, or build now (only "build now" with no PR of yours, or Follow PRs off) | follows only when it has PRs of yours, Follow PRs is on and you gave no instructions; else not started |
+
+- **Follows only**: no session, nothing claimed, tagged or labelled. The build follows those PRs as it would once its own PRs were open, and when the review ends, its feedback starts a feedback round, which claims the ticket (or labels the PRs) then. Your instructions, if any, are not used, and the option says so.
+- **The question** is a Needs-you item holding no tag or label: only its options are answers, `s` cancels the build, and there is nothing to hand back. On your answer the state is read again, as the question may have waited for hours: "Wait" follows only if that is still possible (if the review has ended meanwhile, the build just starts, and the review's feedback is what it fixes first); "Build now" stands only for the state it was asked about, so a pending review that has since started is asked about again.
+- **Not started** ends the record with a line in the Log saying why, and what to do (start it again once the review ends; or, if no build is running, take the building tag or label off).
+- A dry run logs what it would do (`would follow …`, `would ask whether to wait for the review`, `would ask whether to build now`, `would not start`). The old tag and label names count the same as the new.
+
 ### Repos
 
 - **Which repos**: the GitHub links and `repo: owner/name` lines in the ticket and its linked items, and the repos of PRs that mention the key.
@@ -220,7 +235,7 @@ Prowl resumes the session (`claude --resume`) with `repos ready:` and `repos not
 
 ## Ticket keys
 
-On Azure DevOps a ticket's key is `AB#123` (for `--work` and `--follow`, `123` works too); on Jira it is `PROJ-123`, used as typed. PR titles and commit messages carry the key, and `ticket.md` writes linked items in the tracker's own format. **Jira labels** can't contain spaces, so Prowl writes every tag it sets without colons and with dashes for spaces (`prowl: in review` → `prowl-in-review`, `prowl: build` → `prowl-build`; a name of your own like `QA: done` → `QA-done`), while Config shows them as you typed them.
+On Azure DevOps a ticket's key is `AB#123` (for `--work` and `--follow`, `123` works too); on Jira it is `PROJ-123`, used as typed. PR titles and commit messages carry the key, and `ticket.md` writes linked items in the tracker's own format. **Jira labels** can't contain spaces, so Prowl writes every tag it sets without colons and with dashes for spaces (`prowl: in review` → `prowl-in-review`, `prowl: build` → `prowl-build`; a name of your own like `QA: done` → `QA-done`), and Config shows the written form beside each tag (see [Tag names](#tag-names)).
 
 ## Tag names
 

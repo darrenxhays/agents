@@ -427,9 +427,27 @@ export function createBuilder(app, deps) {
     app.me ||= await gh.me(); // --work can run before the first poll
     if (w.source === 'follow') return adoptOrRead(w);
     const pk = pickup();
+    const { found, data } = await lookAtWork(w);
+    if (pk.conflicts && found.prs.some(p => p.mergeable === 'UNKNOWN')) {
+      w._retryAt = Date.now() + cfg().pollSeconds * 1000;
+      const unknown = found.prs.filter(p => p.mergeable === 'UNKNOWN');
+      return log('info', `${w.key}: GitHub is still working out whether ${unknown.map(prName).join(', ')} conflict${unknown.length > 1 ? '' : 's'}; looking again next poll`, `work:${w.uid}`);
+    }
+    if (pk.branches && data && !w.scope) await surveyBranches(w, data, found); // given PRs: those are the scope
+    return continueOrBuild(w, found);
+  }
+
+  /**
+   * The read-only first half of the survey: the open PRs of `w`'s ticket (or the PRs a quick build was given), sorted
+   * into yours to continue (found.prs) and context. Nothing is claimed, labelled or written. `quiet`: no Log lines
+   * (a quick build's look before it starts, which survey() then repeats).
+   */
+  async function lookAtWork(w, quiet = false) {
+    const pk = pickup();
+    const say = quiet ? () => {} : log;
     const found = { prs: [], branches: [], context: [], listed: [] };
     const tracker = byLabels(w) ? null : trackerOf(w);
-    const data = w.ref ? await tracker.workItem(cfg(), w.ref) : null;
+    const data = w.ref && !quiet ? await tracker.workItem(cfg(), w.ref) : null;
     // The ticket's open PRs, or the PRs a quick build was given.
     const open = [];
     if (w.scope) for (const ref of w.scope) { const pr = await gh.prByRef(ref); if (pr.state === 'open') open.push(pr); }
@@ -443,18 +461,18 @@ export function createBuilder(app, deps) {
       const why = prRefusal(facts, p, app.me, b().protectedBranches, { drafts: pk.drafts });
       if (why) {
         found.context.push({ ...entry, why });
-        log('info', `${w.key}: ${why}; it is context only`);
+        say('info', `${w.key}: ${why}; it is context only`);
       } else if (found.prs.some(x => x.repo === entry.repo)) {
         found.context.push({ ...entry, why: 'another of your PRs in the same repo is continued' });
-        log('info', `${w.key}: ${prName(entry)} is context only: Prowl continues one branch per repo`);
+        say('info', `${w.key}: ${prName(entry)} is context only: Prowl continues one branch per repo`);
       } else found.prs.push(entry);
     }
-    if (pk.conflicts && found.prs.some(p => p.mergeable === 'UNKNOWN')) {
-      w._retryAt = Date.now() + cfg().pollSeconds * 1000;
-      const unknown = found.prs.filter(p => p.mergeable === 'UNKNOWN');
-      return log('info', `${w.key}: GitHub is still working out whether ${unknown.map(prName).join(', ')} conflict${unknown.length > 1 ? '' : 's'}; looking again next poll`, `work:${w.uid}`);
-    }
-    if (pk.branches && data && !w.scope) await surveyBranches(w, data, found); // given PRs: those are the scope
+    return { found, data };
+  }
+
+  /** The survey's second half, once the ticket is claimed: what each of your PRs needs fixed, then a fix round, a finish session, or a build. */
+  async function continueOrBuild(w, found) {
+    const pk = pickup();
     w.survey = found;
     if (!found.prs.length && !found.branches.length) {
       if (found.context.length) log('info', `${w.key}: nothing of yours to continue; building it`);
@@ -1415,6 +1433,14 @@ export function createBuilder(app, deps) {
   /** enter in Needs you: answers a question, approves a plan (empty) or sends it back, or retries. */
   side.answer = (item, text) => {
     const w = records().find(r => r.uid === item.recordId);
+    if (w && item.gate) {
+      // Only the two option texts are answers. The state is read again on the answer: the question may have waited for hours.
+      const answer = text === item.gate.now ? 'now' : item.gate.wait && text === item.gate.wait ? 'wait' : '';
+      if (!answer) return 'Pick one of the options.';
+      side.state.needs = side.state.needs.filter(n => n.id !== item.id);
+      Object.assign(w, { gateAnswer: answer, gateAsked: item.gate.state });
+      return next(w, 'gate');
+    }
     side.state.needs = side.state.needs.filter(n => n.id !== item.id);
     if (!w) return save();
     if (item.kind === 'question' || item.kind === 'blocked') {
@@ -1489,6 +1515,13 @@ export function createBuilder(app, deps) {
 
   /** s in Needs you: skips a question (the session uses its default), or ends the work and removes the tag. */
   side.skip = item => {
+    if (item.gate) { // a quick build's question before it started: skipping cancels it, and nothing was claimed
+      const w = records().find(r => r.uid === item.recordId);
+      side.state.needs = side.state.needs.filter(n => n.id !== item.id);
+      if (w) Object.assign(w, { status: 'ended', step: null, endedAt: Date.now(), note: 'cancelled by you' });
+      save();
+      return log('info', `Quick build of ${item.ticket}: cancelled`);
+    }
     if (['question', 'repos'].includes(item.kind)) return side.answer(item, '');
     const w = records().find(r => r.uid === item.recordId);
     if (!w) { side.state.needs = side.state.needs.filter(n => n.id !== item.id); return save(); }
@@ -1498,7 +1531,7 @@ export function createBuilder(app, deps) {
   /** t in Needs you: hands the ticket back with its start tag; not reclaimed until someone re-tags it. */
   side.handBack = async item => {
     const w = records().find(r => r.uid === item.recordId);
-    if (!w) return;
+    if (!w || item.gate) return; // a quick build's question before it started: there is nothing to hand back
     const rev = await trackerOf(w).retag(cfg(), w.ref, tags().owned, b().tags.start);
     side.state.handedBack[w.key] = { rev, at: Date.now() };
     await stopNow(w, `handed back to you with '${b().tags.start}'`, false);
@@ -1563,20 +1596,35 @@ export function createBuilder(app, deps) {
     const asKey = opts.as && ticketKey(opts.as, c.taskBoard);
     if (asKey) ticket = await tracker.lookup(c, asKey);
     if (ticket && current(ticket.key)) throw new Error(`${ticket.key} is already ${current(ticket.key).status === 'following' ? 'being followed' : 'being built'}`);
+    // A pasted PR a live build of this Prowl holds already is that build's.
+    for (const p of scope || []) {
+      const holder = records().find(r => !['done', 'stopped', 'ended'].includes(r.status) && [...(r.prs || []), ...(r.scope || [])].some(x => x.url === p.url));
+      if (holder) throw new Error(`the Builder already has ${prName(p)} (${holder.key})`);
+    }
+    const oneShot = Boolean(opts.oneShot);
+    /** A dry run: the same read and decision as the gate, to word what would happen. */
+    const wouldDo = async (probe, plain) => {
+      const g = await gateLook(probe);
+      const line = g.act === 'build' ? plain : g.act === 'follow' ? `would follow ${g.mine.map(prName).join(', ')} until the review ends: ${g.why}`
+        : g.act === 'ask' ? (g.can ? 'would ask whether to wait for the review' : 'would ask whether to build now') : 'would not start';
+      log('info', `${probe.key}: ${line} (dry run)`);
+      return null;
+    };
     let w;
     if (ticket) {
-      if (app.dryRun()) { log('info', `${ticket.key}: would quick-build it (dry run)`); return null; }
+      if (app.dryRun()) return wouldDo({ key: ticket.key, ref: ticket.ref, tracker: c.taskBoard, markers: 'tags', instructions, scope, oneShot }, 'would quick-build it');
       w = newRecord(ticket, 'quick');
-      Object.assign(w, { quick: true, markers: 'tags', step: 'claim', ticket, instructions, scope });
+      Object.assign(w, { quick: true, markers: 'tags', step: 'gate', ticket, instructions, scope, oneShot });
     } else {
       let name = cleanName((!asKey && opts.as) || opts.name);
       if (!name && c.quickName === 'auto') name = await (deps.autoName || autoName)(c, [text, ...(scope || []).map(p => `${prName(p)}: ${p.title}`)].join('\n')).catch(() => '');
       const n = Math.max(0, ...records().filter(r => /^BUILD#\d+$/.test(r.key)).map(r => Number(r.key.split('#')[1]))) + 1;
       const key = `BUILD#${n}`;
       const title = name || (scope ? `Quick build: ${scope.map(prName).join(', ')}` : instructions.split('\n')[0].slice(0, 60));
-      if (app.dryRun()) { log('info', `${key}: would quick-build "${title}" (dry run)`); return null; }
+      if (app.dryRun()) return wouldDo({ key, ref: null, markers: 'labels', instructions, scope, oneShot }, `would quick-build "${title}"`);
       w = newRecord({ key, title, url: '', ref: null }, 'quick');
-      Object.assign(w, { quick: true, markers: 'labels', instructions, scope, step: scope ? 'adopt' : 'read', claimedAt: Date.now() });
+      // A build from text only has no work to look at: it starts as it always has.
+      Object.assign(w, { quick: true, markers: 'labels', instructions, scope, step: scope ? 'gate' : 'read', claimedAt: Date.now(), oneShot });
     }
     touch(w);
     log('ok', `${w.key}: quick build of ${scope ? scope.map(prName).join(', ') : ticket ? `"${w.title}"` : `"${w.title}", without a ticket`}`);
@@ -1596,6 +1644,70 @@ export function createBuilder(app, deps) {
       saveConfig: () => deps.saveConfig?.(),
     });
   };
+
+  // ---- A quick build reads the state of its work before it starts ----
+
+  /**
+   * What a quick build of `w` would do now: its ticket's tags (or, with no ticket, its pasted PRs' labels) read now,
+   * the PRs of yours it would continue, and the decision. Nothing is claimed, labelled or written.
+   */
+  async function gateLook(w) {
+    let found;
+    if (w.ref) found = rules.workState((await trackerOf(w).readItem(cfg(), w.ref)).tags, cfg());
+    else if (w.scope) {
+      const rows = [];
+      for (const p of w.scope) rows.push({ name: prName(p), labels: await gh.prLabels(p) });
+      found = rules.workState(rows, cfg());
+    }
+    if (!found) return { act: 'build', mine: [] };
+    const why = w.ref ? `${w.key}: ${found.why}` : found.why;
+    const mine = found.state === 'building' ? [] : (await lookAtWork(w, true)).found.prs;
+    const d = rules.gateDecision({ state: found.state, mine: mine.length, followUp: b().followUp, instructions: Boolean(w.instructions), canAsk: !w.oneShot, answer: w.gateAnswer || '', asked: w.gateAsked || '' });
+    return { ...d, state: found.state, why, mine };
+  }
+
+  /**
+   * The first step of a quick build with a ticket or pasted PRs. Under a running review it only follows its PRs and
+   * takes up the feedback when the review ends; with a review pending, Needs you asks whether to wait or build now;
+   * work another build has is not started; after a finished review, or with none, it starts as before.
+   */
+  async function gate(w) {
+    app.me ||= await gh.me();
+    const g = await gateLook(w);
+    const what = w.ref ? 'tag' : 'label';
+    const start = () => { Object.assign(w, { gateAnswer: undefined, gateAsked: undefined }); return next(w, w.ref ? 'claim' : 'adopt'); };
+    if (g.act === 'build') return start();
+    const prs = g.mine.map(prName).join(', ');
+    if (g.act === 'follow') {
+      // As a build's PRs are once they are open, with all feedback so far still to come: the normal follow check holds
+      // while the review is pending or running, and its feedback starts a round, which claims the ticket then.
+      Object.assign(w, { prs: g.mine.map(prRef), prsOpenedAt: Date.now(), adopted: true, waitedFor: g.state, lastActivityAt: 0, claimedAt: null, status: 'following', step: null, gateAnswer: undefined, gateAsked: undefined });
+      touch(w);
+      hoot(`Quick build: waiting for the review of ${w.title}`);
+      return log('ok', `${w.ref ? '' : `${w.key}: `}${g.why}, so nothing is started now: following ${prs}, and the Builder takes up the review's feedback when it ends`);
+    }
+    if (g.act === 'ask') {
+      const wait = `Wait for the review, then address its feedback${w.instructions ? ' (your instructions are not used)' : ''}`;
+      const now = g.state === 'running' ? 'Build now, under the running review' : `Build now: the review request comes off ${w.ref ? 'the ticket' : 'its PRs'} until the build hands them on again`;
+      const question = g.can ? `${g.why}. Wait for it and then fix what it finds on ${prs}, or build now?`
+        : `${g.why}. ${g.off ? "Follow PRs is off, so Prowl can't wait for it. " : ''}Build now anyway?`;
+      log('info', `${w.ref ? '' : `${w.key}: `}${g.why}; asking in Needs you ${g.can ? 'whether to wait for it' : 'whether to build now'}`);
+      const item = raise(w, 'question', question, { options: g.can ? [wait, now] : [now], recommended: g.can ? wait : '' });
+      item.gate = { wait: g.can ? wait : '', now, state: g.state }; // the state it asked about: "build now" stands only for that one
+      Object.assign(w, { gateAnswer: undefined, gateAsked: undefined });
+      touch(w);
+      hoot(`A review of ${w.title} is ${g.state}. Needs you asks ${g.can ? 'whether to wait' : 'whether to build now'}.`);
+      return undefined;
+    }
+    const why = g.why.replace(new RegExp(`^${w.key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}: `), '');
+    const tail = g.state === 'building' ? `. If no build is running, take that ${what} off and start it again`
+      : g.can ? ", and waiting for it can't carry your instructions. Start it again once the review ends"
+        : g.off ? ', and Follow PRs is off, so nothing would take up its feedback. Start it again once the review ends'
+          : ', and it has no PR of yours to follow meanwhile. Start it again once the review ends';
+    Object.assign(w, { status: 'ended', step: null, endedAt: Date.now(), claimedAt: null, note: `not started: ${why}` });
+    touch(w);
+    return log('warn', `${w.key}: not started: ${why}${tail}`);
+  }
 
   async function claimQueued(w) {
     if (app.dryRun()) {
@@ -1627,7 +1739,7 @@ export function createBuilder(app, deps) {
 
   // ---- Driven by the shell ----
 
-  const STEPS = { claim: claimQueued, adopt: survey, finish, read, turn, settle, repos, approve, publish, round, 'push-round': pushRound, ci, 'end-round': endRound,
+  const STEPS = { gate, claim: claimQueued, adopt: survey, finish, read, turn, settle, repos, approve, publish, round, 'push-round': pushRound, ci, 'end-round': endRound,
     retag: w => retagSoon(w, pendingTag(cfg(), w.retagTo)), reclaim }; // a write left pending by an older Prowl goes under today's name
 
   /** Once a second, on or off: tails sessions, settles ended turns, runs due steps. Claims and turns wait while off or paused. */
