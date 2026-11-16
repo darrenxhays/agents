@@ -295,7 +295,9 @@ The tags Prowl reads and writes on tickets carry the same names as its GitHub la
 |---|---|
 | `tab`, `R` / `B` | Switch between the Reviewer and the Builder (once the Builder is on) |
 | `←` `→`, `1`–`5` | Running · History · Needs you · Config · Log, within the side in view. The Reviewer has no Needs you, and its numbers stay the same (Config is `4`) |
-| `↑` `↓` | Select |
+| `↑` `↓` | Select. In the Log, where nothing is selected, scroll a line |
+| `PgUp` `PgDn` | Scroll a page of the text in view: a review's or build's Activity (Running), the details under the list (History), the question and its context (Needs you), a setting's help (Config), the Log, the key list and the Update Notes |
+| `Home` `End` | The first line of that text / back to its latest |
 | `e` | Turn the side in view on or off |
 | `n` | On the Reviewer: a quick review of the PRs and tickets you paste. On the Builder: a quick build of a ticket, PRs, or what you describe. A paste with no box open does the same on the side in view |
 | `1`–`3`, `↑` `↓` `enter`, `esc` | Choose in an offer that pops up for a paste of only tickets; `esc` cancels |
@@ -316,6 +318,8 @@ The tags Prowl reads and writes on tickets carry the same names as its GitHub la
 Two bars run along the bottom, as rows of buttons. The darker top bar is for moving around: switching sides and views, quick reviews, polling, pausing, the side's switch, `/` for every key and `q`. The bottom bar is the screen in sight, named in its side's colour, with its own keys as keycaps in that colour. When a bar doesn't fit on one row, it stacks into a grid: as few rows as fit, the same number of buttons on each, columns lined up. Only a window too short for that drops the least-used navigation buttons, so the bars never take more than a third of the screen. While a message, a question or typing is in progress, it takes the bars over. Each tab's label shows its switch, the sessions running (`▶`) and the items in Needs you (`⚑`). The Reviewer is amber and the Builder violet: its tab and keycaps, with the selected view's tab a lighter shade of the same colour.
 
 **Mouse**: anything you can click lights up under the pointer: a button, a tab, a link, or a row in a list or Config. Click a side's tab or a view's tab to open it, a row to select it, and the selected row again to do what `enter` does. A link opens, and a button in either bar presses its key. The wheel moves the selection, or scrolls. **Drag** across text to select it: it's highlighted, and copied to the clipboard when you let go, as in Claude Code (through `pbcopy` on macOS, `wl-copy` or `xclip` on Linux, and the terminal's own clipboard, OSC 52, which also works over SSH where the terminal allows it). Your terminal's own selection still works with a modifier held: Option in iTerm2, Shift in most other terminals.
+
+**Long text wraps, and scrolls.** Nothing is cut with an ellipsis any more: Activity lines, Log lines, the details under History's list, a Needs-you question with its context and the talk with its session, and a setting's help wrap onto the next lines. Where they need more rows than they have, a grey row says where you are (`lines 12–30 of 84 · PgUp PgDn to scroll`), and `PgUp` `PgDn` `Home` `End` or the wheel over the text scroll it. The Log and a running session's Activity follow their latest lines (`latest 18 of 84 lines · PgUp to scroll back`); once you scroll back they hold still while new lines arrive, and `End` returns to the latest. The wheel scrolls the text under the pointer (anywhere, in the Log); elsewhere it moves the selection.
 
 ## Config
 

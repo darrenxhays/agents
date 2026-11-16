@@ -18,7 +18,7 @@ import { createReviewer } from './reviewer/reviewer.mjs';
 import { MODELS } from './config.mjs';
 import { agentModel, buildPrompt, CHECKS_SLOT, createReview, fenced, fillChecks, fillPrep, finalize, PREP_SLOT, reviewArgs, reviewRoles, rolesWarning } from './reviewer/reviews.mjs';
 import { readActivity, sessionEnded } from './sessions.mjs';
-import { startTui } from './tui.mjs';
+import { holdBack, keys as readKeys, restOf, startTui, timedOut, wrapSegs } from './tui.mjs';
 
 const WIN = process.platform === 'win32';
 const sh = (cwd, cmd, args, env) => spawnSync(cmd, args, { cwd, encoding: 'utf8', env: { ...process.env, ...env } });
@@ -955,6 +955,135 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
     assert.deepEqual(t.calls.find(c => c[0] === 'stop')?.slice(1), ['reviewer', standIn]);
     t.tui.key('q');
     assert.ok(t.text(160, 40).replace(/\s+/g, ' ').includes('1 review being set up: quit now and no session starts for them; a tagged ticket stays tagged for the next launch. Press q again to quit.'), t.text(160, 40));
+  }
+
+  // ---- C-28: the Log scrolls, and long text wraps ----
+  {
+    const text = lines => lines.map(l => l.map(x => x[1]).join(''));
+    assert.deepEqual(text(wrapSegs([['', 'one two three four']], 9)), ['one two ', 'three ', 'four'], 'wraps at spaces');
+    assert.deepEqual(text(wrapSegs([['a', 'label '], ['b', 'one two three four']], 12, 6)), ['label one ', '      two ', '      three ', '      four'], 'a hanging indent on later lines');
+    assert.deepEqual(text(wrapSegs([['', 'x'.repeat(30)]], 10)), ['x'.repeat(10), 'x'.repeat(10), 'x'.repeat(10)], 'a 30-character word at width 10 is cut into three lines');
+    const linked = wrapSegs([['s', 'https://example.invalid/a/long/link', 'https://example.invalid/a/long/link']], 20);
+    assert.deepEqual(linked.map(l => l[0][2]), ['https://example.invalid/a/long/link', 'https://example.invalid/a/long/link'], 'a link split over two lines keeps its URL on both');
+    assert.deepEqual(text(wrapSegs([['', 'aaaa     bbbb']], 6)), ['aaaa', 'bbbb'], 'spaces that would start a wrapped line are dropped');
+    assert.deepEqual(text(wrapSegs([['', 'aa bb cc']], 5, 9)), ['aa bb', 'cc'], 'hang >= w is treated as 0');
+    const hit = () => {};
+    assert.equal(wrapSegs([['s', 'aa bb cc', undefined, hit]], 3).every(l => l.every(x => x[3] === hit)), true, 'each piece keeps its click');
+
+    // The new keys, and an escape sequence cut short.
+    assert.deepEqual([...readKeys('\x1b[5~\x1b[6~\x1bOH\x1bOF\x1b[H\x1b[F')], ['pageup', 'pagedown', 'home', 'end', 'home', 'end']);
+    assert.deepEqual([holdBack('a\x1b[5'), timedOut('\x1b'), timedOut('\x1b[5'), timedOut('\x1b[<0;12'), restOf('~x'), restOf(';7Mx'), restOf('\x1b[A')],
+      [['a', '\x1b[5'], ['\x1b', false], ['', true], ['', true], 'x', 'x', '\x1b[A'], 'a lone ESC is esc; a longer tail is dropped, and its end skipped when it arrives');
+
+    // The Log: a following pane that holds still once scrolled back.
+    const entry = (i, msg = `entry ${i}`) => ({ t: 1_700_000_000_000 + i * 1000, level: 'info', side: 'reviewer', msg });
+    let t = tuiOver();
+    t.app.log.push(...Array.from({ length: 10 }, (_, i) => entry(i + 1)));
+    t.tui.key('5');
+    let f = t.text(80, 30);
+    assert.ok(f.includes('entry 10') && f.includes('entry 1 ') && !/lines? .* of 10/.test(f), 'they all fit: no status row');
+    t.app.log.push(...Array.from({ length: 90 }, (_, i) => entry(i + 11)));
+    f = t.text(80, 30);
+    const body = fr => fr.split('\n').filter(l => /entry \d+|of \d+ lines|lines \d+–\d+ of/.test(l));
+    assert.ok(/^\s+latest (\d+) of 100 lines · PgUp to scroll back\s*$/.test(body(f)[0]) && body(f).at(-1).includes('entry 100') && !f.includes('entry 1 '), f);
+    t.tui.key('pageup');
+    f = t.text(80, 30);
+    const where = body(f)[0];
+    assert.ok(/^\s+lines \d+–\d+ of 100 · End: latest\s*$/.test(where), `the status row is the Log's first: ${where}`);
+    const shown = body(f).slice(1).join('\n');
+    t.app.log.push(...Array.from({ length: 5 }, (_, i) => entry(i + 101)));
+    f = t.text(80, 30);
+    assert.equal(body(f).slice(1).join('\n'), shown, 'new lines arrive and the same lines stay');
+    assert.ok(body(f)[0].includes('of 105 · End: latest'));
+    t.app.log.splice(0, 30); // trimmed from the start: it still holds
+    assert.equal(body(t.text(80, 30)).slice(1).join('\n'), shown);
+    t.tui.key('end');
+    f = t.text(80, 30);
+    assert.ok(/latest \d+ of 75 lines/.test(body(f)[0]) && body(f).at(-1).includes('entry 105'), f);
+    t.tui.key('home');
+    f = t.text(80, 30);
+    assert.ok(body(f)[1].includes('entry 31') && body(f)[0].includes('lines 1–'), 'home: the first line kept');
+    t.tui.key('down');
+    t.tui.key('down');
+    assert.ok(body(t.text(80, 30))[1].includes('entry 33'), '↑ ↓ scroll the Log a line');
+    t.tui.mouse(5, 3, 65);
+    assert.ok(body(t.text(80, 30))[1].includes('entry 36'), 'the wheel anywhere in the Log scrolls it 3 lines');
+    t.tui.key('home');
+    t.text(80, 30);
+    t.app.log.splice(0, 10); // the block at its top trimmed away: the oldest lines kept
+    t.tui.key('down');
+    t.text(80, 30);
+    t.app.log.splice(0, 10);
+    assert.ok(body(t.text(80, 30))[1].includes('entry 51'), body(t.text(80, 30))[1]);
+    assert.ok(t.text(80, 30).includes('PgUp') && t.text(80, 30).includes('scroll'), 'the Log\'s keys are in the bar');
+    assert.ok(tuiOver().text(80, 30).includes('newest at the bottom') || (() => { const e = tuiOver(); e.tui.key('5'); return e.text(80, 30).includes('newest at the bottom'); })());
+    // A long entry shows in full, its later rows under the message.
+    t = tuiOver();
+    const long = Array.from({ length: 50 }, (_, i) => `word${String(i).padStart(2, '0')}`).join(' ');
+    t.app.log.push(entry(1, long));
+    t.tui.key('5');
+    const rowsOf = t.text(80, 30).split('\n').filter(l => l.includes('word'));
+    assert.ok(rowsOf.length >= 4 && rowsOf.join(' ').replace(/\s+/g, ' ').includes(long) && rowsOf.slice(1).every(l => /^ {15}word/.test(l)) && !rowsOf.join('').includes('…'), rowsOf.join('\n'));
+
+    // Running: the Activity is a following pane; PgUp scrolls it while ↑ ↓ still move the selection.
+    const acts = Array.from({ length: 60 }, (_, i) => ({ text: `Read step ${i + 1} ${i === 59 ? 'x'.repeat(150) : ''}` }));
+    const live = [1, 2].map(n => ({ id: `AB4${n}-1`, ticket: `AB#4${n}`, title: 'Thing', prs: [prOf(1)], status: 'running', startedAt: Date.now(), reviewNo: 1, _activity: n === 1 ? acts : [] }));
+    t = tuiOver({ reviewer: { running: () => live } });
+    f = t.text(100, 30);
+    assert.ok(/latest \d+ of 6\d lines · PgUp to scroll back/.test(f) && f.includes('x'.repeat(90)) && !f.includes('Read step 1 '), f);
+    t.tui.key('pageup');
+    f = t.text(100, 30);
+    assert.ok(/lines \d+–\d+ of 6\d · End: latest/.test(f) && !f.includes('Read step 60'));
+    t.tui.key('down');
+    assert.equal(t.tui.ui.sel.reviewer[0], 1, '↓ moves the selection');
+
+    // History: the details wrap in a pane of their own.
+    const done = { id: 'AB42-1', ticket: 'AB#42', title: 'T', status: 'failed', error: `it broke ${'badly '.repeat(60)}end`, endedAt: 5, startedAt: 1, reviewNo: 1, prs: [prOf(1)], contextPrs: [], approved: {}, reportPath: '/nowhere.md', ticketUrl: 'https://example.invalid/t' };
+    t = tuiOver({ reviewer: { finished: () => [done], state: { runs: [done] } } });
+    t.tui.key('2');
+    f = t.text(80, 30);
+    assert.ok(f.includes('PgUp PgDn to scroll') || f.replace(/\s+/g, ' ').includes('badly end'), 'a long status is not cut');
+    assert.ok(f.split('\n').some(l => /^ {10}badly/.test(l)), `wrapped under the value column:\n${f}`);
+
+    // Needs you: the part above the form is one pane, nothing in it cut; a long choice wraps under itself.
+    const cfg = loadConfig();
+    const item = { id: 'n1', recordId: 'u1', ticket: 'AB#9', kind: 'question', question: `Which way ${'really '.repeat(30)}now?`, context: [`ctx ${'c '.repeat(80)}end-of-context`], blocked: '', searched: `looked ${'s '.repeat(60)}end-of-search`,
+      options: [`First ${'long '.repeat(30)}label-end`, 'Second'], recommended: 0, createdAt: 1, thread: [] };
+    t = tuiOver({ builder: { needs: () => [item], history: () => [] }, cfgOver: { builder: { ...cfg.builder, enabled: true } } });
+    t.tui.key('B');
+    t.tui.key('3');
+    f = t.text(100, 40);
+    const flat = f.replace(/\s+/g, ' ');
+    assert.ok(flat.includes('end-of-context') && flat.includes('end-of-search') && flat.includes('label-end') && flat.includes('now?') && f.includes('Submit'), f);
+    t.app.log.length = 0;
+    const small = t.text(100, 22);
+    assert.ok(small.includes('PgUp PgDn to scroll') && small.includes('Submit'), `the pane scrolls and the form stays whole:\n${small}`);
+    item.thread.push({ from: 'you', text: 'Why?' }, { from: 'session', text: 'Because of the final-reply-word.' });
+    assert.ok(t.text(100, 22).includes('final-reply-word'), 'a reply jumps the pane to its end');
+
+    // Config: the selected setting's help wraps in a pane under the cards.
+    t = tuiOver();
+    t.tui.key('4');
+    f = t.text(60, 30);
+    const helpRows = f.split('\n').filter(l => /Projects|folder|clone/i.test(l));
+    assert.ok(!f.includes('…') || helpRows.length > 0);
+    // The key list and the Update Notes take the page keys.
+    t.tui.key('/');
+    t.text(80, 20);
+    t.tui.key('pagedown');
+    assert.ok(t.tui.ui.keys && t.tui.ui.keys.scroll > 1, 'PgDn scrolls the key list a page');
+    t.tui.key('home');
+    assert.equal(t.tui.ui.keys.scroll, 0);
+    t = tuiOver();
+    t.app.notes = { version: '9.9.9', versions: [{ version: '9.9.9', items: Array.from({ length: 60 }, (_, i) => `Note ${i}`) }], files: [] };
+    t.tui.ui.notes = { scroll: 0 };
+    t.text(80, 20);
+    t.tui.key('pagedown');
+    assert.ok(t.tui.ui.notes && t.tui.ui.notes.scroll > 1, "PgDn scrolls the Update Notes and doesn't close them");
+    t.tui.key('x');
+    assert.equal(t.tui.ui.notes, null);
+    // ESC [ 5 never presses 5: the pane keys are read only as whole sequences.
+    assert.deepEqual([...readKeys(holdBack('\x1b[5')[0])], []);
   }
 
   fs.rmSync(tmp, { recursive: true, force: true });

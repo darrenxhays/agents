@@ -119,11 +119,43 @@ function hitAt(row, x) {
 function hovered(row, x) {
   let at = 0;
   const seg = row.find(s => (at += clean(s[1]).length) > x);
-  const keep = segs => Object.assign(segs, { bg: row.bg, hit: row.hit, footer: row.footer });
+  const keep = segs => Object.assign(segs, { bg: row.bg, hit: row.hit, footer: row.footer, pane: row.pane, main: row.main });
   if (seg?.[3]) return keep(row.map(s => (s[3] === seg[3] ? [s[4] || `${s[0]}${HOVER.seg}`, ...s.slice(1)] : s)));
   if (seg?.[2]) return keep(row.map(s => (s === seg ? [HOVER.link, ...s.slice(1)] : s)));
   if (row.hit) return Object.assign(keep(row.map(s => [`${HOVER.row}${s[0]}`, ...s.slice(1)])), { bg: HOVER.row });
   return row;
+}
+
+/**
+ * A row of segments wrapped to `w` columns at spaces, every line after the first indented by `hang`. A word longer
+ * than a line is cut across lines, spaces that would start a wrapped line are dropped, and each wrapped piece keeps
+ * its segment's style, link and click.
+ */
+export function wrapSegs(segs, w, hang = 0) {
+  if (hang >= w) hang = 0;
+  const lines = [[]];
+  let used = 0;
+  let fresh = false; // a wrapped line with nothing on it yet
+  const newLine = () => { lines.push(hang ? [['', ' '.repeat(hang)]] : []); used = hang; fresh = true; };
+  const put = (seg, text) => {
+    const last = lines.at(-1).at(-1);
+    if (last?.src === seg) last[1] += text;
+    else lines.at(-1).push(Object.assign([seg[0], text, ...seg.slice(2)], { src: seg }));
+    used += text.length; fresh = false;
+  };
+  for (const seg of segs) {
+    for (let t of clean(seg[1]).match(/\s+|\S+/g) || []) {
+      if (/^\s/.test(t)) { if (fresh) continue; if (used + t.length > w) newLine(); else put(seg, t); continue; }
+      while (t) {
+        if (used + t.length <= w) { put(seg, t); break; }
+        if (!fresh && used > 0) { newLine(); continue; }
+        const n = Math.max(1, w - used);
+        put(seg, t.slice(0, n)); t = t.slice(n);
+        if (t) newLine();
+      }
+    }
+  }
+  return lines;
 }
 
 /** List rows around the selection, so the selected row always stays visible. */
@@ -143,6 +175,15 @@ export function holdBack(data) {
   return [data.slice(0, at), data.slice(at)];
 }
 
+/**
+ * What to read when a held-back tail has waited its 50 ms with nothing following: [data, skip]. A lone ESC is the esc
+ * key. Anything longer is an unfinished key or mouse sequence: it is dropped (ESC [ 5 read as keys would press 5 and
+ * switch views), and `skip` says to skip the rest of it when it arrives (restOf).
+ */
+export const timedOut = held => (held === '\x1b' ? [held, false] : ['', true]);
+/** `chunk` without the end of a sequence whose start was dropped (timedOut). */
+export const restOf = chunk => chunk.slice(/^[<0-9;]*[A-Za-z~]/.exec(chunk)?.[0].length || 0);
+
 /** The keys, pastes and mouse events in `data`, as onKey, onPaste and onMouse take them. */
 export function* keys(data) {
   const paste = /\x1b\[200~([\s\S]*?)\x1b\[201~/g; // bracketed paste: the text pasted, in one piece
@@ -159,6 +200,7 @@ function* keyPresses(data) {
   const NAMED = {
     '\x1b[A': 'up', '\x1b[B': 'down', '\x1b[C': 'right', '\x1b[D': 'left', '\x1bOA': 'up', '\x1bOB': 'down',
     '\x1bOC': 'right', '\x1bOD': 'left', '\x1b[H': 'home', '\x1b[F': 'end', '\x1b[1~': 'home', '\x1b[4~': 'end', '\x1b[3~': 'delete',
+    '\x1b[5~': 'pageup', '\x1b[6~': 'pagedown', '\x1bOH': 'home', '\x1bOF': 'end',
   };
   for (let i = 0; i < data.length;) {
     const mouse = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])/.exec(data.slice(i)); // SGR mouse: button;column;row, M pressed, m released
@@ -202,6 +244,9 @@ export function startTui(app, actions, io = {}) {
     drag: null, // a mouse selection while the left button is down: { x0, y0, x1, y1, moved }
     offers: app.offers || (app.offers = []), // offers waiting to pop up, oldest first; the first shows when nothing else is open
     offerAt: 0, // the choice under the cursor in the offer showing
+    panes: new Map(), // the scrolling panes, by id: { at, ops, top, room, total, follow, focus, painted, owner }
+    front: null, // the pane the scroll keys go to, as the last frame painted it: { id, arrows, sig }
+    bodyH: 0, // the rows the view had in the last frame
   };
   const acc = (name = ui.side) => ACCENT[name];
   const cursor = on => (on ? [acc().fg, ' ❯ '] : ['', '   ']);
@@ -298,15 +343,86 @@ export function startTui(app, actions, io = {}) {
     return segs;
   }
 
-  function activity(rows, r, H) {
-    const acts = (r._activity || []).slice(-Math.max(1, H - rows.length));
-    if (!acts.length) rows.push([[ST.grey, '  starting…']]);
-    for (const a of acts) {
-      if (a.error) rows.push([[ST.red, `  ${a.text}`]]);
-      else if (a.sub) rows.push([[ST.grey, '    ↳ '], [ST.grey, a.text]]);
-      else rows.push([[ST.cyan, '  • '], [a.said ? '' : ST.dim, a.text]]);
+  // ---- Panes: a block of text given fewer rows than it needs, wrapped and scrolled the same way everywhere ----
+
+  const keyIds = new WeakMap(); // a stable key for an entry object (a Log line, an Activity line)
+  let nextKey = 0;
+  const keyOf = o => { if (!keyIds.has(o)) keyIds.set(o, ++nextKey); return keyIds.get(o); };
+  const wrapCache = new WeakMap(); // src -> { w, hang, lines }: an entry that never changes is wrapped once per width
+  const linesOf = (b, w) => {
+    if (b.wrap === false) return [b.segs];
+    const hit = b.src && wrapCache.get(b.src);
+    if (hit && hit.w === w && hit.hang === (b.hang || 0)) return hit.lines;
+    const lines = wrapSegs(b.segs, w, b.hang || 0);
+    if (b.src) wrapCache.set(b.src, { w, hang: b.hang || 0, lines });
+    return lines;
+  };
+  /** Where a pane is, for its status row. */
+  const whereText = st => (st.follow && st.at === null ? `latest ${st.room} of ${st.total} lines · PgUp to scroll back`
+    : `lines ${st.top + 1}–${Math.min(st.total, st.top + st.room)} of ${st.total} · ${st.follow ? 'End: latest' : 'PgUp PgDn to scroll'}`);
+  /** The view (and what is open over it) a frame was painted for: a pane painted for another is not scrolled. */
+  const frontSig = () => `${ui.side}:${view()}:${ui.notes ? 'notes' : ui.keys ? 'keys' : offerOpen() ? 'offer' : ''}`;
+
+  /**
+   * `blocks` ([{ key, segs, hang, wrap, src, hit }]) in at most `h` rows of `w` columns. `follow`: starts at its latest
+   * lines and stays there as lines arrive, until scrolled back. Its place is remembered as the block at its top and
+   * the line within it, so new lines, lines trimmed from the start and a resize don't move it. `focus` (a block key):
+   * when it changes, the pane scrolls just enough to show that block (`reveal`: at once). `status`: a grey row saying
+   * where it is, when the lines don't all fit (`statusTop`: as its first row). `owner`: a different one starts the
+   * pane afresh. `front`: the scroll keys go to this pane (`arrows`: ↑ ↓ too).
+   */
+  function pane(id, blocks, w, h, { follow = false, focus, reveal = false, status = true, statusTop = false, main = false, owner, front = false, arrows = false } = {}) {
+    let st = ui.panes.get(id);
+    if (!st || st.owner !== owner) { st = { at: null, ops: [], top: 0, room: h, total: 0, follow, focus: undefined, painted: false, owner }; ui.panes.set(id, st); }
+    if (front) ui.front = { id, arrows, sig: frontSig() };
+    const lines = [];
+    for (const b of blocks) linesOf(b, w).forEach((row, l) => lines.push({ row, key: b.key, l, hit: b.hit }));
+    const total = lines.length;
+    const where = status && total > h && h > 1;
+    const room = Math.max(1, where ? h - 1 : h);
+    const last = Math.max(0, total - room);
+    const clamp = n => Math.max(0, Math.min(last, n));
+    let top = follow ? last : 0;
+    if (st.at) {
+      const first = lines.findIndex(x => x.key === st.at.key);
+      top = first < 0 ? 0 : first + Math.min(st.at.l, lines.filter(x => x.key === st.at.key).length - 1);
     }
-    return rows;
+    top = clamp(top);
+    const page = Math.max(1, room - 1);
+    for (const op of st.ops) top = clamp(top + ({ up: -1, down: 1, pageup: -page, pagedown: page, home: -Infinity, end: Infinity }[op] ?? op));
+    st.ops = [];
+    if (focus !== undefined && ((focus !== st.focus && st.painted) || reveal)) {
+      const first = lines.findIndex(x => x.key === focus);
+      if (first >= 0) {
+        const end = first + lines.filter(x => x.key === focus).length - 1;
+        if (first < top) top = first;
+        else if (end >= top + room) top = clamp(Math.min(first, end - room + 1));
+      }
+    }
+    Object.assign(st, { at: (follow ? top >= last : top === 0) ? null : { key: lines[top].key, l: top - lines.findIndex(x => x.key === lines[top].key) },
+      top, room, total, follow, focus, painted: true });
+    const tagged = row => Object.assign(row, { pane: id, main: Boolean(main) });
+    const out = lines.slice(top, top + room).map(x => (x.hit ? Object.assign(tagged(x.row), { hit: x.hit }) : tagged(x.row)));
+    if (where) out[statusTop ? 'unshift' : 'push'](tagged([[ST.grey, `  ${whereText(st)}`]]));
+    return out;
+  }
+  /** Queues a scroll on a pane, applied at its next paint: a scroll key's name, or a number of lines. */
+  const scrollPane = (id, k) => { ui.panes.get(id)?.ops.push(k); };
+  const SCROLL_KEYS = ['pageup', 'pagedown', 'home', 'end'];
+
+  /** A list above, a rule, and a pane of details below: the list keeps up to half the view, the details get what they need of the rest. */
+  function withDetails(count, listRows, blocks, W, H, id, owner) {
+    const need = blocks.reduce((n, b) => n + linesOf(b, W).length, 0);
+    const avail = Math.max(1, H - 1 - Math.min(count, Math.max(1, Math.floor(H / 2))));
+    const h = Math.max(Math.min(3, avail), Math.min(need, avail));
+    return [...listRows(Math.max(1, H - 1 - h)), rule(W), ...pane(id, blocks, W, h, { owner, front: true })];
+  }
+
+  function activity(rows, r, H, W) {
+    const blocks = (r._activity || []).map(a => ({ key: keyOf(a), src: a, ...(a.error ? { segs: [[ST.red, `  ${a.text}`]], hang: 2 }
+      : a.sub ? { segs: [[ST.grey, '    ↳ '], [ST.grey, a.text]], hang: 6 } : { segs: [[ST.cyan, '  • '], [a.said ? '' : ST.dim, a.text]], hang: 4 }) }));
+    if (!blocks.length) return [...rows, [[ST.grey, '  starting…']]];
+    return [...rows, ...pane('activity', blocks, W, Math.max(1, H - rows.length), { follow: true, owner: r.id || r.uid || r.key, front: true })];
   }
 
   function runningView(W, H) {
@@ -346,7 +462,7 @@ export function startTui(app, actions, io = {}) {
       return rows;
     }
     rows.push(rule(W), [[ST.bold, ` Activity · ${r.ticket}  `], [ST.grey, prsOf(r).map(prName).join('  ')]]);
-    return activity(rows, r, H);
+    return activity(rows, r, H, W);
   }
 
   // The Reviewer's Running list: its reviews, those being set up, then the quick reviews waiting on their PRs.
@@ -450,7 +566,7 @@ export function startTui(app, actions, io = {}) {
     });
     const w = items[at];
     rows.push(rule(W), [[ST.bold, ` Activity · ${w.key}  `], [ST.grey, (w.turnKind === 'round' ? w.round?.prs || [] : w.repos || []).map(r => r.repo.split('/')[1]).join('  ')]]);
-    return activity(rows, w, H);
+    return activity(rows, w, H, W);
   }
 
   function verdict(r) {
@@ -520,7 +636,7 @@ export function startTui(app, actions, io = {}) {
     const at = clampSel(HISTORY, runs.length);
     const it = runs[at];
     const detail = ui.side === 'builder' ? workDetails(it) : it.pr ? fixDetails(it) : details(it);
-    const rows = windowed(runs, at, Math.max(1, H - detail.length - 1)).map(({ item: r, i }) => {
+    const list = h => windowed(runs, at, h).map(({ item: r, i }) => {
       if (ui.side === 'builder') {
         const prs = r.prs?.length || 0;
         const head = [cursor(i === at), [ST.grey, `${stamp(r.updatedAt || r.createdAt)}  `], [ST.bold, r.key.padEnd(11)], [workStatus(r)[0], workStatus(r)[1].padEnd(18)],
@@ -545,7 +661,8 @@ export function startTui(app, actions, io = {}) {
       ];
       return onClick([...head, ['', trunc(r.title, W - width(head))]], pick(HISTORY, i));
     });
-    return [...rows, rule(W), ...detail];
+    // The details wrap under their value column, in a pane of their own: a new selection starts at its top.
+    return withDetails(runs.length, list, detail.map((segs, k) => ({ key: k, segs, hang: 10 })), W, H, 'details', `${ui.side}:${it.id || it.uid || at}`);
   }
 
   const BOARD_HELP = {
@@ -678,12 +795,13 @@ export function startTui(app, actions, io = {}) {
     if (form[f.cursor]?.type === 'text' && !(ui.edit?.form && ui.edit.item === it.id)) f.cursor = 0; // back from elsewhere: not mid-typing
     const lab = t => [ST.grey, `  ${t.padEnd(9)}`];
     const asking = builder.history().find(w => w.uid === it.recordId)?.discussion;
-    const fixed = [
+    // Above the form, one pane: the ticket, the question with its context, and the talk with its session. Nothing is cut.
+    const above = [
       [lab('Ticket'), [ST.bold, it.ticket], ...(it.pr ? [['', '  '], [ST.link, it.pr, it.pr]] : [])],
-      ...wrap(clean(it.question), W - 12, 4).map((l, i) => [lab(i ? '' : ['question', 'plan', 'repos', 'blocked'].includes(it.kind) ? 'Question' : 'Stopped'), [ST.bold, l]]),
-      ...it.context.map(c => [lab(''), [ST.grey, trunc(c, W - 12)]]),
-      ...(it.blocked ? [[lab('Blocked'), [ST.grey, trunc(it.blocked, W - 12)]]] : []),
-      ...(it.searched ? [[lab('Searched'), [ST.grey, trunc(it.searched, W - 12)]]] : []),
+      [lab(['question', 'plan', 'repos', 'blocked'].includes(it.kind) ? 'Question' : 'Stopped'), [ST.bold, it.question]],
+      ...it.context.map(c => [lab(''), [ST.grey, c]]),
+      ...(it.blocked ? [[lab('Blocked'), [ST.grey, it.blocked]]] : []),
+      ...(it.searched ? [[lab('Searched'), [ST.grey, it.searched]]] : []),
     ];
     // The form: a radio button for each choice (a checkbox where several may be picked), the rows you type in, Submit.
     const box = on => (it.multiple ? (on ? '[x]' : '[ ]') : (on ? '(•)' : '( )'));
@@ -694,8 +812,10 @@ export function startTui(app, actions, io = {}) {
       }
       if (r.type === 'choice') {
         const on = f.picks.has(r.i);
-        return onClick([lead, [on ? `${ST.bold}${acc().fg}` : ST.grey, box(on)], [ST.grey, it.options.length ? ` ${r.i + 1}. ` : ' '],
-          [on ? ST.bold : '', trunc(r.label, W - 26)], ...(r.rec ? [[ST.green, '  Recommended']] : [])], () => { f.cursor = idx; pickChoice(it, f, r.i); focusForm(it); });
+        // A long label wraps under itself, every row of it picking the choice.
+        const head = [lead, [on ? `${ST.bold}${acc().fg}` : ST.grey, box(on)], [ST.grey, it.options.length ? ` ${r.i + 1}. ` : ' ']];
+        return wrapSegs([...head, [on ? ST.bold : '', r.label], ...(r.rec ? [[ST.green, '  Recommended']] : [])], W - 1, width(head))
+          .map(row => onClick(row, () => { f.cursor = idx; pickChoice(it, f, r.i); focusForm(it); }));
       }
       const typing = ui.edit?.form && ui.edit.item === it.id && ui.edit.field === r.field;
       const filled = f[r.field].trim();
@@ -703,19 +823,24 @@ export function startTui(app, actions, io = {}) {
       const room = W - width(head) - 2;
       return onClick([...head, ...(typing ? editSegs(room) : filled ? [['', trunc(f[r.field], room)]] : [[ST.grey, HINT[r.field]]])], () => { f.cursor = idx; f.error = ''; focusForm(it); });
     });
-    const form2 = [[], ...(it.multiple ? [[lab(''), [ST.grey, 'Pick any that apply.']]] : []), ...formLines, ...(f.error ? [[['', '    '], [ST.red, trunc(f.error, W - 6)]]] : [])];
-    // What you've asked its session about it, and its replies: the latest that fit, above the form.
-    const said = (it.thread || []).flatMap(m => [[], ...wrap(clean(m.text), W - 12, 12).map((l, i) => [
-      i ? lab('') : m.from === 'you' ? [`${ST.bold}${acc().fg}`, '  You      '] : [`${ST.bold}${ST.cyan}`, '  Session  '], ['', l]])]);
-    if (asking?.itemId === it.id) said.push([], [lab(''), [ST.cyan, `${spin()} its session is thinking`], [ST.grey, asking._activity?.length ? `: ${trunc(asking._activity.at(-1).text, W - 40)}` : '…']]);
-    const room = Math.max(2, H - 3 - fixed.length - form2.length);
-    const thread = said.length > room ? [[lab(''), [ST.grey, `↑ ${said.length - room + 1} earlier lines`]], ...said.slice(-(room - 1))] : said;
-    const detail = [...fixed, ...thread, ...form2];
-    const rows = windowed(items, at, Math.max(1, H - detail.length - 1)).map(({ item: x, i }) => {
+    const form2 = [[], ...(it.multiple ? [[lab(''), [ST.grey, 'Pick any that apply.']]] : []), ...formLines.flatMap(r => (Array.isArray(r[0]?.[0]) ? r : [r])), ...(f.error ? [[['', '    '], [ST.red, trunc(f.error, W - 6)]]] : [])];
+    // What you've asked its session about it, and its replies.
+    const talk = (it.thread || []).flatMap(m => [[], [m.from === 'you' ? [`${ST.bold}${acc().fg}`, '  You      '] : [`${ST.bold}${ST.cyan}`, '  Session  '], ['', m.text]]]);
+    if (asking?.itemId === it.id) talk.push([], [lab(''), [ST.cyan, `${spin()} its session is thinking`], [ST.grey, asking._activity?.length ? `: ${asking._activity.at(-1).text}` : '…']]);
+    const blocks = [...above, ...talk].map((segs, k) => ({ key: k, segs, hang: 11 }));
+    // The form stays whole below the pane; a view too short for it plus two pane rows cuts the form from its end.
+    const need = blocks.reduce((n, b) => n + linesOf(b, W).length, 0);
+    const paneH = Math.max(2, Math.min(need, H - 2 - form2.length));
+    const before = ui.panes.get('needs');
+    const said = (it.thread || []).length;
+    if (before?.owner === it.id && before.talk !== undefined && said > before.talk) scrollPane('needs', 'end'); // a reply came: show it
+    const top = pane('needs', blocks, W, paneH, { owner: it.id, front: true });
+    ui.panes.get('needs').talk = said;
+    const rows = windowed(items, at, Math.max(1, H - 1 - top.length - form2.length)).map(({ item: x, i }) => {
       const head = [cursor(i === at), [ST.grey, `${stamp(x.createdAt)}  `], [ST.bold, x.ticket.padEnd(11)], [['question', 'plan', 'repos'].includes(x.kind) ? ST.yellow : ST.red, x.kind.padEnd(10)]];
       return onClick([...head, ['', trunc(x.question, W - width(head))]], () => { sel()[NEEDS] = i; });
     });
-    return [...rows, rule(W), ...detail];
+    return [...rows, rule(W), ...top, ...form2];
   }
 
   /** The text being typed, with its cursor, scrolled to keep the cursor within `room` columns. */
@@ -731,6 +856,11 @@ export function startTui(app, actions, io = {}) {
     const fields = configRows();
     const at = clampSel(CONFIG, fields.length);
     const rows = [[[ST.grey, '  Saved to '], [ST.link, CONFIG_PATH, pathToFileURL(CONFIG_PATH).href], [ST.grey, ' on every change. The next poll uses it.']], []];
+    // Under the cards, a pane: the selected setting's help (or a failed edit's error), wrapped, then the trigger's variants.
+    const variants = Object.entries(reviewer.tagVariants || {}).map(([p, v]) => `${p}: ${v.join(', ') || 'none yet'}`).join('  ·  ');
+    const help = [{ key: 'help', hang: 2, segs: ui.edit?.error ? [[ST.red, `  ${ui.edit.error}`]] : [[sectionColor(fields[at].section), `  ${fields[at].section} ▏ `], [ST.grey, fields[at].help]] },
+      ...(variants ? [{ key: 'variants', hang: 2, segs: [[ST.grey, `  ${JIRA(app.cfg) ? 'Labels' : 'Tags'} treated as the trigger: `], ['', variants]] }] : [])];
+    const helpH = Math.min(help.reduce((n, b) => n + linesOf(b, W).length, 0), Math.max(3, Math.floor(H / 3)));
     // Each section is a card, in its own colour: a rounded box with its heading in the top edge, a blank row between
     // cards. The window counts the edges and gaps as rows.
     const lines = fields.flatMap((f, i) => [
@@ -739,7 +869,7 @@ export function startTui(app, actions, io = {}) {
       ...(f.section !== fields[i + 1]?.section ? [{ bottom: f.section }] : []),
     ]);
     const inner = W - 5; // between '  │ ' and '│'
-    for (const { item: { f, i, top, bottom, gap } } of windowed(lines, lines.findIndex(l => l.i === at), Math.max(1, H - 6))) {
+    for (const { item: { f, i, top, bottom, gap } } of windowed(lines, lines.findIndex(l => l.i === at), Math.max(1, H - 3 - helpH))) {
       if (gap) { rows.push([]); continue; }
       if (top || bottom) {
         const c = sectionColor(top || bottom);
@@ -753,9 +883,7 @@ export function startTui(app, actions, io = {}) {
       const body = [on ? [acc().fg, '❯ '] : ['', '  '], [f.addBoard ? ST.green : on ? ST.bold : ST.grey, f.label.padEnd(LABEL_W)], ...value];
       rows.push(onClick([[c, '  │ '], ...clip(body, inner - 1), [c, '│']], pick(CONFIG, i)));
     }
-    rows.push([], ui.edit?.error ? [[ST.red, `  ${ui.edit.error}`]] : [[sectionColor(fields[at].section), `  ${fields[at].section} ▏ `], [ST.grey, fields[at].help]]);
-    const variants = Object.entries(reviewer.tagVariants || {}).map(([p, v]) => `${p}: ${v.join(', ') || 'none yet'}`).join('  ·  ');
-    if (variants) rows.push([[ST.grey, `  ${JIRA(app.cfg) ? 'Labels' : 'Tags'} treated as the trigger: `], ['', variants]]);
+    rows.push([], ...pane('help', help, W, helpH, { owner: `${at}:${ui.edit?.error || ''}`, front: true }));
     return rows;
   }
 
@@ -773,16 +901,19 @@ export function startTui(app, actions, io = {}) {
     return rows.slice(ui.notes.scroll);
   }
 
-  const logView = (W, H) => app.log.filter(l => l.side === ui.side || l.side === 'prowl').slice(-H)
-    .map(l => [[ST.grey, `${time(l.t)} `], [LEVEL[l.level], `${l.level.padEnd(5)} `], ['', l.msg]]);
+  const logLines = () => app.log.filter(l => l.side === ui.side || l.side === 'prowl');
+  /** The Log: one following pane over the whole view, each entry wrapped under its message, its status row on top. */
+  const logView = (W, H) => pane(`log:${ui.side}`, logLines().map(l => ({ key: keyOf(l), src: l, hang: 15, segs: [[ST.grey, `${time(l.t)} `], [LEVEL[l.level], `${l.level.padEnd(5)} `], ['', l.msg]] })),
+    W, H, { follow: true, statusTop: true, main: true, front: true, arrows: true });
 
   // Keys, as [key, short label (the bar), what it does (the full list)]. Each view's, most useful first, then the rest.
   const CONFIG_KEYS = [['enter', 'edit', 'Edit the setting, flip its switch, or open its file'], ['a', 'add board', 'Add a board to watch'], ['d', 'delete board', 'Delete the selected board']];
+  const LOG_KEYS = [['PgUp PgDn', 'scroll', 'Scroll the Log a page'], ['↑ ↓', 'line', 'Scroll the Log a line'], ['Home End', 'first / latest', 'The first line kept / back to the latest']];
   const VIEW_KEYS = {
     reviewer: [
       [['s', 'stop', "Stop the selected review (its in-progress tag comes off, so re-tag the ticket to run it again), or stop a quick review waiting on its PRs (◷; its labels stay as they are)"], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser']],
       [['enter', 'report', "Open the review's report"], ['v', 'review again', "Review the selected review's PRs again, as a quick review under the same ticket or name (asks first; no tags change)"], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser']],
-      [], CONFIG_KEYS, [],
+      [], CONFIG_KEYS, LOG_KEYS,
     ],
     builder: [
       [['enter', 'brief', "Open the ticket's brief folder"], ['s', 'stop', 'Stop the selected build before its next push, PR, tag or turn'], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser']],
@@ -792,7 +923,7 @@ export function startTui(app, actions, io = {}) {
         ['enter', 'submit', 'Submit what you picked, your own answer, or your question for its session: one at a time'],
         ['[ ]', 'item', 'The previous or next item in Needs you'], ['s', 'skip', 'Skip the question (the session uses its default), or end the work'],
         ['t', 'hand back', 'Hand the ticket back with its start tag; Prowl leaves it until someone re-tags it'], ['o', 'open', 'Open the PR or the ticket in the browser']],
-      CONFIG_KEYS, [],
+      CONFIG_KEYS, LOG_KEYS,
     ],
   };
   const NEW_REVIEW = ['n', 'quick review', 'On the Reviewer: a quick review of the PRs or tickets you paste, reviewed together as one set. Pasting there opens it too'];
@@ -800,21 +931,22 @@ export function startTui(app, actions, io = {}) {
   const KEY_GROUPS = [
     ['Moving around', [['tab', 'side', 'Switch between the Reviewer and the Builder; R and B go straight to one'],
       ['←→', 'views', 'The previous or next view; 1–5 go straight to Running, History, Needs you, Config or Log'],
-      ['↑↓', 'select', 'Move the selection; scroll this list and the Update Notes']]],
+      ['↑↓', 'select', 'Move the selection; scroll this list and the Update Notes'],
+      ['PgUp PgDn', 'page', "Scroll a page of the text in view: Activity, details, a setting's help, the Log"], ['Home End', 'ends', 'Its first line / back to its latest']]],
     ['The side in view', [['e', 'on/off', 'Turn the side in view on or off, at once'], ['r', 'poll', 'Poll the side in view now'],
       ['p', 'pause', 'Pause the side in view: running sessions carry on, nothing new starts'], NEW_REVIEW, NEW_BUILD]],
     ['Typing', [['enter', 'save', 'Save the edit, or send the answer'], ['esc', 'cancel', 'Cancel it'], ['←→', 'move', 'Move the cursor; home and end jump to either end']]],
     ['Offers', [['1–3', 'choose', 'A paste of only tickets on a board pops up an offer first: tag them, add their board and tag them, or go ahead quickly'], ['↑↓ enter', 'choose', 'Move to a choice and take it'], ['esc', 'cancel', 'Cancel']]],
     ['Mouse', [['click', '', 'A side, view or row picks it; the selected row again does what enter does; a link opens; a key in the bar presses it'],
-      ['scroll', '', 'Moves the selection, or scrolls']]],
+      ['scroll', '', 'Scrolls the text under the pointer; elsewhere moves the selection']]],
     ['Prowl', [['/', 'all keys', 'Show or hide this list'], ['esc', 'close', 'Close this list, or answer no'],
       ['q', 'quit', 'Quit both sides; running sessions keep going and reappear on the next launch'], ['ctrl-c', 'quit now', 'Quit at once, without asking']]],
   ];
-  const PRESS = { '←': 'left', '→': 'right', '↑': 'up', '↓': 'down', space: ' ' };
-  const pressable = k => (k.length === 1 || ['enter', 'tab', 'esc', 'left', 'right', 'up', 'down'].includes(k) ? () => onKey(k) : undefined);
+  const PRESS = { '←': 'left', '→': 'right', '↑': 'up', '↓': 'down', space: ' ', PgUp: 'pageup', PgDn: 'pagedown', Home: 'home', End: 'end' };
+  const pressable = k => (k.length === 1 || ['enter', 'tab', 'esc', 'left', 'right', 'up', 'down', 'pageup', 'pagedown', 'home', 'end'].includes(k) ? () => onKey(k) : undefined);
   // The view's own keys, while it has something selected for them to act on.
   const viewKeys = () => {
-    const list = [live, history, needs][view()];
+    const list = [live, history, needs, null, logLines][view()];
     return list && !list(ui.side).length ? [] : VIEW_KEYS[ui.side][view()];
   };
   const EMPTY = ['nothing running', 'nothing here yet', 'nothing needs you', '', 'newest at the bottom'];
@@ -867,7 +999,7 @@ export function startTui(app, actions, io = {}) {
     const keys = (name, list) => stack(list, KEYBAR, W, tag(name));
     let nav;
     let own;
-    if (ui.notes) [nav, own] = [[say(NAV.text, 'Update Notes: ↑↓ scrolls them, and any other key or a click closes them.')], keys('Update Notes', [['↑ ↓', 'scroll'], ['esc', 'close']])];
+    if (ui.notes) [nav, own] = [[say(NAV.text, 'Update Notes: ↑↓ and PgUp PgDn scroll them, and any other key or a click closes them.')], keys('Update Notes', [['↑ ↓', 'scroll'], ['PgUp PgDn', 'page'], ['esc', 'close']])];
     else if (offerOpen()) [nav, own] = [[say(NAV.text, 'Choose what to do with the pasted ticket: a number, or ↑↓ and enter.')], keys('Offer', [['1 2 3', 'choose'], ['↑ ↓', 'move'], ['enter', 'take it'], ['esc', 'cancel']])];
     else if (ui.confirm) {
       const answers = ui.confirm.key ? [[ui.confirm.key, 'quit'], ['n', 'stay']] : [['y', 'yes'], ['n', 'no']];
@@ -879,7 +1011,7 @@ export function startTui(app, actions, io = {}) {
           : 'Type, then enter to save.';
       [nav, own] = [[say(NAV.text, about)], keys('Typing', ui.edit.form ? [['enter', 'submit'], ['↑ ↓', 'move'], ['esc', 'back'], ['← →', 'cursor']]
         : [['enter', ui.edit.prs ? 'review' : ui.edit.build ? 'build' : ui.edit.naming ? 'name' : 'save'], ['esc', 'cancel'], ['← →', 'move']])];
-    } else if (ui.keys) [nav, own] = [[say(NAV.text, 'All keys: any other key closes this list and does its job.')], keys('Keys', [['↑ ↓', 'scroll'], ['/', 'close'], ['esc', 'close']])];
+    } else if (ui.keys) [nav, own] = [[say(NAV.text, 'All keys: any other key closes this list and does its job.')], keys('Keys', [['↑ ↓', 'scroll'], ['PgUp PgDn', 'page'], ['/', 'close'], ['esc', 'close']])];
     else {
       const list = viewKeys();
       own = list.length ? keys(TABS[view()], list) : [[...tag(TABS[view()]), [fg(245), EMPTY[view()] || 'no keys here']]];
@@ -1020,6 +1152,9 @@ export function startTui(app, actions, io = {}) {
     out.push(sideBar(W), tabBar(), rule(W));
     const bars = footer(W, H);
     const bodyH = H - out.length - bars.length;
+    ui.bodyH = bodyH;
+    ui.front = null;
+    ui.sig = frontSig();
     const body = (ui.notes ? notesView : ui.keys ? keysView : offerOpen() ? offerView : [runningView, historyView, needsView, configView, logView][view()])(W, bodyH).slice(0, bodyH);
     while (body.length < bodyH) body.push([]);
     out.push(...body, ...bars);
@@ -1258,8 +1393,10 @@ export function startTui(app, actions, io = {}) {
 
   function onKey(k) {
     if (k === 'ctrl-c') return actions.quit();
+    // The Update Notes and the key list scroll by a number of their own: a line, a page (the body less one row), or to an end.
+    const moved = { up: -1, down: 1, pageup: -Math.max(1, ui.bodyH - 1), pagedown: Math.max(1, ui.bodyH - 1), home: -Infinity, end: Infinity }[k];
     if (ui.notes) {
-      if (k === 'up' || k === 'down') ui.notes.scroll += k === 'up' ? -1 : 1;
+      if (moved !== undefined) ui.notes.scroll = Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, ui.notes.scroll + moved));
       else ui.notes = null;
       return undefined;
     }
@@ -1282,7 +1419,7 @@ export function startTui(app, actions, io = {}) {
     }
     if (ui.edit) return editKey(k);
     if (ui.keys) {
-      if (k === 'up' || k === 'down') { ui.keys.scroll += k === 'up' ? -1 : 1; return undefined; }
+      if (moved !== undefined) { ui.keys.scroll = Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, ui.keys.scroll + moved)); return undefined; }
       ui.keys = null;
       if (k === '/' || k === 'esc') return undefined; // anything else closes the list and does its job
     } else if (k === '/') { ui.keys = { scroll: 0 }; return undefined; }
@@ -1298,6 +1435,9 @@ export function startTui(app, actions, io = {}) {
       do ui.view[ui.side] = (view() + by) % TABS.length; while (!hasView(view()));
       return undefined;
     }
+    // The scroll keys go to the pane in front, as the last frame painted it; ↑ ↓ too where nothing can be selected (the Log).
+    if (ui.front?.sig === frontSig() && (SCROLL_KEYS.includes(k) || (ui.front.arrows && (k === 'up' || k === 'down')))) { scrollPane(ui.front.id, k); return undefined; }
+    if (SCROLL_KEYS.includes(k)) return undefined;
     if ((k === 'up' || k === 'down') && currentItem()) return formMove(k); // Needs you: through the form
     if (k === 'up') { sel()[view()] = Math.max(0, sel()[view()] - 1); return undefined; }
     if (k === 'down') { sel()[view()]++; return undefined; }
@@ -1326,7 +1466,15 @@ export function startTui(app, actions, io = {}) {
    * highlighted, which is copied to the clipboard when the button is let go.
    */
   function onMouse({ mouse: b, x, y, release }) {
-    if (b & 64) return release ? undefined : onKey(b & 1 ? 'down' : 'up');
+    if (b & 64) { // the wheel: 3 lines a notch of the pane under the pointer (in the Log, anywhere); elsewhere it moves the selection
+      if (release || ui.edit) return undefined;
+      const same = ui.sig === frontSig() && !ui.confirm; // the frame is still what's on screen
+      const id = same ? ui.frame[y]?.pane || (ui.front?.arrows ? ui.front.id : null) : null;
+      if (id) { scrollPane(id, b & 1 ? 3 : -3); return undefined; }
+      const over = ui.notes || ui.keys; // the Update Notes and the key list scroll 3 lines a notch too
+      if (over) { over.scroll = Math.max(0, over.scroll + (b & 1 ? 3 : -3)); return undefined; }
+      return onKey(b & 1 ? 'down' : 'up');
+    }
     ui.hover = { x, y };
     if (b & 32) { // moved: with the left button down, a drag
       if ((b & 3) === 0 && ui.drag) Object.assign(ui.drag, { x1: x, y1: y, moved: ui.drag.moved || x !== ui.drag.x0 || y !== ui.drag.y0 });
@@ -1357,7 +1505,7 @@ export function startTui(app, actions, io = {}) {
       for (const [part, st] of [[text.slice(0, a), style], [text.slice(a, b), `${style}${ST.cursor}`], [text.slice(b), style]]) if (part) segs.push([st, part, url, hit, hover]);
       at += text.length;
     }
-    return Object.assign(segs, { bg: row.bg, hit: row.hit, footer: row.footer });
+    return Object.assign(segs, { bg: row.bg, hit: row.hit, footer: row.footer, pane: row.pane, main: row.main });
   }
 
   /** Copies the text a drag selected, as Claude Code does: each row's text, without its trailing spaces. */
@@ -1405,9 +1553,12 @@ export function startTui(app, actions, io = {}) {
   stdin.resume();
   let held = ''; // the start of a paste or of an escape sequence whose end hasn't arrived yet
   let lone; // the timer that reads a held escape as it is: esc alone is the key, with nothing to follow
+  let skip = false; // the start of a sequence was dropped: its end is skipped when it arrives
   const read = (chunk, asIs = false) => {
     clearTimeout(lone);
-    const [data, rest] = asIs ? [held + chunk, ''] : holdBack(held + chunk);
+    if (skip && chunk) { chunk = restOf(chunk); skip = false; }
+    let [data, rest] = asIs ? [held, ''] : holdBack(held + chunk);
+    if (asIs) [data, skip] = timedOut(held);
     held = rest;
     if (held && !held.startsWith('\x1b[200~')) lone = setTimeout(() => read('', true), 50);
     let moved = true; // only the pointer moving: repainted at most every 30ms, so a quick sweep can't flood the terminal

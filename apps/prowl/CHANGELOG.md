@@ -42,6 +42,9 @@ Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z`
 - Prowl starts a re-review's result itself, with everything it already knows (the commit checked out, the blocking reviews, each earlier finding's thread and whether it is parked now), and the result check refuses one with any of that start left unfilled, so an unfinished result can't pass as done.
 - Before a result is judged, Prowl merges in its own reading of each PR's earlier PR-Owl reviews still requesting changes: one it couldn't read in full withholds the approval, and is never dismissed, until a person has looked.
 - A finished review frees its slot within about a minute: when a review has written its result and its session then sits idle (a wake-up it scheduled, or a background command left hanging), Prowl ends the session instead of waiting up to an hour for it to exit. The Log says so once, and the review is posted as usual.
+- The Log scrolls: `PgUp` `PgDn`, `Home` `End`, `↑` `↓` and the wheel move through it, and it stays where you put it while new lines arrive (`End` goes back to the latest).
+- Long text wraps instead of being cut with an ellipsis: Activity lines, Log lines, the details under History's list, a Needs-you question with its context, and a setting's help. Where they need more rows than they have they scroll, with `PgUp` `PgDn` `Home` `End` or the wheel over them, and a grey row says where you are.
+- The wheel now scrolls the text under the pointer (anywhere, in the Log) and moves the selection elsewhere; `PgUp` `PgDn` also scroll the key list and the Update Notes.
 
 ## 2.23.6
 - An answer pasted into a Needs-you form is now what Submit sends. Before, pasting into **Other**, **Send it back with a note** or **Ask about this** and pressing enter sent the option that was already picked: the recommended answer, or an approval of the plan.
