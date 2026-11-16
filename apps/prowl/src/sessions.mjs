@@ -54,7 +54,16 @@ export const capHit = (result, { maxBudgetUsd, maxTurns } = {}) =>
 /** Forgets what readActivity() read, before a new session writes to a new log. */
 export const resetActivity = run => { for (const k of ['_activity', '_offset', '_partial', '_decoder', '_result', '_ours']) delete run[k]; };
 
-/** Reads new output from a session's log into run._activity; returns its final `result` event once present. */
+/**
+ * True once the session for `run` has ended: its process has exited. A `result` event while it runs is only a turn's:
+ * a session with background subagents ends its turn while they work, and starts a new one as each finishes.
+ */
+export const sessionEnded = (run, isAlive = alive) => !isAlive(run);
+
+/**
+ * Reads new output from a session's log into run._activity; returns the latest turn's `result` event once there is
+ * one. When the process has exited, that is the session's final result: its cost is the session's total.
+ */
 export function readActivity(run) {
   run._activity ??= [];
   run._offset ??= 0;
@@ -78,21 +87,23 @@ export function readActivity(run) {
 
 function parseLine(run, line) {
   if (!line.trim()) return;
-  let e;
+  // One line that can't be parsed or handled is shown as an error, and the lines after it are still read: the
+  // offset has moved already, so an exception here would lose the rest, a `result` event included.
   try {
-    e = JSON.parse(line);
+    const e = JSON.parse(line);
+    if (!e || typeof e !== 'object' || Array.isArray(e)) throw new Error('not an event');
+    const sub = Boolean(e.parent_tool_use_id);
+    if (e.type === 'assistant') {
+      for (const c of e.message?.content || []) {
+        if (!c || typeof c !== 'object') continue;
+        if (c.type === 'tool_use') run._activity.push({ sub, text: describeTool(c) });
+        else if (c.type === 'text' && typeof c.text === 'string' && c.text.trim()) run._activity.push({ sub, said: true, text: c.text.trim().split('\n')[0] });
+      }
+    }
+    if (e.type === 'result') run._result = e;
   } catch {
     run._activity.push({ text: line, error: true }); // stderr shares the log
-    return;
   }
-  const sub = Boolean(e.parent_tool_use_id);
-  if (e.type === 'assistant') {
-    for (const c of e.message?.content || []) {
-      if (c.type === 'tool_use') run._activity.push({ sub, text: describeTool(c) });
-      else if (c.type === 'text' && c.text.trim()) run._activity.push({ sub, said: true, text: c.text.trim().split('\n')[0] });
-    }
-  }
-  if (e.type === 'result') run._result = e;
 }
 
 const describeTool = ({ name, input = {} }) =>

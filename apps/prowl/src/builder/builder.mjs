@@ -15,7 +15,7 @@ import { mentions } from '../match.mjs';
 import { offerFor, acceptOffer } from '../offers.mjs';
 import { autoName, cleanName, parsePaste, ticketKey } from '../paste.mjs';
 import { killTree, notifyDesktop } from '../proc.mjs';
-import { alive, capHit, readActivity } from '../sessions.mjs';
+import { alive, capHit, readActivity, sessionEnded } from '../sessions.mjs';
 import { fill, outputTemplate } from '../templates.mjs';
 import * as brief from './brief.mjs';
 import { defaultBranchOf, ensureClone, ghClone, prepareRepo, remoteBranches, worktreeRoot } from './repos.mjs';
@@ -704,9 +704,16 @@ export function createBuilder(app, deps) {
     touch(w);
     checkStop(w);
     const capped = w.capped || capHit(r, { maxBudgetUsd: w.turnBudgetUsd || b().maxBudgetUsd, maxTurns: b().maxTurns });
-    if (capped) throw new NeedsYou('cap', `The session for ${w.key} stopped: ${capped}. It isn't retried.`, { retry: 'continue' });
     const file = path.join(w.briefDir, 'result.json');
     const result = readJson(file);
+    if (capped) {
+      // The time cap stopped a turn that had already written a valid result (deleted as each turn starts, so it is
+      // this turn's). One that only asks for something cut nothing short: the cap is dropped and the result used.
+      // A done or complete result, or a round's, could have been written while subagents were still editing.
+      const valid = w.capped && result && !capHit(r, { maxBudgetUsd: 1, maxTurns: 1 }) && !(w.turnKind === 'round' ? validateFeedback(result) : rules.validateBuild(result, w.briefDir));
+      if (valid && w.turnKind !== 'round' && ['needs-repos', 'needs-approval', 'question', 'blocked'].includes(result.status)) w.capped = null;
+      else throw new NeedsYou('cap', `The session for ${w.key} stopped: ${capped}.${valid ? ` It had written a valid result (${result.status}), but background work may have been cut short, so it isn't used.` : ''} It isn't retried.`, { retry: 'continue' });
+    }
     const why = w.spawnError || (!result ? (fs.existsSync(file) ? 'it is not valid JSON' : 'it wrote no result.json')
       : w.turnKind === 'round' ? validateFeedback(result) : rules.validateBuild(result, w.briefDir))
       // A build can't push before approve() made its branches. A finish session's branches are there from the start,
@@ -1518,7 +1525,7 @@ export function createBuilder(app, deps) {
       if (w._busy || Date.now() < (w._retryAt || 0) || !w.step) continue;
       if (w.step === 'session') {
         readActivity(w);
-        if (w._result || !session.alive(w)) {
+        if (sessionEnded(w, session.alive)) { // its process has exited: a `result` event alone is only a turn's
           readActivity(w);
           w.step = 'settle';
           step(w, settle);

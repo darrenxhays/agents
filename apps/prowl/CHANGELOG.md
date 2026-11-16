@@ -4,6 +4,9 @@ Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z`
 
 ## Unreleased
 - A repo's git hooks (husky's, say, or a `post-checkout` a PR adds) no longer run on your machine because Prowl checked a commit out: hooks are off in every worktree Prowl makes, and for every git command a review session runs. A Builder session's own commits still run the repo's commit hooks. If a repo's build needs something its post-checkout hook made, add that step to the repo's commands in Checks before push.
+- A review whose session sends its reviewers off in the background is no longer failed and retried while they work: a session counts as ended only once its process has exited, not at the end of its first turn. The same goes for a Builder turn.
+- A review that has posted and written its report counts as done even when Stop or the time cap is what ended its process, and is tagged (or its PRs labelled) as usual. Stop's question says so when the report is already there.
+- Builder: a turn the time cap stopped after it had written a valid result that only asks for something (more repos, a plan's approval, a question, blocked) goes on to that, as nothing was cut short. A finished build's or a round's result still stops at the cap, and Needs you says why.
 
 ## 2.23.6
 - An answer pasted into a Needs-you form is now what Submit sends. Before, pasting into **Other**, **Send it back with a note** or **Ask about this** and pressing enter sent the option that was already picked: the recommended answer, or an approval of the plan.

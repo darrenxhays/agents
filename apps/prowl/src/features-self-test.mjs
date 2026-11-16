@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { HOME } from './config.mjs';
 import { addWorktree, noHooks, noHooksEnv } from './git.mjs';
+import { finalize } from './reviewer/reviews.mjs';
+import { readActivity, sessionEnded } from './sessions.mjs';
 
 const WIN = process.platform === 'win32';
 const sh = (cwd, cmd, args, env) => spawnSync(cmd, args, { cwd, encoding: 'utf8', env: { ...process.env, ...env } });
@@ -59,6 +61,34 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
       sh(wt, 'git', ['add', 'a.txt']);
       assert.ok(fs.existsSync(marker), 'the check is real: without it the hook runs');
     }
+  }
+
+  // ---- C-09: a session working in the background isn't failed, and a finished one counts as done ----
+  {
+    const clean = { type: 'result', subtype: 'success', is_error: false, total_cost_usd: 2 };
+    assert.equal(sessionEnded({ _result: clean }, () => true), false, 'a result event while the process runs is a turn, not the end');
+    assert.ok(sessionEnded({}, () => false) && sessionEnded({ _result: clean }, () => false), 'ended once the process has exited');
+    // A line that can't be handled never loses the result after it.
+    const logPath = path.join(tmp, 'c09.ndjson');
+    fs.writeFileSync(logPath, ['null', '[1]', JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text' }, null, { type: 'text', text: 'hello' }] } }), JSON.stringify(clean), ''].join('\n'));
+    const tailed = { logPath };
+    assert.equal(readActivity(tailed)?.total_cost_usd, 2, 'the result is still read');
+    assert.deepEqual(tailed._activity.map(a => [a.text, Boolean(a.error)]), [['null', true], ['[1]', true], ['hello', false]], 'a JSON value that is not an object is an error line; a part without text is skipped');
+    // Settling: a clean final result and a report mean done, whatever ended the process.
+    const reportPath = path.join(tmp, 'c09.md');
+    fs.writeFileSync(reportPath, '---\nverdict: APPROVE\n---\n');
+    const stopped = { status: 'stopping', reportPath, _result: clean, prs: [] };
+    finalize(stopped);
+    assert.equal(stopped.status, 'done', 'stopped after its report was written: done');
+    const cappedRun = { status: 'stopping', capped: 'time cap 30 min', reportPath, _result: clean, prs: [] };
+    finalize(cappedRun);
+    assert.deepEqual([cappedRun.status, cappedRun.capped], ['done', null], 'the time cap ended a finished review: done, the cap cleared');
+    const noReport = { status: 'stopping', capped: 'time cap 30 min', reportPath: path.join(tmp, 'none.md'), _result: clean };
+    finalize(noReport);
+    assert.deepEqual([noReport.status, noReport.error], ['failed', 'stopped: time cap 30 min'], 'without the report: as before');
+    const byYou = { status: 'stopping', reportPath: path.join(tmp, 'none.md'), _result: clean };
+    finalize(byYou);
+    assert.equal(byYou.status, 'stopped');
   }
 
   fs.rmSync(tmp, { recursive: true, force: true });

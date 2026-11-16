@@ -1049,6 +1049,27 @@ async function builds(assert) {
       reachedModel ? ['cap', 20, 20, true, 'cost not reported'] : ['cap', 0, 0, false, '$0.00'], `a killed turn's cost (reached the model: ${reachedModel})`);
     h.done();
   }
+
+  // The time cap stops a turn that had already written a valid result: one that only asks for something is used, as
+  // nothing was cut short; a done result could have been written while subagents were still editing, so it stops at the cap.
+  for (const result of [{ status: 'question', question: { id: 'q1', question: 'Which store?' } },
+    { status: 'done', commits: [{ repo: 'octo-org/web', sha: 'abcdef1' }], prs: [{ repo: 'octo-org/web', title: 'AB#123 carts', body: 'b' }] }]) {
+    h = harness('ado', twoRepoBuild(), { cfgOver: { timeoutMinutes: 30 } });
+    let running = true;
+    Object.assign(h.session, { alive: () => running, kill: () => { running = false; },
+      start: (cfg, appDir, w2) => {
+        const logPath = path.join(h.root, 'turn.ndjson');
+        fs.writeFileSync(logPath, `${JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'Reading the ticket.' }] } })}\n${JSON.stringify({ type: 'result', subtype: 'success', is_error: false, total_cost_usd: 1 })}\n`);
+        fs.writeFileSync(path.join(w2.briefDir, 'result.json'), JSON.stringify(result));
+        Object.assign(w2, { startedAt: Date.now() - 999 * 60_000, logPath, sessionStarted: true, pid: null });
+      } });
+    await h.b.poll();
+    for (let i = 0; i < 6; i++) { h.b.tick(); await h.b.idle(); }
+    const item = h.b.needs()[0];
+    if (result.status === 'question') assert.deepEqual([item?.kind, item?.question], ['question', 'Which store?'], 'a capped turn that only asked a question goes on to the question');
+    else assert.ok(item?.kind === 'cap' && item.question.includes("time cap 30 min. It had written a valid result (done), but background work may have been cut short, so it isn't used. It isn't retried."), `a capped done result isn't used: ${item?.question}`);
+    h.done();
+  }
 }
 
 // ---- Following the PRs through review ----

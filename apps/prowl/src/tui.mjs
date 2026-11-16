@@ -1213,7 +1213,7 @@ export function startTui(app, actions, io = {}) {
     else if (k === 'enter' && view() === HISTORY && r.pr) openExternal(r.briefDir || r.pr.url);
     else if (k === 'enter' && view() === HISTORY && r.status === 'done') openExternal(r.reportPath);
     else if (k === 's' && view() === RUNNING && r.status === 'running') {
-      ui.confirm = { text: r.quick ? `Stop the quick review ${r.ticket}?` : `Stop the review of ${r.ticket}? Its '${app.cfg.tags.inProgress}' tag is removed; re-tag to run it again.`, yes: () => actions.stop('reviewer', r) };
+      ui.confirm = { text: reviewer.stopText(r), yes: () => actions.stop('reviewer', r) };
     }
   }
 

@@ -4,9 +4,9 @@ import { CONFIG_DIR, HOME, writeJson } from '../config.mjs';
 import { frontMatter } from '../match.mjs';
 import { noHooksEnv } from '../git.mjs';
 import { spawnCli, killTree } from '../proc.mjs';
-import { alive, capHit, readActivity, sessionEnv, track } from '../sessions.mjs';
+import { alive, capHit, readActivity, sessionEnded, sessionEnv, track } from '../sessions.mjs';
 
-export { alive, readActivity };
+export { alive, readActivity, sessionEnded };
 export const REPORTS_DIR = path.join(HOME, 'reports');
 const LOGS_DIR = path.join(HOME, 'logs');
 const STATE_PATH = path.join(HOME, 'state.json');
@@ -139,6 +139,9 @@ export function failUnposted(run, missing) {
   run.error = `no review posted on ${missing.map(p => `${p.repo}#${p.number}`).join(', ')}; the session ended without posting it (see ${run.logPath})`;
 }
 
+/** True when a running review has already written its report: stopped now, it still counts as done. */
+export const reportWritten = run => fs.existsSync(run.reportPath);
+
 export function stopReview(run) {
   run.status = 'stopping';
   if (alive(run)) killTree(run.pid);
@@ -176,14 +179,7 @@ export function finalize(run) {
   run.costUsd = result?.total_cost_usd ?? null;
   const ok = result?.subtype === 'success' && !result.is_error;
   const stderr = run._activity?.filter(a => a.error).at(-1)?.text;
-  run.capped ??= capHit(result, run.caps) ?? undefined;
-  if (run.capped) {
-    run.status = 'failed';
-    run.error = `stopped: ${run.capped}`;
-  } else if (run.status === 'stopping') {
-    run.status = 'stopped';
-  } else if (ok && fs.existsSync(run.reportPath)) {
-    run.status = 'done';
+  const approvals = () => {
     run.summary = frontMatter(fs.readFileSync(run.reportPath, 'utf8'));
     for (const item of String(run.summary?.approved || '').split(/\s+/)) {
       const [url, sha] = [item.slice(0, item.lastIndexOf('@')), item.slice(item.lastIndexOf('@') + 1)];
@@ -191,6 +187,21 @@ export function finalize(run) {
       (run.approved ??= {})[url] = sha;
       if (run.approvals === false || isOwn(run.prs.find(p => p.url === url), run.me)) (run.awaitingHuman ??= []).push(url);
     }
+  };
+  if (ok && fs.existsSync(run.reportPath)) {
+    // First, before the cap and stop cases: a review that wrote its report (its last step, after posting) has
+    // finished its work, even if Stop or the time cap then ended a process kept up by background work.
+    run.status = 'done';
+    run.capped = null;
+    approvals();
+    return;
+  }
+  run.capped ??= capHit(result, run.caps) ?? undefined;
+  if (run.capped) {
+    run.status = 'failed';
+    run.error = `stopped: ${run.capped}`;
+  } else if (run.status === 'stopping') {
+    run.status = 'stopped';
   } else {
     // A clean exit without the report is a failure too: the session can end "successfully" before prowl-review
     // has posted anything (e.g. its background reviewers were stopped).

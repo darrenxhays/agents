@@ -634,7 +634,7 @@ export function createReviewer(app, deps) {
     for (const run of side.running()) {
       if (run._finishing) continue;
       rv.readActivity(run);
-      if (run._result || !rv.alive(run)) {
+      if (rv.sessionEnded(run)) { // its process has exited: a `result` event alone is only a turn's
         rv.readActivity(run); // pick up the last lines written before exit
         run._finishing = true;
         finish(run).catch(e => log('error', `${run.ticket}: ${e.message}`));
@@ -659,9 +659,17 @@ export function createReviewer(app, deps) {
   side.settle = async function settle() {
     for (const run of side.running()) {
       rv.readActivity(run);
-      if (run._result || !rv.alive(run)) await finish(run);
+      if (rv.sessionEnded(run)) { rv.readActivity(run); await finish(run); }
       else if (rv.overdue(run, cfg())) stopOverdue(run); // settled by the next launch, once it has exited
     }
+  };
+
+  /** The question s asks before stopping `run`: a review that has written its report counts as done all the same. */
+  side.stopText = run => {
+    const done = rv.reportWritten(run);
+    if (run.quick) return `Stop the quick review ${run.ticket}?${done ? ` It has written its report, so it counts as done${labelsOn() ? ' and its PRs are labelled as usual' : ''}.` : ''}`;
+    return done ? `Stop the review of ${run.ticket}? It has written its report, so it counts as done and is tagged as usual.`
+      : `Stop the review of ${run.ticket}? Its '${cfg().tags.inProgress}' tag is removed; re-tag to run it again.`;
   };
 
   side.stop = run => {
