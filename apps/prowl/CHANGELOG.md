@@ -2,6 +2,9 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## Unreleased
+- A repo's git hooks (husky's, say, or a `post-checkout` a PR adds) no longer run on your machine because Prowl checked a commit out: hooks are off in every worktree Prowl makes, and for every git command a review session runs. A Builder session's own commits still run the repo's commit hooks. If a repo's build needs something its post-checkout hook made, add that step to the repo's commands in Checks before push.
+
 ## 2.23.6
 - An answer pasted into a Needs-you form is now what Submit sends. Before, pasting into **Other**, **Send it back with a note** or **Ask about this** and pressing enter sent the option that was already picked: the recommended answer, or an approval of the plan.
 - A setting or board saved in Config is no longer lost when Prowl re-read `config.json` while you were typing it. It said "Saved." and kept the old value. The same went for a board added by accepting an offer.

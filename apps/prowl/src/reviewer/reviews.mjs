@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { CONFIG_DIR, HOME, writeJson } from '../config.mjs';
 import { frontMatter } from '../match.mjs';
+import { noHooksEnv } from '../git.mjs';
 import { spawnCli, killTree } from '../proc.mjs';
 import { alive, capHit, readActivity, sessionEnv, track } from '../sessions.mjs';
 
@@ -88,7 +89,7 @@ export function startReview(cfg, pluginDir, { tracker, ticket, prs, approvedPrs 
   const stdin = fs.openSync(run.promptPath, 'r');
   const log = fs.openSync(run.logPath, 'a');
   const child = spawnCli('claude', reviewArgs(cfg, pluginDir), {
-    cwd: cfg.workDir, detached: true, stdio: [stdin, log, log], env: sessionEnv(cfg),
+    cwd: cfg.workDir, detached: true, stdio: [stdin, log, log], env: reviewEnv(cfg),
   });
   fs.closeSync(stdin);
   fs.closeSync(log);
@@ -111,8 +112,11 @@ export function reviewArgs(cfg, pluginDir) {
   ];
 }
 
-/** The environment for a review session. */
-export const reviewEnv = sessionEnv;
+/**
+ * The environment for a review session: git hooks are off for every git command it and its subagents run, as they
+ * read PRs' code in worktrees, where `git status` would otherwise run a hook the PR brought.
+ */
+export const reviewEnv = (cfg, env = process.env) => ({ ...sessionEnv(cfg, env), ...noHooksEnv(env) });
 
 /** True once a running review has run past the Review time limit; it is then stopped, and fails with the cap named. */
 export const overdue = (run, cfg) => cfg.reviewTimeoutMinutes > 0 && run.status === 'running' && Date.now() - run.startedAt > cfg.reviewTimeoutMinutes * 60_000;

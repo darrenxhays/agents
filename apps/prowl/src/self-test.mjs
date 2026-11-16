@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { CONFIG_DIR, HOME } from './config.mjs';
 import { alive, awaitingHuman, buildPrompt, failUnposted, finalize, findingsOnly, isOwn, overdue, postMarker, REPORTS_DIR, retryFailed, reviewArgs, reviewEnv, roundCapped, runId, tidyLogs } from './reviewer/reviews.mjs';
 import { processStart } from './proc.mjs';
+import { noHooksEnv } from './git.mjs';
 import { createMascot, wrap } from './mascot.mjs';
 import { changelog, hash, newer, syncConfigFiles } from './update.mjs';
 import { DISALLOWED, fenceArgs, fenceDecision, fenceEnv, fenceSettings, lex, trackerHosts } from './fence.mjs';
@@ -130,10 +131,10 @@ assert.ok(buildPrompt({ ...promptCases.reReview, parkHumanOnly: true }).includes
 assert.ok(!buildPrompt(promptCases.reReview).includes('Parked'), 'off by default');
 
 // Memory: by default the session's environment is 2.7.0's; off sets Claude Code's switch for auto-memory.
-assert.deepEqual(reviewEnv({ allowMemoryWrites: true }, { PATH: '/bin' }), { PATH: '/bin', CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: '3600000' }, 'golden environment');
+assert.deepEqual(reviewEnv({ allowMemoryWrites: true }, { PATH: '/bin' }), { PATH: '/bin', CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: '3600000', ...noHooksEnv({}) }, 'golden environment');
 assert.equal(reviewEnv({ allowMemoryWrites: false }, {}).CLAUDE_CODE_DISABLE_AUTO_MEMORY, '1');
 assert.deepEqual(reviewEnv({ allowMemoryWrites: true }, { PATH: '/bin', JIRA_API_TOKEN: 'secret', AZURE_DEVOPS_EXT_PAT: 'secret', SYSTEM_ACCESSTOKEN: 'secret' }),
-  { PATH: '/bin', CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: '3600000' }, 'no tracker token reaches a session');
+  { PATH: '/bin', CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: '3600000', ...noHooksEnv({}) }, 'no tracker token reaches a session');
 
 // Log retention: old review logs go, except a running review's; poller.log rolls over past 5 MB; reports stay.
 const logHome = fs.mkdtempSync(path.join(os.tmpdir(), 'prowl-test-'));
@@ -1603,5 +1604,6 @@ fs.rmSync(migHome, { recursive: true });
 
 await (await import('./quick-self-test.mjs')).run(assert, { appDir });
 await (await import('./builder/self-test.mjs')).run(assert);
+await (await import('./features-self-test.mjs')).run(assert, { appDir });
 
 console.log(`self-test passed: ${count} asserts`);

@@ -7,7 +7,7 @@ import path from 'node:path';
 import { HOME, readChecks, writeJson } from '../config.mjs';
 import { matchChecks, runChecks, TAIL } from '../checks.mjs';
 import { actionable, appendAnswer, parkedUrls, pastAnswers, readAnswers, repliesToPost, stripParked, validateFeedback } from '../feedback.mjs';
-import { addWorktree, attrSource, fetchBranch, git, ownNumstat, push, remoteSha, removeWorktree, short, succeeds } from '../git.mjs';
+import { addWorktree, attrSource, fetchBranch, git, hooksOff, ownNumstat, push, remoteSha, removeWorktree, short, succeeds } from '../git.mjs';
 import * as github from '../github.mjs';
 import { branchRefusal, guardFailures, prRefusal } from '../guards.mjs';
 import { createLabels, matching } from '../labels.mjs';
@@ -811,7 +811,7 @@ export function createBuilder(app, deps) {
       }
       const refused = branchRefusal(branch, rec.defaultBranch, b().protectedBranches);
       if (refused) throw new NeedsYou('guard', `Prowl won't build on ${rec.repo}'s ${refused}: change Branch names.`, { retry: 'approve' });
-      await git(rec.worktree, 'checkout', '--force', '-b', branch, baseSha);
+      await git(rec.worktree, ...hooksOff(), 'checkout', '--force', '-b', branch, baseSha); // a checkout runs post-checkout: hooks off, as in addWorktree
       Object.assign(rec, { base: pick.base, baseSha, branch });
       branches.push(rec);
       touch(w);

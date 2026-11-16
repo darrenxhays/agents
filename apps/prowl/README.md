@@ -133,6 +133,7 @@ A quick build starts at once, whether the Builder is on or not, and outside `bui
 
 - **Which repos**: the GitHub links and `repo: owner/name` lines in the ticket and its linked items, and the repos of PRs that mention the key.
 - **Clones**: each is cloned into the Projects Directory if it's missing, otherwise fetched. Your checked-out branch, working tree and local branches are never touched. Each repo gets a detached worktree at `<Projects Directory>/.prowl-worktrees/work-<id>/<repo>`.
+- **Git hooks are off** in every worktree Prowl makes, and for every git command a review session runs: a repo's hook scripts (husky's, or a `post-checkout` a PR adds) don't run because Prowl checked a commit out. Hooks point at an empty folder, `~/.prowl/no-hooks`, emptied each time. A Builder session's own commits still run the repo's commit hooks. If a repo's build needs something its post-checkout hook made, add that step to the repo's commands in Checks before push.
 - **More repos**: the session may ask for more (`needs-repos`). Only repos under `githubOwner` or `builder.extraOwners` are checked out, at most `builder.maxRepos` (6) per ticket. Anything else goes to Needs you, and your answer tells the session what to do instead.
 - **Base branch**: the first `builder.base` rule whose repo glob matches, naming a branch or a branch glob (the highest version-sorted match wins: `release/1.10` over `release/1.9`, and `release/2.0` over `release/2.0-rc1`). Without a rule, the base the plan names, if the remote has it; otherwise the repo's default branch.
 

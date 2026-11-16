@@ -1,6 +1,8 @@
 // Git for Prowl's own code: worktrees beside the user's clones, and pushes that are never forced. The user's
 // checked-out branch, working tree and local branches are never touched.
 import fs from 'node:fs';
+import path from 'node:path';
+import { HOME } from './config.mjs';
 import { run, runFull } from './proc.mjs';
 
 export const git = (dir, ...args) => run('git', ['-C', dir, ...args]);
@@ -27,22 +29,49 @@ export function serial(clone, fn) {
 export const succeeds = async (dir, ...args) => (await runFull('git', ['-C', dir, ...args])).code === 0;
 
 /**
+ * The empty folder git is pointed at for hooks (<Prowl home>/no-hooks), so a repo's hook scripts never run because
+ * Prowl checked a commit out: with a relative core.hooksPath (husky's .husky), git would take them from the commit
+ * itself. Made, checked and emptied on every call: anything in it would run as a hook. An empty folder works on
+ * Windows too, where /dev/null doesn't.
+ */
+export function noHooks(dir = path.join(HOME, 'no-hooks')) {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const st = fs.lstatSync(dir);
+  const uid = process.getuid?.();
+  if (!st.isDirectory() || (uid !== undefined && st.uid !== uid)) throw new Error(`${dir} must be a folder of your own, not a link or someone else's`);
+  if (st.mode & 0o022) fs.chmodSync(dir, 0o700);
+  for (const name of fs.readdirSync(dir)) fs.rmSync(path.join(dir, name), { recursive: true, force: true });
+  if (fs.readdirSync(dir).length) throw new Error(`${dir} must be empty (git would run what is in it as hooks), and couldn't be emptied`);
+  return dir;
+}
+
+/** The git option, for right after -C <dir>, that turns hooks off for one command. */
+export const hooksOff = () => ['-c', `core.hooksPath=${noHooks()}`];
+
+/** Environment that turns git hooks off for every git command a review session runs. */
+export function noHooksEnv(env = process.env, dir = noHooks()) {
+  const n = Number.parseInt(env.GIT_CONFIG_COUNT, 10) > 0 ? Number.parseInt(env.GIT_CONFIG_COUNT, 10) : 0;
+  return { GIT_CONFIG_COUNT: String(n + 1), [`GIT_CONFIG_KEY_${n}`]: 'core.hooksPath', [`GIT_CONFIG_VALUE_${n}`]: dir };
+}
+
+/**
  * A worktree of `clone` at `wt`, detached at `sha`: checking out a branch there would move the user's own local branch.
- * An existing worktree is reset to `sha`; one that no longer works is added again.
+ * An existing worktree is reset to `sha`; one that no longer works is added again. Git hooks are off throughout.
  */
 export function addWorktree(clone, wt, sha) {
   return serial(clone, async () => {
+    const quiet = hooksOff(); // before anything is touched: no worktree is made if hooks can't be turned off
     if (fs.existsSync(wt)) {
       try {
-        await git(wt, 'checkout', '--force', '--detach', sha);
-        await git(wt, 'clean', '-fd');
+        await git(wt, ...quiet, 'checkout', '--force', '--detach', sha);
+        await git(wt, ...quiet, 'clean', '-fd');
         return;
       } catch { /* not a working worktree any more: add it again */ }
       await git(clone, 'worktree', 'remove', '--force', wt).catch(() => {});
       fs.rmSync(wt, { recursive: true, force: true });
       await git(clone, 'worktree', 'prune');
     }
-    await git(clone, 'worktree', 'add', '--detach', wt, sha);
+    await git(clone, ...quiet, 'worktree', 'add', '--detach', wt, sha);
   });
 }
 
