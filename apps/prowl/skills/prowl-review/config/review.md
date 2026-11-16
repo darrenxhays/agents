@@ -1,6 +1,6 @@
 # PR-Owl Review — How Each PR Is Reviewed
 
-The stance each reviewer takes, what it looks for, how findings are rated, and how a PR's verdict follows from them. Prowl keeps your copy of this file in `~/.prowl/config/` (or `$PROWL_HOME/config/`): edit that one. Updates never overwrite a copy you've edited.
+The stance each reviewer takes, what it looks for, how findings are rated, and (for Prowl) the verdict each severity gives. Prowl keeps your copy of this file in `~/.prowl/config/` (or `$PROWL_HOME/config/`): edit that one. Updates never overwrite a copy you've edited.
 
 ## Reviewer stance
 
@@ -22,7 +22,7 @@ The axis no single-PR review can perform. Every PR's reviewer covers it for that
 **Checklist**
 
 - **Contracts across PRs.** For each producer/consumer pair in the brief: does what one side produces (a function or API signature, a data or message format, field names and casing, nullability, enum values, a file or wire format, a config key, a flag name, a registration) exactly match what the other side expects? Read both sides; do not trust names.
-- **Consumers outside the batch.** For each repo the brief lists as reading a surface this PR changes (a response or request shape, a published event or message, an exported API, a shared schema, a config key or flag): does what that repo's code expects still hold after this PR? Read the consumer's file on its default branch; do not trust that a field rename, a removed value, a changed type or a new required input is harmless because nothing in the batch mentions it. A break is a finding on this PR, at least High, naming the consumer's repo and path, since the consumer is deployed code that will meet this change the moment it ships.
+- **Consumers outside the batch.** For each repo the brief lists as reading a surface this PR changes (a response or request shape, an event or message other services receive, an exported API, a shared schema, a config key or flag): does what that repo's code expects still hold after this PR? Read the consumer's file on its default branch; do not trust that a field rename, a removed value, a changed type or a new required input is harmless because nothing in the batch mentions it. A break is a finding on this PR, at least High, naming the consumer's repo and path, since the consumer is deployed code that will meet this change the moment it ships.
 - **Merge and deploy order.** Is the required order stated anywhere? What is the system's behaviour in every intermediate state — A merged, B not; B merged, A not; both merged but one not yet released or deployed? Silent no-ops in an intermediate state are findings, not features, unless a toggle deliberately produces them.
 - **Feature toggles / flags gating the set.** Same toggle name and semantics in every PR? Default value consistent? Is there a path where the flag is on in one part of the system and off in another and produces an inconsistent state?
 - **Stored data and formats vs code.** If the batch changes a schema, stored format, or serialized shape: is every change compatible with the code version that will run against it during rollout, in both directions? Do two PRs change the same data? Will migration or version numbers collide at merge?
@@ -50,7 +50,7 @@ Covered where a PR touches them, at the depth the change deserves:
 
 ## Severity
 
-Reviewers rate with these definitions and verifiers re-rate against them. Change the definitions freely, but keep the five names: the verdict table below, the verification split and Prowl's report counts use them.
+Reviewers rate with these definitions and verifiers re-rate against them. Change the definitions freely, but keep the five names: the verdict table below, the verification split and Prowl's counts use them.
 
 - **Critical** — data loss, security hole, or crash in production.
 - **High** — incorrect behaviour on realistic inputs.
@@ -60,13 +60,15 @@ Reviewers rate with these definitions and verifiers re-rate against them. Change
 
 Do not inflate to look thorough; do not soften to be polite.
 
-## Verdict
+## Verdict (Prowl)
 
-Each PR's verdict comes from the highest severity among its verified findings, and is stated in its review body in every mode. The `event` is what the review is posted as; with Prowl's **Approve PRs** setting off, `APPROVE` posts as `COMMENT` with the *No blocking issues* text from `output.md`. Prowl's History view colours a verdict by its first word: BLOCK red, REQUEST orange, APPROVE green.
+Read by Prowl only: review sessions and their subagents don't need this section.
 
-| Highest verified severity on this PR | Verdict | `event` in formal mode | `event` in comment / no-verdict mode |
-|---|---|---|---|
-| Critical | BLOCK | `REQUEST_CHANGES` | `COMMENT` |
-| High or Medium | REQUEST CHANGES | `REQUEST_CHANGES` | `COMMENT` |
-| Low or Nit only | APPROVE WITH NITS | `APPROVE` | `COMMENT` |
-| none | APPROVE | `APPROVE` | `COMMENT` |
+Each PR's verdict comes from the highest severity among the findings that count toward it (new ones confirmed, and earlier ones still in the code), and is stated in its review banner. Prowl decides what the review is posted as from the same severity and your settings: with nothing above Low it approves the PR, or, with **Approve PRs** off or on your own PR, posts a comment instead. Change the labels freely; keep the two columns. Prowl's History view colours a verdict by its first word: BLOCK red, REQUEST orange, APPROVE green.
+
+| Highest counted severity | Verdict |
+|---|---|
+| Critical | BLOCK |
+| High or Medium | REQUEST CHANGES |
+| Low or Nit only | APPROVE WITH NITS |
+| none | APPROVE |

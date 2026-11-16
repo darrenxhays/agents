@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { AGENT_MODELS, CONFIG_DIR, EFFORTS, HOME, MODELS, writeJson } from '../config.mjs';
@@ -5,6 +6,7 @@ import { frontMatter } from '../match.mjs';
 import { noHooksEnv } from '../git.mjs';
 import { spawnCli, killTree } from '../proc.mjs';
 import { alive, capHit, readActivity, sessionEnded, sessionEnv, track } from '../sessions.mjs';
+import { checkResult, isParked } from './result.mjs';
 
 export { alive, readActivity, sessionEnded };
 export const REPORTS_DIR = path.join(HOME, 'reports');
@@ -81,11 +83,75 @@ export const rolesWarning = run => `${run.ticket}: ${run.rolesNote}. Pick one of
  * process; output goes to a log file this app tails, so a restart picks running reviews back up.
  */
 export function startReview(cfg, pluginDir, opts) {
-  return launchReview(cfg, pluginDir, createReview(cfg, opts));
+  return launchReview(cfg, pluginDir, createReview(cfg, { ...opts, appDir: pluginDir }));
+}
+
+/** A batch id, made by Prowl and unique per run: a retry never shares markers with the failed attempt, nor two people's reviews of one ticket in the same minute. */
+export function newBatchId(key, reviewNo, at = new Date()) {
+  const iso = at.toISOString();
+  const slug = String(key).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 30) || 'custom';
+  return `rb-${iso.slice(0, 10).replace(/-/g, '')}-${slug}-r${reviewNo}-${iso.slice(11, 16).replace(':', '')}-${randomBytes(2).toString('hex')}`;
+}
+
+/**
+ * The command a session runs to check its review result. It names the Node binary Prowl itself runs on, not `node`
+ * from the session's PATH, with every path in double quotes and backslashes as forward slashes (a POSIX shell and
+ * cmd.exe both take it).
+ */
+export function checkerCommand(appDir, resultPath, batchId, urls, node = process.execPath) {
+  const q = p => `"${String(p).replace(/\\/g, '/')}"`;
+  return `${q(node)} ${q(path.join(appDir, 'prowl.mjs'))} --check-result ${q(resultPath)} --batch ${batchId} --prs "${urls.join(',')}"`;
+}
+
+/** A review's result, or null when it has none on disk or it isn't valid. */
+export function readResult(run) {
+  if (!run?.resultPath) return null;
+  try {
+    const text = fs.readFileSync(run.resultPath, 'utf8');
+    return checkResult(text).length ? null : JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The previous review's findings a re-review is given: those still live (confirmed, still present, needing a
+ * person, answered, deferred or unverifiable) on a PR this review's result may name (`urls`), each with its `ref`
+ * and an `earlier` built from what was published, so the next review can find it on GitHub. Then what the previous
+ * review owed (prior.owed): a ref a result leaves out is given again, round after round, until one carries it.
+ */
+export function priorFindings(prior, result, urls) {
+  const pub = prior.published || {};
+  const opts = { parkHumanOnly: prior.parkHumanOnly };
+  const reviewedAtOf = url => (result.prs || []).find(p => p.url === url)?.reviewedAt || null;
+  const live = ['confirmed', 'still-present', 'needs-person', 'answered', 'deferred', 'unverifiable'];
+  const out = [];
+  for (const f of result.findings || []) {
+    if (!live.includes(f.status) || !urls.includes(f.pr)) continue;
+    let ref;
+    let earlier;
+    if (String(f.id).startsWith('C-')) {
+      ref = String(f.earlier?.ref || '').trim();
+      earlier = { ...f.earlier, ref, parked: Boolean(f.earlier?.parked || isParked(f, opts)) };
+      if (pub[`reopen:${f.pr}:${f.id}`]) earlier.threadState = 'open';
+    } else {
+      ref = `${result.batchId} ${f.id}`;
+      const own = pub[`comment:${f.pr}:${f.id}`]; // Prowl's inline comment, when it made one
+      const url = own || pub[`reply:${f.pr}:${f.id}`] || (f.earlier?.by === 'someone-else' && f.earlier.url) || pub[`review:${f.pr}`] || null;
+      const theirs = f.earlier?.by === 'someone-else' && f.earlier.threadId && !own; // it carried on someone else's thread
+      const commentId = Number(/#discussion_r(\d+)$/.exec(own || '')?.[1]) || (theirs ? f.earlier.commentId : null);
+      earlier = { by: 'prowl', author: prior.me || null, url, threadId: theirs ? f.earlier.threadId : null, commentId, threadState: commentId ? 'open' : 'none', ref, raisedAt: reviewedAtOf(f.pr), statesItFully: null, parked: isParked(f, opts) };
+    }
+    if (!ref) continue;
+    out.push({ ref, id: f.id, pr: f.pr, status: f.status, severity: f.severity, title: f.title, axis: f.axis, location: f.location ?? null, problem: f.problem, fix: f.fix, detail: f.detail,
+      ...(f.crossPr && { crossPr: f.crossPr }), ...(f.consumer && { consumer: f.consumer }), ...(f.outcome && { outcome: f.outcome }), earlier });
+  }
+  for (const o of prior.owed || []) if (urls.includes(o.pr) && !out.some(x => x.pr === o.pr && x.ref === o.ref)) out.push(o);
+  return out;
 }
 
 /** A review's run, with its prompt written to its prompt file: everything but the session, which launchReview() starts. */
-export function createReview(cfg, { tracker, ticket, prs, approvedPrs = [], leftOut = [], prior, me = '', heads = {}, ticketText = '', quick = false, checking = false }) {
+export function createReview(cfg, { tracker, ticket, prs, approvedPrs = [], leftOut = [], prior, me = '', heads = {}, ticketText = '', quick = false, checking = false, appDir = '' }) {
   const reviewNo = (prior?.reviewNo || 0) + 1;
   const id = runId(ticket.key, reviewNo);
   for (const dir of [REPORTS_DIR, LOGS_DIR, CONFIG_DIR]) fs.mkdirSync(dir, { recursive: true });
@@ -110,6 +176,10 @@ export function createReview(cfg, { tracker, ticket, prs, approvedPrs = [], left
     reportPath: path.join(REPORTS_DIR, `${id}.md`),
     logPath: path.join(LOGS_DIR, `${id}.ndjson`),
     promptPath: path.join(LOGS_DIR, `${id}.prompt.md`),
+    // Result mode: the session writes a review result here and nothing to GitHub; Prowl checks it and posts everything itself.
+    resultMode: 1, batchId: newBatchId(ticket.key, reviewNo), resultPath: path.join(REPORTS_DIR, `${id}.result.json`),
+    resultPrs: [...prs, ...approvedPrs, ...leftOut].map(p => p.url),
+    parkHumanOnly: Boolean(cfg.parkHumanOnly), // read as the review starts, like approvals: a change mid-review doesn't change this review
     // The verifier subagents' model and effort, as the prompt passes them ('' = Claude Code's default for subagents).
     verifiers: agentChoice(cfg.claude.verifierModel, cfg.claude.verifierEffort),
   };
@@ -120,11 +190,18 @@ export function createReview(cfg, { tracker, ticket, prs, approvedPrs = [], left
   const roles = reviewRoles(cfg);
   if (roles.reviewers) run.orchestrator = { ...roles.session, reviewers: { model: cfg.claude.model, effort: cfg.claude.effort } };
   if (roles.why) run.rolesNote = roles.why;
+  // A re-review is given the previous result's live findings; a previous review from before results, its report's findings.
+  const priorResult = prior ? readResult(prior) : null;
   let priorReport = '';
-  if (prior) {
+  if (prior && !priorResult) {
     try { priorReport = fs.readFileSync(prior.reportPath, 'utf8'); } catch { priorReport = '(the previous report file is missing)'; }
   }
-  fs.writeFileSync(run.promptPath, buildPrompt({ ...run, prior, priorReport, approvals: cfg.approvals, reReviewScope: cfg.reReviewScope, heads, parkHumanOnly: cfg.parkHumanOnly, ticketText,
+  run.priorGiven = priorResult ? priorFindings(prior, priorResult, run.resultPrs) : [];
+  run.priorRefs = {};
+  for (const g of run.priorGiven) (run.priorRefs[g.pr] ??= []).push(g.ref);
+  const priorUnverified = Object.fromEntries(prs.map(p => [p.url, String((priorResult?.prs || []).find(x => x.url === p.url)?.coverage?.unverified || '').trim()]).filter(([, text]) => text));
+  fs.writeFileSync(run.promptPath, buildPrompt({ ...run, prior, priorReport, priorFindings: priorResult ? run.priorGiven : null, priorUnverified, reReviewScope: cfg.reReviewScope, heads, ticketText,
+    checker: checkerCommand(appDir || path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..'), run.resultPath, run.batchId, run.resultPrs),
     verifierModel: cfg.claude.verifierModel, verifierEffort: cfg.claude.verifierEffort,
     smallReReview: { lines: cfg.smallReReviewLines, model: cfg.smallReReviewModel, effort: cfg.smallReReviewEffort }, reviewers: roles.reviewers, checking }));
   return run;
@@ -171,7 +248,7 @@ export function reviewArgs(cfg, pluginDir, orchestrator = null) {
 export const reviewEnv = (cfg, env = process.env) => ({ ...sessionEnv(cfg, env), ...noHooksEnv(env) });
 
 /** True once a running review has run past the Review time limit; it is then stopped, and fails with the cap named. */
-export const overdue = (run, cfg) => cfg.reviewTimeoutMinutes > 0 && run.status === 'running' && Date.now() - run.startedAt > cfg.reviewTimeoutMinutes * 60_000;
+export const overdue = (run, cfg) => cfg.reviewTimeoutMinutes > 0 && run.status === 'running' && run.phase !== 'publishing' && Date.now() - run.startedAt > cfg.reviewTimeoutMinutes * 60_000;
 
 /**
  * Whether a failed review is retried automatically: once per ticket (`failures` counts this one), and never one
@@ -192,7 +269,7 @@ export function failUnposted(run, missing) {
 }
 
 /** True when a running review has already written its report: stopped now, it still counts as done. */
-export const reportWritten = run => fs.existsSync(run.reportPath);
+export const reportWritten = run => fs.existsSync(run.resultMode ? run.resultPath : run.reportPath);
 
 export function stopReview(run) {
   run.status = 'stopping';
@@ -241,12 +318,13 @@ export function finalize(run) {
       if (run.approvals === false || isOwn(run.prs.find(p => p.url === url), run.me)) (run.awaitingHuman ??= []).push(url);
     }
   };
-  if (ok && fs.existsSync(run.reportPath)) {
-    // First, before the cap and stop cases: a review that wrote its report (its last step, after posting) has
-    // finished its work, even if Stop or the time cap then ended a process kept up by background work.
+  if (ok && reportWritten(run)) {
+    // First, before the cap and stop cases: a review that wrote its result (a review from before results: its
+    // report, its last step, after posting) has finished its work, even if Stop or the time cap then ended a
+    // process kept up by background work. In result mode Prowl records the approvals itself, as it posts.
     run.status = 'done';
     run.capped = null;
-    approvals();
+    if (!run.resultMode) approvals();
     return;
   }
   run.capped ??= capHit(result, run.caps) ?? undefined;
@@ -260,15 +338,19 @@ export function finalize(run) {
     // has posted anything (e.g. its background reviewers were stopped).
     run.status = 'failed';
     run.error = run.spawnError
-      || (ok && `the session ended without writing its report: ${(stderr || String(result.result || '')).slice(0, 300)}`)
+      || (ok && `the session ended without writing its ${run.resultMode ? 'review result' : 'report'}: ${(stderr || String(result.result || '')).slice(0, 300)}`)
       || (result && `${result.subtype}: ${String(result.result || '').slice(0, 300)}`)
       || stderr
       || 'the session ended without a result; see its log';
   }
 }
 
-/** The prompt (the agent's brief): the PR list for prowl-review, the ticket, the re-review brief and the report spec. */
-export function buildPrompt({ ticket, title: rawTitle, ticketUrl, prs, contextPrs = [], leftOut = [], reviewNo, reportPath, prior, priorReport, approvals = true, reReviewScope = 'full', heads = {}, parkHumanOnly = false, ticketText = '', marker = '', quick = false, verifierModel = '', verifierEffort = '', smallReReview = null, reviewers = null, checking = false }) {
+/**
+ * The prompt (the agent's brief): the PR list for prowl-review, the ticket, where its result goes and how to check
+ * it, and for a re-review the previous findings. It describes findings and facts: it never names an action on GitHub.
+ */
+export function buildPrompt({ ticket, title: rawTitle, ticketUrl, prs, contextPrs = [], leftOut = [], reviewNo, prior, priorReport = '', priorFindings: given = null, priorUnverified = {}, reReviewScope = 'full', heads = {},
+  ticketText = '', quick = false, batchId = '', resultPath = '', checker = '', verifierModel = '', verifierEffort = '', smallReReview = null, reviewers = null, checking = false }) {
   const title = String(rawTitle ?? '').replace(/"/g, "'"); // someone else's words, shown in quotes: they can't close the quotes themselves
   const lines = [
     `/prowl:prowl-review ${[...prs, ...contextPrs].map(p => p.url).join(' ')}`,
@@ -279,15 +361,17 @@ export function buildPrompt({ ticket, title: rawTitle, ticketUrl, prs, contextPr
       ticketUrl ? `- Ticket: ${ticket} "${title}" (${ticketUrl}). This is a quick review the user asked Prowl for, of these PRs together as one set.`
         : '- No ticket: this is a quick review the user asked Prowl for, of these PRs together as one set. Take the goal of the work from the PRs themselves.',
       ...(prior ? [`- This is review ${reviewNo} of these PRs, a RE-REVIEW: they were labelled for review again.`] : []),
-      '- Nobody is watching this session: never stop to ask a question; make the reasonable call and note it in the report.',
+      '- Nobody is watching this session: never stop to ask a question; make the reasonable call and say so in the closing message.',
     ] : [
       `- Ticket: ${ticket} "${title}" (${ticketUrl})`,
       `- This is review ${reviewNo} of this ticket${prior ? ', a RE-REVIEW' : ''}.`,
-      '- It started automatically because the ticket was tagged for review. Nobody is watching this session: never stop to ask a question; make the reasonable call and note it in the report.',
+      '- It started automatically because the ticket was tagged for review. Nobody is watching this session: never stop to ask a question; make the reasonable call and say so in the closing message.',
     ]),
+    "- Every review, first or not, re-checks each open PR-Owl thread on the PRs it reviews, whoever's Prowl raised it (the skill's Step 2), and gives each one its status in the review result (the skill's Step 8).",
+    `- The batch id: \`${batchId}\`.`,
+    `- The result path: ${resultPath}`,
+    `- The checker command: \`${checker}\``,
   ];
-  if (marker) lines.push(`- End the body of each review you post with this line: ${marker}`);
-  if (!approvals) lines.push("- Approvals off (Prowl's Approve PRs setting): never post an APPROVE review; see approvals-off mode in the skill.");
   if (reviewers) {
     lines.push(reviewers.model
       ? `- Reviewer model and effort (the skill's Step 4): \`model\` \`${reviewers.model}\`, \`effort\` \`${reviewers.effort}\`. This session orchestrates on another model or effort: launch every reviewer with both.`
@@ -301,21 +385,25 @@ export function buildPrompt({ ticket, title: rawTitle, ticketUrl, prs, contextPr
   if (verifier.length) lines.push(`- Verifier model and effort (the skill's Step 6): ${verifier.join(', ')}.`);
   if (ticketText) lines.push('', ...ticketSection(ticketText));
   if (checking) lines.push('', CHECKS_SLOT);
+  // What becomes of the earlier findings on a PR that is left out: copied from the previous result, when there is one.
+  const carried = prior && !given
+    ? "The previous review has no result to copy from, so these PRs' earlier findings are not carried: leave them out of the result, and a later review reads them from the PR."
+    : "Leave their earlier findings alone: don't re-verify them. Each goes in the result as `deferred`, keeping every field as given except its id, a new `C-nn` (the skill's Step 5, *Left-out PRs*).";
   if (contextPrs.length) {
-    lines.push('', '## Already approved: context only', '',
-      'Prowl approved these PRs in an earlier review and they have no new commits since. They are already approved (see Step 1): read them for the batch brief and the cross-PR contracts, but give them no spec or reviewer, post nothing on them, and leave their earlier findings and comment threads alone.',
+    lines.push('', '## Unchanged since the last review: context only', '',
+      `An earlier review cleared these PRs and they have no new commits since. Prowl leaves them out of this review (see Step 1): read them for the batch brief and the cross-PR contracts, but give them no spec or reviewer. ${carried}`,
       '', ...contextPrs.map(p => `- ${p.url}`));
   }
   if (prior && leftOut.length) {
     lines.push('', '## Left out of this review', '',
-      "An earlier review covered these PRs, and they aren't part of this one (turned back into drafts, or past Prowl's round cap). Don't read them, and post nothing on them: leave their prior findings exactly as they are, without re-verifying, replying on or resolving them, and carry those findings into this report unchanged.",
+      `An earlier review covered these PRs, and they aren't part of this one (drafts now, or past Prowl's round cap). Don't read them beyond their head commit, and give them no spec or reviewer. ${carried} A later review picks them up.`,
       '', ...leftOut.map(p => `- ${p.url}`));
   }
-  // A delta re-review needs the commits the last review saw; reviews from before 2.8.0 didn't record them.
-  const steps = parkHumanOnly ? [...PRIOR_STEPS, PARK_STEP] : PRIOR_STEPS;
-  if (prior && reReviewScope === 'delta' && prior.reviewedHeads) lines.push('', ...deltaBrief(prior, priorReport, prs, heads, steps, smallStep(smallReReview, reviewers)));
-  else if (prior) lines.push('', ...reReviewBrief(prior, priorReport, steps));
-  lines.push('', ...reportSpec(ticket, reviewNo, reportPath));
+  if (prior) {
+    // A delta re-review needs the commits the last review saw; reviews from before 2.8.0 didn't record them.
+    const delta = reReviewScope === 'delta' && prior.reviewedHeads;
+    lines.push('', ...reReviewBrief(prior, { delta, prs, heads, small: delta ? smallStep(smallReReview, reviewers) : '', findings: given, report: priorReport, unverified: priorUnverified }));
+  }
   return `${lines.join('\n')}\n`;
 }
 
@@ -355,7 +443,7 @@ export function checksSection(results) {
 /** The prompt with its checks slot filled with `results`, or taken out when there are none. */
 export function fillChecks(prompt, results) {
   const section = checksSection(results);
-  return prompt.replace(`${CHECKS_SLOT}\n\n`, () => (section ? `${section}\n\n` : '')); // a function: command output can hold $& or $1
+  return prompt.split(`\n\n${CHECKS_SLOT}`).join(section ? `\n\n${section}` : ''); // never String.replace with the text: command output can hold $& or $1
 }
 
 /** `text` for inside <tag>…</tag> in the prompt: text other people wrote can't close the tag, or open it again, itself. */
@@ -375,25 +463,57 @@ const ticketSection = text => [
 const finished = prior => new Date(prior.endedAt).toISOString().slice(0, 16).replace('T', ' ');
 
 // What every re-review does with the previous review's findings. The skill takes the prior findings from the PRs'
-// open Prowl threads on every review, whichever machine posted them; the previous report adds to them.
+// open PR-Owl threads on every review, whichever machine raised them; the previous review's findings are their record.
 const PRIOR_STEPS = [
-  "Use the previous report as context for the skill's prior findings (`prior-findings.md`, Prowl's open threads on the PRs): match each of its findings to its thread by link, for the full problem and fix. Add each one with no open thread (posted only in a review body, or its thread since resolved) to the ledger as a prior finding too, re-verified like the others; the skill's *Prior findings* (Step 8) says what each then gets.",
+  "Use the previous review's findings in Prowl's context (below) as the record for the prior findings read from the PRs' open PR-Owl threads (the skill's Step 5): match each to its thread by its link, or by its batch id and id, for the full problem and fix. One with no open thread (raised only in a review body, or its thread resolved since) is still added to the ledger as a prior finding. Re-verify every prior finding against the current head of its PR: they go through verifiers like any other finding.",
+  'A new finding about the same defect as a prior finding is that prior finding: keep the prior entry, so the result ties it to its existing thread. Except a `deferred` one (on a PR left out of this review): a new finding on a reviewed PR that matches it stays its own finding on the reviewed PR, with `crossPr.fixBelongsTo` naming the left-out PR, and the deferred copy stays as it is.',
+  "Each prior finding gets its status in the result (the skill's Step 8, *Statuses*), with its `earlier` filled from the PR as it is now (starting from the one given below). `threadState` is always the thread's state now, never the one given. Every prior finding given below comes back in the result, under its `ref` as `earlier.ref`. Only one on a PR left out of this review goes in as `deferred`; one on a PR this review covers is never `deferred`, and Prowl treats a PR missing one as not fully reviewed.",
 ];
-// Prowl's Park human-only findings setting.
-const PARK_STEP = "Park a prior finding that only a person can resolve outside the code (creating a CI pipeline, changing tracker or permissions config, a product decision): it has been raised, and no code change can fix it. Classify it Parked, not Still open: post no new comment or reply on it, list it under *Parked* in its PR's details file and in the report's *Still open from the previous review* section marked Parked (so the next re-review keeps it parked), and leave it out of the verdict and the front matter's counts.";
 const numbered = (steps, from = 1) => steps.map((s, i) => `${from + i}. ${s}`);
 
-const reReviewBrief = (prior, report, steps) => [
-  '## This is a re-review',
-  '',
-  `The previous review (review ${prior.reviewNo}, finished ${finished(prior)} UTC) produced the report below. The ticket has been tagged for review again, so the authors believe they have addressed it. On top of the normal prowl-review steps:`,
-  '',
-  ...numbered(steps),
-  '',
-  '<previous-report>',
-  inTag('previous-report', report.trim()),
-  '</previous-report>',
-];
+/** The previous review's findings as the prompt's data block: JSON in a fence no backtick run in it can end, each < written \u003c so no finding's text can close the block. */
+function findingsBlock(findings) {
+  const json = JSON.stringify(findings, null, 1);
+  const safe = json.replace(/</g, '\\u003c');
+  const fence = '`'.repeat(Math.max(3, ...(safe.match(/`+/g) || []).map(r => r.length + 1)));
+  return { escaped: safe !== json, lines: ['<previous-findings>', `${fence}json`, safe, fence, '</previous-findings>'] };
+}
+
+/**
+ * The re-review brief: what the previous review found, and what this one does with it. `delta`: only the commits
+ * since the last review (Re-review scope), with the range per PR and, when on, the small re-review step. `findings`:
+ * the previous result's live findings; null for a previous review from before results, whose report's findings
+ * sections stand in (`report`).
+ */
+function reReviewBrief(prior, { delta, prs, heads, small, findings, report, unverified }) {
+  const block = findings ? findingsBlock(findings) : { escaped: false, lines: ['<previous-findings>', inTag('previous-findings', findingsOnly(report).trim()), '</previous-findings>'] };
+  const found = `The previous review (review ${prior.reviewNo}, finished ${finished(prior)} UTC) found what is below${block.escaped ? ' (as JSON, with each `<` written `\\u003c`)' : findings ? ' (as JSON)' : ''}. The ticket has been tagged for review again, so the authors believe they have addressed it.`;
+  const hints = Object.entries(unverified || {});
+  const tail = [
+    '', ...block.lines,
+    ...(hints.length ? ['', "What the previous review couldn't check, per PR. Re-check each point, and list it again only if it still can't be checked:", '', '<previous-unverified>', ...hints.map(([url, text]) => `- ${url}: ${inTag('previous-unverified', text.replace(/\s+/g, ' '))}`), '</previous-unverified>'] : []),
+  ];
+  if (!delta) return ['## This is a re-review', '', `${found} On top of the normal prowl-review steps:`, '', ...numbered(PRIOR_STEPS), ...tail];
+  const since = prs.map(({ url }) => {
+    const [last, now] = [prior.reviewedHeads[url], heads[url]];
+    if (!last || !now) return `- ${url}: not reviewed at a known commit before; review it in full`;
+    return last === now ? `- ${url}: no new commits since ${last}; only re-check its prior findings` : `- ${url}: ${last}..${now}`;
+  });
+  return [
+    '## This is a re-review of what changed',
+    '',
+    `${found} Prowl's Re-review scope is set to delta: review only what changed since then. On top of the normal prowl-review steps:`,
+    '',
+    '1. Review each PR only from the commit the previous review saw to its head now (listed below): give its reviewer those commits (`git diff <last>..<head>`, or `gh api repos/{o}/{r}/compare/<last>...<head>`) and its still-open prior findings, and have it read the rest of the PR as context for them. If a last commit is no longer in the PR\'s history (a force-push or rebase: the compare API\'s `status` is `diverged` or `behind`, not `ahead` or `identical`, or `git merge-base --is-ancestor <last> <head>` fails), review that PR in full.',
+    "2. If the author merged the base branch into the PR since then, that range includes the base branch's changes: raise new findings only in files the PR itself changes (`gh pr diff <PR> --name-only`).",
+    ...numbered([...(small ? [small] : []), ...PRIOR_STEPS], 3),
+    '',
+    'Commits since the previous review:',
+    '',
+    ...since,
+    ...tail,
+  ];
+}
 
 /**
  * The delta brief's step that puts a small change's reviewer on a cheaper model (Small re-review lines, model and
@@ -403,33 +523,7 @@ function smallStep(small, reviewers = null) {
   const { lines, model, effort } = small || {};
   if (!(Number.isInteger(lines) && lines > 0 && AGENT_MODELS.includes(model))) return '';
   const e = EFFORTS.includes(effort) ? effort : reviewers?.effort || ''; // never left on the orchestrator's effort
-  return `A small change gets the small re-review model. First check each PR's range for a force-push, as in step 1. Then count the lines each range above changes (added plus deleted, only in files the PR itself changes, as in step 2; \`git diff --numstat <last>..<head>\`, or the compare API's \`files[].changes\`). The compare API lists at most 300 files: when its list is at that cap the count is incomplete, so count with \`git diff --numstat\` instead, and if you can't, launch that PR's reviewer as usual and give its count as unknown. A PR with no new commits counts as 0 lines. A PR whose range changes at most ${lines} lines gets its reviewer launched with \`model\` \`${model}\`${e && ` and \`effort\` \`${e}\``} on the Agent tool. Every other reviewer is launched as usual: one over ${lines} lines, one reviewed in full (not reviewed at a known commit before, or force-pushed since), and verifiers, which follow the skill's Step 6. In the report's Summary, give each PR's line count and its reviewer's model${e && ' and effort'}, one line per PR.`;
-}
-
-/** A re-review of only the commits since the last review, carrying the last report's front matter and findings. */
-function deltaBrief(prior, report, prs, heads, steps, small = '') {
-  const since = prs.map(({ url }) => {
-    const [last, now] = [prior.reviewedHeads[url], heads[url]];
-    if (!last || !now) return `- ${url}: not reviewed at a known commit before; review it in full`;
-    return last === now ? `- ${url}: no new commits since ${last}; only re-check its prior findings` : `- ${url}: ${last}..${now}`;
-  });
-  return [
-    '## This is a re-review of what changed',
-    '',
-    `The previous review (review ${prior.reviewNo}, finished ${finished(prior)} UTC) found what is below. The ticket has been tagged for review again, so the authors believe they have addressed it. Prowl's Re-review scope is set to delta: review only what changed since then. On top of the normal prowl-review steps:`,
-    '',
-    '1. Review each PR only from the commit the previous review saw to its head now (listed below): give its reviewer those commits (`git diff <last>..<head>`, or `gh api repos/{o}/{r}/compare/<last>...<head>`) and its still-open prior findings, and have it read the rest of the PR as context for them. If a last commit is no longer in the PR\'s history (a force-push or rebase: the compare API\'s `status` is `diverged` or `behind`, not `ahead` or `identical`, or `git merge-base --is-ancestor <last> <head>` fails), review that PR in full.',
-    "2. If the author merged the base branch into the PR since then, that range includes the base branch's changes: raise new findings only in files the PR itself changes (`gh pr diff <PR> --name-only`).",
-    ...numbered([...(small ? [small] : []), ...steps], 3),
-    '',
-    'Commits since the previous review:',
-    '',
-    ...since,
-    '',
-    '<previous-findings>',
-    inTag('previous-findings', findingsOnly(report).trim()),
-    '</previous-findings>',
-  ];
+  return `A small change gets the small re-review model. First check each PR's range for a force-push, as in step 1. Then count the lines each range above changes (added plus deleted, only in files the PR itself changes, as in step 2; \`git diff --numstat <last>..<head>\`, or the compare API's \`files[].changes\`). The compare API lists at most 300 files: when its list is at that cap the count is incomplete, so count with \`git diff --numstat\` instead, and if you can't, launch that PR's reviewer as usual and give its count as unknown. A PR with no new commits counts as 0 lines. A PR whose range changes at most ${lines} lines gets its reviewer launched with \`model\` \`${model}\`${e && ` and \`effort\` \`${e}\``} on the Agent tool. Every other reviewer is launched as usual: one over ${lines} lines, one reviewed in full (not reviewed at a known commit before, or force-pushed since), and verifiers, which follow the skill's Step 6. In the closing message, give each PR's line count and its reviewer's model${e && ' and effort'}, one line per PR.`;
 }
 
 /**
@@ -449,35 +543,3 @@ export function findingsOnly(report) {
   }
   return kept.length ? `${head && `${head}\n`}${kept.join('\n').trim()}\n` : report;
 }
-
-const reportSpec = (id, n, file) => [
-  '## Report file (required, final step)',
-  '',
-  `After posting, write the review report to this exact path: ${file}`,
-  '',
-  'Start it with this front matter, filled in (counts are verified findings: new plus still-open prior ones):',
-  '',
-  '---',
-  `ticket: ${id}`,
-  `review: ${n}`,
-  'verdict: <worst PR verdict, named as in the review config>',
-  'critical: <n>',
-  'high: <n>',
-  'medium: <n>',
-  'low: <n>',
-  'nit: <n>',
-  'fixed: <prior findings verified fixed: earlier Prowl findings, from any reviewer\'s Prowl>',
-  'stillOpen: <prior findings still open>',
-  'approved: <each PR this review approved, as <PR URL>@<head sha reviewed>, space-separated on this one line: the PRs whose review event was APPROVE, or would have been with approvals off or in comment mode (the user\'s own PRs). Leave it blank if none>',
-  '---',
-  '',
-  'Then these sections:',
-  '1. Summary: the goal of the work, the batch verdict and the merge order, in a few sentences.',
-  '2. Pull requests: a table of PR (link), title, author, verdict and posted review (link).',
-  '3. Issues found: per PR, every verified finding with severity, title, file:line, a link to its posted comment (or to the review when it is in the review body; for a point someone else raised first, a link to their comment and to the reply, if any), the problem, the failure scenario and the suggested fix.',
-  '4. What was fixed: every prior finding verified fixed, with the fixing commit and a link to its comment thread, or "No earlier findings."',
-  '5. Still open from the previous review: each prior finding still open, with a link to its comment thread, or "No earlier findings."',
-  '6. Not posted: refuted, duplicate, already-addressed and unverifiable findings, one line each with the reason.',
-  '',
-  'Every link must be a full https:// URL.',
-];

@@ -1,12 +1,65 @@
 {
-  "first": { "ticket": "AB#42", "title": "Thing", "ticketUrl": "https://dev.azure.com/o/p/_workitems/edit/42", "reviewNo": 1, "reportPath": "/r/AB42-r1.md",
-    "prs": [{ "url": "https://github.com/o/a/pull/1" }, { "url": "https://github.com/o/b/pull/2" }] },
-  "reReview": { "ticket": "AB#42", "title": "Thing", "ticketUrl": "https://dev.azure.com/o/p/_workitems/edit/42", "reviewNo": 2, "reportPath": "/r/AB42-r2.md",
-    "prs": [{ "url": "https://github.com/o/a/pull/1" }, { "url": "https://github.com/o/b/pull/2" }],
-    "prior": { "reviewNo": 1, "endedAt": 1760000000000 }, "priorReport": "prior-report.md" },
-  "context": { "ticket": "AB#42", "title": "Thing", "ticketUrl": "https://dev.azure.com/o/p/_workitems/edit/42", "reviewNo": 2, "reportPath": "/r/AB42-r2.md",
-    "prs": [{ "url": "https://github.com/o/b/pull/2" }], "contextPrs": [{ "url": "https://github.com/o/a/pull/1" }],
-    "prior": { "reviewNo": 1, "endedAt": 1760000000000 }, "priorReport": "prior-report.md" },
-  "approvalsOff": { "ticket": "PROJ-7", "title": "Other", "ticketUrl": "https://x.atlassian.net/browse/PROJ-7", "reviewNo": 1, "reportPath": "/r/PROJ-7-r1.md",
-    "prs": [{ "url": "https://github.com/o/c/pull/3" }], "approvals": false }
+  "first": {
+    "ticket": "AB#42",
+    "title": "Thing",
+    "ticketUrl": "https://dev.azure.com/o/p/_workitems/edit/42",
+    "reviewNo": 1,
+    "prs": [
+      {
+        "url": "https://github.com/o/a/pull/1"
+      },
+      {
+        "url": "https://github.com/o/b/pull/2"
+      }
+    ],
+    "batchId": "rb-20260101-ab42-r1-0900-ab12",
+    "resultPath": "/r/AB42-r1.result.json",
+    "checker": "\"/usr/bin/node\" \"/app/prowl.mjs\" --check-result \"/r/AB42-r1.result.json\" --batch rb-20260101-ab42-r1-0900-ab12 --prs \"https://github.com/o/a/pull/1,https://github.com/o/b/pull/2\""
+  },
+  "reReview": {
+    "ticket": "AB#42",
+    "title": "Thing",
+    "ticketUrl": "https://dev.azure.com/o/p/_workitems/edit/42",
+    "reviewNo": 2,
+    "prs": [
+      {
+        "url": "https://github.com/o/a/pull/1"
+      },
+      {
+        "url": "https://github.com/o/b/pull/2"
+      }
+    ],
+    "prior": {
+      "reviewNo": 1,
+      "endedAt": 1760000000000
+    },
+    "priorReport": "prior-report.md",
+    "batchId": "rb-20260101-ab42-r2-0900-ab12",
+    "resultPath": "/r/AB42-r2.result.json",
+    "checker": "\"/usr/bin/node\" \"/app/prowl.mjs\" --check-result \"/r/AB42-r2.result.json\" --batch rb-20260101-ab42-r2-0900-ab12 --prs \"https://github.com/o/a/pull/1,https://github.com/o/b/pull/2\""
+  },
+  "context": {
+    "ticket": "AB#42",
+    "title": "Thing",
+    "ticketUrl": "https://dev.azure.com/o/p/_workitems/edit/42",
+    "reviewNo": 2,
+    "prs": [
+      {
+        "url": "https://github.com/o/b/pull/2"
+      }
+    ],
+    "contextPrs": [
+      {
+        "url": "https://github.com/o/a/pull/1"
+      }
+    ],
+    "prior": {
+      "reviewNo": 1,
+      "endedAt": 1760000000000
+    },
+    "priorReport": "prior-report.md",
+    "batchId": "rb-20260101-ab42-r2-0900-ab12",
+    "resultPath": "/r/AB42-r2.result.json",
+    "checker": "\"/usr/bin/node\" \"/app/prowl.mjs\" --check-result \"/r/AB42-r2.result.json\" --batch rb-20260101-ab42-r2-0900-ab12 --prs \"https://github.com/o/b/pull/2,https://github.com/o/a/pull/1\""
+  }
 }

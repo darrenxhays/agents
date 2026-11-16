@@ -1,15 +1,21 @@
 // The Reviewer: polls the boards for tickets tagged for review and runs Claude Code's prowl-review skill on their open,
 // non-draft GitHub PRs. src/shell.mjs drives poll() and tick(); the Builder never reads its state (state.json).
+import fs from 'node:fs';
 import path from 'node:path';
-import { CHECKS_PATH, readChecks, saveConfig, writeJson } from '../config.mjs';
+import { CHECKS_PATH, CONFIG_DIR, readChecks, saveConfig, writeJson } from '../config.mjs';
 import * as github from '../github.mjs';
 import { createLabels, refusal } from '../labels.mjs';
 import { askLabel, labelNames, labelsOf, labelWrite, outcomeTag, pendingTag, reviewTags, tagReader } from '../names.mjs';
 import { acceptOffer, offerFor } from '../offers.mjs';
 import { autoName, cleanName, notARef, parsePaste, ticketKey } from '../paste.mjs';
-import { fill, outputTemplate } from '../templates.mjs';
+import { frontMatter } from '../match.mjs';
+import { fill, loadOutputTemplates, outputTemplate } from '../templates.mjs';
 import * as rv from './reviews.mjs';
-import { checkPlan, checksFiles, checksLine, prChecks } from './checks.mjs';
+import { checkPlan, checksLine, prChecks } from './checks.mjs';
+import { planPublish } from './publish-plan.mjs';
+import { publishReview } from './publish.mjs';
+import { prName, reportMd } from './render.mjs';
+import { approvable, checkResult, notCarried, verdictLabels } from './result.mjs';
 
 /**
  * The Reviewer side. `deps`: { log(level, msg, key), forget(key), hoot(text, mood), appDir, trackers, github, labels (the
@@ -89,7 +95,7 @@ export function createReviewer(app, deps) {
    */
   function begin(c, opts) {
     if (!checksFor(opts.prs).length) return (side.startReview || rv.startReview)(c, appDir, opts);
-    return (side.createReview || rv.createReview)(c, { ...opts, checking: true });
+    return (side.createReview || rv.createReview)(c, { ...opts, appDir, checking: true });
   }
   const note = (run, text) => { (run._activity ??= []).push({ text }); };
 
@@ -656,7 +662,9 @@ export function createReviewer(app, deps) {
   }
 
   /** The label that says how a review of the PR at `url` went: approved, or changes requested. */
-  const outcomeLabel = (run, url) => (run.approved?.[url] ? labelNames(cfg()).approved : labelNames(cfg()).changes);
+  // A review Prowl posted itself (result mode) knows more: a PR it couldn't read, or didn't review in full with nothing
+  // blocking found, gets neither label.
+  const outcomeLabel = (run, url) => (run.approved?.[url] ? labelNames(cfg()).approved : !run.resultMode || run.blocked?.includes(url) ? labelNames(cfg()).changes : '');
   side.outcomeLabel = outcomeLabel;
 
   /**
@@ -753,11 +761,14 @@ export function createReviewer(app, deps) {
    * labels its PRs Reviewed and waits on them, or retries once, or takes its labels off.
    */
   async function finish(run) {
-    rv.finalize(run);
+    // A review left half-posted by an earlier launch: its session was settled then, and its posting carries on.
+    const resumed = run.phase === 'publishing';
+    if (!resumed) rv.finalize(run);
     const { tags } = cfg();
     const failures = run.quick ? (side.state.quickFailures ??= {}) : side.state.failures; // a quick review's apart from the ticket's
     const again = run.quick ? 'n reviews PRs again' : `re-tag '${tags.trigger}' to try again`;
-    if (run.status === 'done') {
+    if (run.resultMode && (resumed || run.status === 'done')) await settleResult(run);
+    else if (run.status === 'done') { // a review from before results: its session posted its reviews itself
       const unchecked = await checkPosted(run).catch(() => run.prs.map(p => p.url)); // announce any PR posted since the last check
       if (run.marker) rv.failUnposted(run, await missingReviews(run, unchecked)); // reviews started before 2.12.0 have none
     }
@@ -772,7 +783,8 @@ export function createReviewer(app, deps) {
       failures[run.ticket] = (failures[run.ticket] || 0) + 1;
       retry = (!run.quick || run.labels) && rv.retryFailed(run, failures[run.ticket]); // one automatic retry, then wait for a human
       run.pendingTag = retry ? tags.trigger : '';
-      const why = run.capped ? 'Not retried, as it hit a cap' : run.unposted?.length ? 'Not retried, as a retry would most likely be blocked too' : run.quick && !run.labels ? 'Not retried' : 'Not retrying again';
+      const why = run.capped ? 'Not retried, as it hit a cap' : run.unposted?.length && run.resultMode ? 'Not retried (review not posted): the Log says what GitHub refused. A re-tagged review runs again from the start'
+        : run.unposted?.length ? 'Not retried, as a retry would most likely be blocked too' : run.quick && !run.labels ? 'Not retried' : 'Not retrying again';
       const retried = run.quick ? 'Retrying it once, when a slot is free.' : `Re-tagged '${tags.trigger}' to retry once.`;
       log('error', `${run.ticket}: review failed: ${run.error}. ${retry ? retried : `${why}; ${again}.`}`);
     } else {
@@ -785,6 +797,54 @@ export function createReviewer(app, deps) {
     }
     save();
     if (run.pendingTag != null) await applyTag(run);
+  }
+
+  /**
+   * Settles a review that wrote a result: the result is checked, the report written from it, everything posted by
+   * Prowl itself, and the report written again with the links. While it posts, the run stays running in its
+   * publishing phase, so a restart carries on where it stopped and nothing is posted twice. An invalid result fails
+   * the review with nothing on GitHub; a PR left without its review fails it too, and that isn't retried.
+   */
+  async function settleResult(run) {
+    Object.assign(run, { status: 'running', phase: 'publishing' });
+    save();
+    const failed = error => Object.assign(run, { status: 'failed', error });
+    let result;
+    try {
+      const text = fs.readFileSync(run.resultPath, 'utf8');
+      const problems = checkResult(text, { batchId: run.batchId, prUrls: run.resultPrs });
+      if (problems.length) failed(`its review result has ${problems.length} problem${problems.length > 1 ? 's' : ''}, so nothing was posted: ${problems.slice(0, 5).join('; ')} (${run.resultPath})`);
+      else result = JSON.parse(text);
+    } catch (e) {
+      failed(`its review result has 1 problem, so nothing was posted: can't read it: ${e.message} (${run.resultPath})`);
+    }
+    if (result) {
+      try {
+        const read = f => { try { return fs.readFileSync(f, 'utf8'); } catch { return null; } };
+        const templates = loadOutputTemplates(appDir);
+        const labels = verdictLabels(read(path.join(CONFIG_DIR, 'review.md')) ?? read(path.join(appDir, 'skills', 'prowl-review', 'config', 'review.md')));
+        const info = Object.fromEntries([...run.prs, ...(run.contextPrs || []), ...(run.leftOut || [])].map(p => [p.url, { title: p.title || '', author: p.author || '' }]));
+        const write = plan => fs.writeFileSync(run.reportPath, reportMd(result, run, plan, { ...info, ...Object.fromEntries(Object.entries(plan.info || {}).map(([url, x]) => [url, { title: x.title || info[url]?.title || '', author: x.author || info[url]?.author || '' }])) }));
+        // Before anything is posted (no links yet), so a report exists even if posting fails.
+        if (!fs.existsSync(run.reportPath)) write(planPublish(result, { run, templates, labels, prs: {} }));
+        // What the session was given and its result doesn't carry is owed: given again next round.
+        run.owed = (run.priorGiven || []).filter(g => notCarried(result, g.pr, [g.ref]).length);
+        const plan = await (deps.publishReview || publishReview)(run, result, { gh, log, hoot, save, templates, labels });
+        write(plan);
+        run.summary = frontMatter(fs.readFileSync(run.reportPath, 'utf8'));
+        run.blocked = plan.prs.filter(r => run.published?.[`review:${r.url}`] && !approvable(r.severity)).map(r => r.url);
+        // Every open PR under review must have its review: a PR merged or closed meanwhile has nothing to post on.
+        const missing = plan.prs.filter(r => !run.published?.[`review:${r.url}`] && !['merged', 'closed'].includes(r.skip));
+        if (missing.length) {
+          run.unposted = missing.map(r => r.url);
+          failed(`no review posted on ${missing.map(r => prName(r.url)).join(', ')} (${missing.map(r => `${prName(r.url)}: ${run.publishErrors?.[r.url] || run.unreviewed?.[r.url] || r.skip || 'it was never posted'}`).join('; ')}); the review result is in ${run.resultPath}`);
+        } else run.status = 'done';
+      } catch (e) {
+        failed(`couldn't write or publish its review: ${e.message}`);
+      }
+    }
+    delete run.phase;
+    save();
   }
 
   /** A quick review with labels, settled: each PR's outcome label and a wait on its PRs, a wait to retry it, or its labels off. */
@@ -833,6 +893,11 @@ export function createReviewer(app, deps) {
   side.tick = function tick() {
     for (const run of side.running()) {
       if (run._finishing) continue;
+      if (run.phase === 'publishing') { // left half-posted by an earlier launch: its posting carries on, and nothing is posted twice
+        run._finishing = true;
+        finish(run).catch(e => log('error', `${run.ticket}: ${e.message}`));
+        continue;
+      }
       if (run.phase === 'checks') { // no session yet, so no process to have exited: its checks run in this process
         if (run.status === 'running') {
           if (rv.overdue(run, cfg())) stopOverdue(run);
@@ -850,7 +915,7 @@ export function createReviewer(app, deps) {
         finish(run).catch(e => log('error', `${run.ticket}: ${e.message}`));
       } else if (rv.overdue(run, cfg())) {
         stopOverdue(run);
-      } else if (app.me && !run._checking && Date.now() - (run._checkedAt || 0) > 60_000) {
+      } else if (!run.resultMode && app.me && !run._checking && Date.now() - (run._checkedAt || 0) > 60_000) { // a review from before results posts its own reviews
         run._checking = true;
         checkPosted(run).finally(() => { run._checking = false; });
       }
@@ -868,6 +933,7 @@ export function createReviewer(app, deps) {
   /** --once: settles reviews whose sessions have ended before the poll. */
   side.settle = async function settle() {
     for (const run of side.running()) {
+      if (run.phase === 'publishing') { await finish(run); continue; }
       if (run.phase === 'checks') { // its checks run again from the start; checksDone() waits for them
         if (run.status === 'running') runChecks(run);
         else if (!run._building) await finish(run);
@@ -882,12 +948,14 @@ export function createReviewer(app, deps) {
   /** The question s asks before stopping `run`: a review that has written its report counts as done all the same. */
   side.stopText = run => {
     const done = rv.reportWritten(run);
-    if (run.quick) return `Stop the quick review ${run.ticket}?${done ? ` It has written its report, so it counts as done${labelsOn() ? ' and its PRs are labelled as usual' : ''}.` : ''}`;
-    return done ? `Stop the review of ${run.ticket}? It has written its report, so it counts as done and is tagged as usual.`
+    const wrote = run.resultMode ? 'review result, so it counts as done: Prowl posts it' : 'report, so it counts as done';
+    if (run.quick) return `Stop the quick review ${run.ticket}?${done ? ` It has written its ${wrote}${labelsOn() ? ' and its PRs are labelled as usual' : ''}.` : ''}`;
+    return done ? `Stop the review of ${run.ticket}? It has written its ${wrote} and it is tagged as usual.`
       : `Stop the review of ${run.ticket}? Its '${cfg().tags.inProgress}' tag is removed; re-tag to run it again.`;
   };
 
   side.stop = run => {
+    if (run.phase === 'publishing') return log('warn', `${run.ticket}: its review is being posted on GitHub and can't be stopped part-way`);
     rv.stopReview(run);
     save();
     log('warn', `${run.ticket}: stopping the review`);

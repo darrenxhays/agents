@@ -328,7 +328,7 @@ export function startTui(app, actions, io = {}) {
       }
       const stopping = r.status === 'stopping';
       const left = [cursor(i === at), [stopping ? ST.red : acc().fg, `${stopping ? '■' : spin()} `], [ST.bold, `${r.ticket}  `]];
-      const right = [[ST.grey, `  ${plural(r.prs.length, 'PR')} · ${r.phase === 'checks' ? 'building and testing' : r.reviewNo > 1 ? `re-review #${r.reviewNo}` : 'first review'} · ${dur(Date.now() - r.startedAt)} `]];
+      const right = [[ST.grey, `  ${plural(r.prs.length, 'PR')} · ${r.phase === 'checks' ? 'building and testing' : r.phase === 'publishing' ? 'posting its review' : r.reviewNo > 1 ? `re-review #${r.reviewNo}` : 'first review'} · ${dur(Date.now() - r.startedAt)} `]];
       const title = trunc(stopping ? `stopping… ${r.title}` : r.title, W - width(left) - width(right) - 1);
       return onClick(spread([...left, ['', title]], right, W), pick(RUNNING, i));
     });
@@ -1228,6 +1228,7 @@ export function startTui(app, actions, io = {}) {
         actions.reReview(r).catch(e => flash(`Couldn't start the review: ${e.message}`));
       } };
     }
+    else if (k === 's' && view() === RUNNING && r.phase === 'publishing') flash(`${r.ticket}: its review is being posted and can't be stopped part-way.`);
     else if (k === 's' && view() === RUNNING && r.status === 'running') {
       ui.confirm = { text: reviewer.stopText(r), yes: () => actions.stop('reviewer', r) };
     }

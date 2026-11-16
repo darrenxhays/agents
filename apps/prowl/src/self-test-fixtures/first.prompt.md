@@ -4,34 +4,8 @@
 
 - Ticket: AB#42 "Thing" (https://dev.azure.com/o/p/_workitems/edit/42)
 - This is review 1 of this ticket.
-- It started automatically because the ticket was tagged for review. Nobody is watching this session: never stop to ask a question; make the reasonable call and note it in the report.
-
-## Report file (required, final step)
-
-After posting, write the review report to this exact path: /r/AB42-r1.md
-
-Start it with this front matter, filled in (counts are verified findings: new plus still-open prior ones):
-
----
-ticket: AB#42
-review: 1
-verdict: <worst PR verdict, named as in the review config>
-critical: <n>
-high: <n>
-medium: <n>
-low: <n>
-nit: <n>
-fixed: <prior findings verified fixed: earlier Prowl findings, from any reviewer's Prowl>
-stillOpen: <prior findings still open>
-approved: <each PR this review approved, as <PR URL>@<head sha reviewed>, space-separated on this one line: the PRs whose review event was APPROVE, or would have been with approvals off or in comment mode (the user's own PRs). Leave it blank if none>
----
-
-Then these sections:
-1. Summary: the goal of the work, the batch verdict and the merge order, in a few sentences.
-2. Pull requests: a table of PR (link), title, author, verdict and posted review (link).
-3. Issues found: per PR, every verified finding with severity, title, file:line, a link to its posted comment (or to the review when it is in the review body; for a point someone else raised first, a link to their comment and to the reply, if any), the problem, the failure scenario and the suggested fix.
-4. What was fixed: every prior finding verified fixed, with the fixing commit and a link to its comment thread, or "No earlier findings."
-5. Still open from the previous review: each prior finding still open, with a link to its comment thread, or "No earlier findings."
-6. Not posted: refuted, duplicate, already-addressed and unverifiable findings, one line each with the reason.
-
-Every link must be a full https:// URL.
+- It started automatically because the ticket was tagged for review. Nobody is watching this session: never stop to ask a question; make the reasonable call and say so in the closing message.
+- Every review, first or not, re-checks each open PR-Owl thread on the PRs it reviews, whoever's Prowl raised it (the skill's Step 2), and gives each one its status in the review result (the skill's Step 8).
+- The batch id: `rb-20260101-ab42-r1-0900-ab12`.
+- The result path: /r/AB42-r1.result.json
+- The checker command: `"/usr/bin/node" "/app/prowl.mjs" --check-result "/r/AB42-r1.result.json" --batch rb-20260101-ab42-r1-0900-ab12 --prs "https://github.com/o/a/pull/1,https://github.com/o/b/pull/2"`

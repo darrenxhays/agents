@@ -269,14 +269,14 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
     // The prompt's slot.
     const first = promptCases.first;
     const slotted = buildPrompt({ ...first, checking: true });
-    assert.ok(slotted.includes(`\n\n${CHECKS_SLOT}\n\n`));
+    assert.ok(slotted.includes(`\n\n${CHECKS_SLOT}\n`));
     assert.equal(fillChecks(slotted, []), buildPrompt(first), 'no results: the prompt is as without the slot');
     const results = [{ url: 'https://github.com/o/a/pull/1', label: 'o/a#1', head, mergeBase: mb, log: '/l/1.checks.log',
       steps: [{ name: 'build', status: 'passed' }, { name: 'test', status: 'failed', command: 'echo $& $1', tail: 'tail $1 $&', atBase: 'failed', baseTail: 'base tail' }, { name: 'lint', status: 'nothing' }] },
     { url: 'https://github.com/o/b/pull/2', label: 'o/b#2', error: 'its branch is in a fork' },
     { url: 'https://github.com/o/c/pull/3', label: 'o/c#3', head, mergeBase: mb, log: '/l/3.checks.log', steps: [{ name: 'build', status: 'failed', command: 'make', tail: '  ', atBase: 'passed' }, { name: 'test', status: 'skipped', after: 'build' }] }];
     const filled = fillChecks(slotted, results);
-    assert.ok(filled.includes('## Build and test results') && !filled.includes(CHECKS_SLOT) && filled.indexOf('## Build and test results') < filled.indexOf('## Report file'));
+    assert.ok(filled.includes('## Build and test results') && !filled.includes(CHECKS_SLOT) && filled.indexOf('## Build and test results') > filled.indexOf('- The checker command'));
     assert.ok(filled.includes(`- https://github.com/o/a/pull/1 at aaaaaaa (merge base bbbbbbb): build passed; test FAILED (\`echo $& $1\`; fails at the merge base too: compare the two outputs); lint: nothing to run. Every command's whole output: /l/1.checks.log`), 'a command with $& and $1 appears as written');
     assert.ok(filled.includes('<check-output pr="https://github.com/o/a/pull/1" step="test" at="head">\ntail $1 $&\n</check-output>') && filled.includes('at="merge-base">\nbase tail\n</check-output>'));
     assert.ok(filled.includes("- https://github.com/o/b/pull/2: the checks couldn't run (its branch is in a fork).") && filled.includes('test skipped (build failed)') && filled.includes('passes at the merge base, so this PR most likely introduced it') && filled.includes('(no output)'));

@@ -317,3 +317,95 @@ export async function failedLog(link, max = 4000) {
   const out = await run('gh', ['run', 'view', m[2], '--repo', m[1], '--log-failed']).catch(() => '');
   return out.slice(-max);
 }
+
+// ---- What Prowl reads and writes to post a review itself (src/reviewer/publish.mjs) ----
+
+/**
+ * Runs `gh api …` and resolves with its stdout. A failure throws an Error carrying GitHub's message, `gh: true` and
+ * `status`: the HTTP status (from "HTTP nnn" in gh's output; 400 for a GraphQL error), or none for a network failure.
+ */
+export async function ghApi(args, opts) {
+  let r;
+  try { r = await runFull('gh', ['api', ...args], opts); } catch (e) { throw Object.assign(e, { gh: true }); } // gh couldn't start, or gave no answer
+  if (r.code === 0) return r.out;
+  const text = `${r.err}\n${r.out}`;
+  const status = Number(/HTTP (\d{3})/.exec(text)?.[1]) || (/GraphQL:/i.test(text) ? 400 : undefined);
+  let message = (r.err || r.out).trim().split('\n')[0].replace(/^gh: /, '').slice(0, 300);
+  try {
+    const j = JSON.parse(r.out);
+    const parts = [j.message, ...(j.errors || []).map(e => (typeof e === 'string' ? e : e.message || e.code || JSON.stringify(e)))].filter(Boolean);
+    if (parts.length) message = parts.join(': ').slice(0, 300);
+  } catch { /* no JSON body: gh's own line stands */ }
+  throw Object.assign(new Error(message), { status, gh: true });
+}
+const apiLines = async args => jsonLines(await ghApi(args));
+
+/** A PR as it is now: { state ('open', 'merged' or 'closed'), head, base (commits), title, author }. */
+export async function prNow(pr) {
+  const v = JSON.parse(await ghApi([`repos/${pr.repo}/pulls/${pr.number}`, '--jq', '{state, merged: (.merged_at != null), head: .head.sha, base: .base.sha, title, author: .user.login}']));
+  return { state: v.merged ? 'merged' : v.state, head: v.head, base: v.base, title: v.title || '', author: v.author || '' };
+}
+
+/** The PR's changed files with their patches: [{ filename, patch }], every page. A binary or too-large file has no patch. */
+export const prFiles = pr => apiLines([`repos/${pr.repo}/pulls/${pr.number}/files`, '--paginate', '--jq', '.[] | {filename, patch}']);
+
+/** The files `base`...`head` changes in `repo`, with their patches (up to 300 files): a PR's as they were at a commit it has moved past. */
+export const compareFiles = (repo, base, head) => apiLines([`repos/${repo}/compare/${base}...${head}`, '--jq', '.files[] | {filename, patch}']);
+
+const REVIEW_THREADS = 'query($owner:String!,$repo:String!,$n:Int!,$after:String){repository(owner:$owner,name:$repo){pullRequest(number:$n){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{'
+  + 'id isResolved isOutdated first:comments(first:1){nodes{databaseId url}} last:comments(last:30){nodes{body}}}}}}}';
+/**
+ * The PR's review threads, every page: [{ id, commentId (its first comment's), url, resolved, outdated, lastBody (its
+ * latest comment), lastProwlBody (its latest comment carrying a prowl-review marker, among the last 30) }].
+ */
+export async function reviewThreads(pr) {
+  const [owner, repo] = pr.repo.split('/');
+  const threads = [];
+  let after = null;
+  do {
+    const page = JSON.parse(await ghApi(['graphql', '-F', `owner=${owner}`, '-F', `repo=${repo}`, '-F', `n=${pr.number}`, ...(after ? ['-f', `after=${after}`] : []), '-f', `query=${REVIEW_THREADS}`]));
+    const list = page?.data?.repository?.pullRequest?.reviewThreads;
+    for (const t of list?.nodes || []) {
+      const bodies = (t.last?.nodes || []).map(c => c.body || '');
+      threads.push({ id: t.id, commentId: t.first?.nodes?.[0]?.databaseId ?? null, url: t.first?.nodes?.[0]?.url || '', resolved: Boolean(t.isResolved), outdated: Boolean(t.isOutdated),
+        lastBody: bodies.at(-1) || '', lastProwlBody: bodies.filter(b => b.includes('<!-- prowl-review ')).at(-1) || '' });
+    }
+    after = list?.pageInfo?.hasNextPage ? list.pageInfo.endCursor : null;
+  } while (after);
+  return threads;
+}
+
+/**
+ * Everything `login` wrote on the PR at or after `since` (ms): { reviews: [{ id, body, url, state, commit }],
+ * comments: [{ id, body, url, inReplyTo, reviewId }] (review comments), issueComments: [{ id, body, url }] }.
+ */
+export async function writtenSince(pr, login, since) {
+  const mine = x => String(x.user || '').toLowerCase() === String(login).toLowerCase() && Date.parse(x.at) >= since;
+  const iso = new Date(since).toISOString();
+  const [reviews, comments, issueComments] = await Promise.all([
+    apiLines([`repos/${pr.repo}/pulls/${pr.number}/reviews`, '--paginate', '--jq', '.[] | {id, user: .user.login, at: .submitted_at, body, url: .html_url, state, commit: .commit_id}']),
+    apiLines([`repos/${pr.repo}/pulls/${pr.number}/comments?since=${iso}`, '--paginate', '--jq', '.[] | {id, user: .user.login, at: .created_at, body, url: .html_url, inReplyTo: .in_reply_to_id, reviewId: .pull_request_review_id}']),
+    apiLines([`repos/${pr.repo}/issues/${pr.number}/comments?since=${iso}`, '--paginate', '--jq', '.[] | {id, user: .user.login, at: .created_at, body, url: .html_url}']),
+  ]);
+  return { reviews: reviews.filter(mine), comments: comments.filter(mine), issueComments: issueComments.filter(mine) };
+}
+
+/** Posts a review on the PR from `file` ({ commit_id?, event, body, comments }). Resolves { id, url, state } as GitHub returns it. */
+export async function createReview(pr, file) {
+  return JSON.parse(await ghApi(['-X', 'POST', `repos/${pr.repo}/pulls/${pr.number}/reviews`, '--input', file, '--jq', '{id, url: .html_url, state}']));
+}
+
+/** The inline comments of review `id` on the PR: [{ body, url }]. */
+export const reviewComments = (pr, id) => apiLines([`repos/${pr.repo}/pulls/${pr.number}/reviews/${id}/comments`, '--paginate', '--jq', '.[] | {body, url: .html_url}']);
+
+/** Replies on the thread whose first comment is `commentId`, from `file` ({ body }). Resolves with the reply's URL. */
+export const replyOn = async (pr, commentId, file) => (await ghApi(['-X', 'POST', `repos/${pr.repo}/pulls/${pr.number}/comments/${commentId}/replies`, '--input', file, '--jq', '.html_url'])).trim();
+
+/** Posts a conversation comment on the PR from `file` ({ body }). Resolves with its URL. */
+export const commentOn = async (pr, file) => (await ghApi(['-X', 'POST', `repos/${pr.repo}/issues/${pr.number}/comments`, '--input', file, '--jq', '.html_url'])).trim();
+
+/** Resolves a review thread, or reopens it. */
+export async function setThreadResolved(threadId, resolved) {
+  const m = resolved ? 'resolveReviewThread' : 'unresolveReviewThread';
+  await ghApi(['graphql', '-f', `query=mutation($id:ID!){${m}(input:{threadId:$id}){thread{isResolved}}}`, '-f', `id=${threadId}`]);
+}

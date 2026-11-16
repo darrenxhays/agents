@@ -86,18 +86,18 @@ assert.equal(frontMatter('# no front matter'), null);
 
 assert.ok(newer('2.10.0', '2.9.9') && newer('3.0.0', '2.99.0') && newer('2.1.1', '2.1') && !newer('2.1.0', '2.1.0') && !newer('1.9.0', '2.0.0'));
 
-const base = { ticket: 'AB#42', title: 'Thing', ticketUrl: 'https://dev.azure.com/o/p/_workitems/edit/42', reviewNo: 1, reportPath: '/r/AB42.md',
+const base = { ticket: 'AB#42', title: 'Thing', ticketUrl: 'https://dev.azure.com/o/p/_workitems/edit/42', reviewNo: 1, batchId: 'rb-20260101-ab42-r1-0900-ab12', resultPath: '/r/AB42.result.json', checker: 'node prowl.mjs --check-result',
   prs: [{ url: 'https://github.com/o/a/pull/1' }, { url: 'https://github.com/o/b/pull/2' }] };
 const first = buildPrompt(base);
 assert.ok(first.startsWith('/prowl:prowl-review https://github.com/o/a/pull/1 https://github.com/o/b/pull/2\n'));
-assert.ok(first.includes('/r/AB42.md') && first.includes('Ticket: AB#42 "Thing"') && first.includes('ticket: AB#42') && !first.includes('re-review'));
+assert.ok(first.includes('- The result path: /r/AB42.result.json') && first.includes('Ticket: AB#42 "Thing"') && first.includes('- The batch id: `rb-20260101-ab42-r1-0900-ab12`.') && first.includes('- The checker command: `node prowl.mjs --check-result`') && !first.includes('re-review'));
 const again = buildPrompt({ ...base, reviewNo: 2, prior: { reviewNo: 1, endedAt: 0 }, priorReport: 'F-01 [HIGH] old finding' });
-assert.ok(!first.includes('Approvals off') && buildPrompt({ ...base, approvals: false }).includes('Approvals off'));
+assert.equal(buildPrompt({ ...base, approvals: false, parkHumanOnly: true }), first, "Approve PRs and Park human-only findings are Prowl's to apply as it posts: the prompt doesn't differ with them");
 const ctx = buildPrompt({ ...base, prs: base.prs.slice(1), contextPrs: base.prs.slice(0, 1) });
 assert.ok(ctx.startsWith('/prowl:prowl-review https://github.com/o/b/pull/2 https://github.com/o/a/pull/1\n'), 'approved PRs go to the skill as context');
-assert.ok(ctx.includes('## Already approved: context only\n\n') && ctx.includes('- https://github.com/o/a/pull/1') && !first.includes('Already approved'));
-assert.ok(first.includes('approved: <each PR'));
-assert.ok(again.includes('This is a re-review') && again.includes('F-01 [HIGH] old finding') && again.includes('What was fixed: every prior finding'));
+assert.ok(ctx.includes('## Unchanged since the last review: context only\n\n') && ctx.includes('- https://github.com/o/a/pull/1') && !first.includes('context only'));
+assert.ok(!first.includes('Report file') && first.includes('say so in the closing message'), 'the session writes no report: Prowl writes it from the result');
+assert.ok(again.includes('This is a re-review') && again.includes('F-01 [HIGH] old finding') && again.includes('Every prior finding given below comes back in the result'));
 
 // With every setting at its default, the prompt is byte for byte the golden copy (captured from 2.7.0; in 2.20.0 the
 // prior findings moved to the skill, taken from the PRs' open Prowl threads on every review).
@@ -129,11 +129,8 @@ assert.ok(!roundCapped({ maxReviewRounds: 0 }, { reviewNo: 9 }), 'no cap');
 assert.ok(!roundCapped({ maxReviewRounds: 3 }, undefined) && !roundCapped({ maxReviewRounds: 3 }, { reviewNo: 2 }), 'review 3 of 3 runs');
 assert.ok(roundCapped({ maxReviewRounds: 3 }, { reviewNo: 3 }) && roundCapped({ maxReviewRounds: 1 }, { reviewNo: 1 }));
 
-// Park human-only findings: the brief's extra step, only when on (and only on a re-review).
-const parks = c => buildPrompt({ ...c, parkHumanOnly: true }).includes('Classify it Parked');
-assert.ok(parks(promptCases.reReview) && parks({ ...promptCases.reReview, prior: priorRun, reReviewScope: 'delta' }) && !parks(promptCases.first));
-assert.ok(buildPrompt({ ...promptCases.reReview, parkHumanOnly: true }).includes('\n2. Park a prior finding'), 'numbered after the prior-finding step');
-assert.ok(!buildPrompt(promptCases.reReview).includes('Parked'), 'off by default');
+// Park human-only findings is applied by Prowl as it posts: the brief has no Park step.
+assert.ok(!buildPrompt({ ...promptCases.reReview, parkHumanOnly: true }).includes('Parked'));
 
 // Memory: by default the session's environment is 2.7.0's; off sets Claude Code's switch for auto-memory.
 assert.deepEqual(reviewEnv({ allowMemoryWrites: true }, { PATH: '/bin' }), { PATH: '/bin', CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: '3600000', ...noHooksEnv({}) }, 'golden environment');
@@ -161,8 +158,8 @@ assert.ok(!fs.existsSync(path.join(logHome, 'poller.log')) && fs.statSync(path.j
 fs.rmSync(logHome, { recursive: true });
 
 // Ticket text: a ## Ticket section after the context lines, only when there is some, trimmed to about 6 KB.
-const withTicket = buildPrompt({ ...promptCases.approvalsOff, ticketText: 'Users can save.\n- Given a user' });
-assert.ok(withTicket.includes('Approvals off') && withTicket.indexOf('## Ticket') > withTicket.indexOf('Approvals off'));
+const withTicket = buildPrompt({ ...promptCases.first, ticketText: 'Users can save.\n- Given a user' });
+assert.ok(withTicket.indexOf('## Ticket') > withTicket.indexOf('- The checker command'), 'after the context lines');
 assert.ok(withTicket.includes('<ticket-text>\nUsers can save.\n- Given a user\n</ticket-text>') && !buildPrompt(promptCases.first).includes('## Ticket'));
 const long = buildPrompt({ ...promptCases.first, ticketText: 'x'.repeat(9000) });
 assert.ok(long.includes(`${'x'.repeat(6000)}\n(trimmed)\n</ticket-text>`) && !long.includes('x'.repeat(6001)));
@@ -563,9 +560,7 @@ assert.equal(reviewedIn(rows, 'octocat', since, marker), false, 'two empty repli
 assert.equal(reviewedIn(rows, 'octocat', since), true, 'without a marker, any review since counts');
 assert.equal(reviewedIn([...rows, { user: 'OctoCat', at: '2026-10-29T10:30:00Z', body: `🦉 verdict\n${marker}` }], 'octocat', since, marker), true, 'the marked review, any case');
 assert.equal(reviewedIn([...rows, { user: 'octocat', at: '2026-10-29T10:30:00Z', body: 'a review without it' }], 'octocat', since, marker), 'unmarked', 'counts, with a warning');
-const withMarker = buildPrompt({ ...promptCases.first, marker });
-assert.ok(withMarker.includes(`- End the body of each review you post with this line: ${marker}\n`) && !buildPrompt(promptCases.first).includes('End the body'));
-assert.equal(withMarker.replace(`- End the body of each review you post with this line: ${marker}\n`, ''), fixture('first.prompt.md'), 'the marker line is the only change');
+assert.ok(!buildPrompt({ ...promptCases.first, marker }).includes('End the body'), 'the session writes no review: the marker is Prowl\'s to add');
 const posted = { status: 'done', prs: [{ url: 'https://github.com/o/a/pull/1', repo: 'o/a', number: 1 }], logPath: '/logs/AB42-r1.ndjson' };
 failUnposted(posted, []);
 assert.equal(posted.status, 'done', 'every review posted: still done');
@@ -638,11 +633,12 @@ assert.equal(fill(template(outputMd, 'Quick review started'), { prs: '[api#5](u5
 assert.equal(outputTemplate(appDir, 'No such section'), '');
 assert.equal(template('# x\n\n## Fix reply\n\nno fence\n\n## Next\n```\nnot this\n```\n', 'Fix reply'), null, 'a section without a template');
 assert.equal(template('', 'Fix reply'), null);
-// Prowl never resolves a thread: the only GraphQL its own code sends is the threads query.
-for (const f of ['github.mjs', 'fence.mjs', 'feedback.mjs', 'git.mjs', path.join('builder', 'builder.mjs'), path.join('reviewer', 'reviewer.mjs')]) {
+// The Builder never resolves a thread: only the Reviewer's publisher does, once a review has verified the fix.
+for (const f of ['fence.mjs', 'feedback.mjs', 'git.mjs', path.join('builder', 'builder.mjs'), path.join('builder', 'rules.mjs'), path.join('reviewer', 'reviewer.mjs')]) {
   const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), f), 'utf8');
-  assert.ok(!/resolveReviewThread|mutation\s*[({]/.test(src), `${f} builds no GraphQL mutation`);
+  assert.ok(!/resolveReviewThread|mutation\s*[({]|setThreadResolved/.test(src), `${f} builds no GraphQL mutation`);
 }
+assert.equal(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'github.mjs'), 'utf8').match(/mutation\s*[({]/g).length, 1, 'github.mjs has one mutation: a thread resolved or reopened');
 
 // Checks before push: the first matching repo glob, setup then run, the output tail, and the timeout.
 const checksCfg = JSON.parse(fbFixture('checks.json'));
@@ -743,7 +739,7 @@ seen = await reviewOnce([prOf(1), prOf(2, { draft: true })], { runs: [doneRun([p
 assert.deepEqual(seen.started[0].leftOut.map(p => p.number), [2], 'back to draft: left out, its findings untouched');
 const leftPrompt = seen.started[0].prompt;
 assert.ok(leftPrompt.includes('## Left out of this review') && leftPrompt.includes(`- ${prOf(2).url}`) && !leftPrompt.split('\n')[0].includes(prOf(2).url));
-assert.ok(leftPrompt.includes("without re-verifying, replying on or resolving them"));
+assert.ok(leftPrompt.includes("Don't read them beyond their head commit, and give them no spec or reviewer.") && leftPrompt.includes('A later review picks them up.'));
 seen = await reviewOnce([prOf(1), prOf(3)], { runs: [doneRun([prOf(1)])], cfgOver: { maxReviewRounds: 1 } });
 assert.deepEqual(seen.started[0].prs.map(p => p.number), [3], 'ready again past the cap: the PR no review covered gets its first review');
 assert.deepEqual(seen.started[0].leftOut.map(p => p.number), [1]);
@@ -1610,5 +1606,6 @@ fs.rmSync(migHome, { recursive: true });
 await (await import('./quick-self-test.mjs')).run(assert, { appDir });
 await (await import('./builder/self-test.mjs')).run(assert);
 await (await import('./features-self-test.mjs')).run(assert, { appDir });
+await (await import('./reviewer/self-test.mjs')).run(assert, { appDir });
 
 console.log(`self-test passed: ${count} asserts`);

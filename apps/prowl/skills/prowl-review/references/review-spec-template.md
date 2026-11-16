@@ -15,8 +15,8 @@ Fill every field. The reviewer sees only this document, the reviewer-instruction
 
 ## 3. Scope
 
-**Your PR** (repo, number, title, head SHA, posting mode):
-- <owner/repo>#<n> — <title> — `<headRefOid>` — formal/comment
+**Your PR** (repo, number, title, head SHA):
+- <owner/repo>#<n> — <title> — `<headRefOid>`
 
 **Depth expectation:** <e.g. "trace every read and write in the changed path end-to-end for the access check"; "line-by-line on the new function and the data change; skim the generated code">
 
@@ -28,7 +28,7 @@ Every other open PR in the batch has its own reviewer. Read a sibling's code onl
 
 ## 5. Consumers outside the batch
 
-Repos not under review that read a surface your PR changes, found by the orchestrator's code search. They are context: read the named file on the branch given, through `gh api repos/<o>/<r>/contents/<path>?ref=<branch>`, as the other side of the contract. Do not review the consumer's own code. A break posts on your PR, naming the consumer repo and path.
+Repos not under review that read a surface your PR changes, found by the orchestrator's code search. They are context: read the named file on the branch given, through `gh api repos/<o>/<r>/contents/<path>?ref=<branch>`, as the other side of the contract. Do not review the consumer's own code. A break is a finding on your PR, naming the consumer repo and path.
 
 - <owner/repo> — `<path>` — `<default branch>` — reads: <which field, route, event, symbol or key, and what it expects> — hypothesis: H<n>
 
@@ -51,4 +51,4 @@ Each came from the orchestrator's mapping pass. **Report an outcome for every on
 
 ## 9. Output
 
-Return the report defined in `<SKILL_DIR>/references/reviewer-instructions.md` as your final message. Local finding IDs `R-<repo>-<n>-<k>`. Post nothing. Change nothing. Never mutate the user's clone.
+Return the report defined in `<SKILL_DIR>/references/reviewer-instructions.md` as your final message. Local finding IDs `R-<repo>-<n>-<k>`. Write nothing to GitHub. Change nothing. Never mutate the user's clone.

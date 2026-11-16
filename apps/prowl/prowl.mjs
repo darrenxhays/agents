@@ -4,6 +4,7 @@
 // Run it from your projects folder:
 //   node /path/to/prowl.mjs [--setup] [--dry-run] [--once] [--self-test] [--reviewer-only | --builder-only]
 //     [--work <ticket>] [--follow <ticket>] [--review <pr or ticket>...] [--build <paste>] [--as <ticket or name>]
+//   node /path/to/prowl.mjs --check-result <file> [--batch <id>] [--prs <url,url,…>]   (a review session checks its result)
 import fs from 'node:fs';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -16,6 +17,27 @@ if (Number(process.versions.node.split('.')[0]) < 18) {
 }
 const args = new Set(process.argv.slice(2));
 const valueOf = flag => (args.has(flag) ? process.argv[process.argv.indexOf(flag) + 1] || '' : null);
+if (args.has('--check-result')) {
+  // Read-only, for a review session: checks the review result it wrote. Before anything else: no config is loaded,
+  // and Prowl's home folder isn't created.
+  const file = valueOf('--check-result');
+  if (!file || file.startsWith('--')) {
+    console.log('--check-result needs a file, e.g. --check-result reports/<id>.result.json');
+    process.exit(1);
+  }
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    console.log(`can't read ${file}: ${e.message}`);
+    process.exit(1);
+  }
+  const { checkResult } = await import('./src/reviewer/result.mjs');
+  const prs = valueOf('--prs');
+  const problems = checkResult(text, { batchId: valueOf('--batch') || '', prUrls: prs ? prs.split(',').map(u => u.trim()).filter(Boolean) : null });
+  console.log(problems.length ? problems.join('\n') : 'ok');
+  process.exit(problems.length ? 1 : 0);
+}
 if (args.has('--self-test')) {
   // Always in a throwaway PROWL_HOME, so the self-test never touches your own ~/.prowl.
   process.env.PROWL_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'prowl-home-'));

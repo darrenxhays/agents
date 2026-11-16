@@ -1,8 +1,8 @@
 # PR-Owl Review — Output
 
-Templates for everything this skill posts on GitHub: the comment Prowl posts when a review starts (with or without a ticket), the review banner, the review body, the details file collapsed at its bottom, inline comments, replies on existing threads, and the comment that stands in for an approval when approvals are off. The Builder uses it too, for the replies it posts after a feedback round on its PRs, and for that round's commits. Prowl keeps your copy of this file in `~/.prowl/config/` (or `$PROWL_HOME/config/`): edit that one. Updates never overwrite a copy you've edited; Prowl's Update Notes say when this default changes.
+Templates for everything Prowl posts on GitHub for a review: the comment when a review starts (with or without a ticket), the review banner, the review body, the details file collapsed at its bottom, inline comments, replies on existing threads, and the comment that stands in for an approval when approvals are off. Prowl fills them in itself, from the review's result: a review session never reads this file, and never writes to GitHub. The Builder uses it too, for the replies it posts after a feedback round on its PRs, and for that round's commits. Prowl keeps your copy of this file in `~/.prowl/config/` (or `$PROWL_HOME/config/`): edit that one. Updates never overwrite a copy you've edited; Prowl's Update Notes say when this default changes.
 
-Each template is a fenced block. Words in `<angle brackets>` are filled in for each post; everything else is posted as written. The hidden `<!-- prowl-review … -->` marker is added to every post whatever these templates say, because the re-run guard depends on it.
+Each template is the first fenced block under its heading. Words in `<angle brackets>` are filled in for each post; everything else is posted as written. A line that holds only placeholders which all came out empty is dropped. If your copy lacks one of the templates below, or a placeholder or line Prowl needs in it (each section says which), Prowl uses this default's template for that heading, and the Log and the Update Notes name it. The hidden `<!-- prowl-review … -->` marker is added to every post whatever these templates say, because later reviews and the Builder find Prowl's posts by it.
 
 ## Review banner
 
@@ -45,87 +45,146 @@ The Review started comment for a quick review, which has no ticket: the PRs some
 
 ## Review body
 
-One review per PR. Its body is the review banner, then this. Keep it short: the full write-up is in the details file collapsed at the bottom, not here.
+One review per PR. Its body is the review banner, then this. `<summary>` is one sentence on what the PR does and the state it's in; `<finding lines>` is a *Finding line* per finding that counts toward the verdict, most severe first (or "No issues found."), followed by what wasn't checked, if anything; `<details block>` is the *Details block*, left out when there is nothing to detail. Keep all three.
 
-`````markdown
-**Summary:** <one sentence: what this PR does and the state it's in>
+```markdown
+**Summary:** <summary>
 
-<one line per finding on this PR, most severe first, as "- **[<SEVERITY>]** <title> · <where>". <where> is `file:line` (followed by "with <counterpart PR link>" for a cross-PR finding), or "already raised: <link to the earlier comment, or to the reply>" for one someone else raised first, or "still open: <link to its thread>" for an earlier Prowl finding, from any reviewer's Prowl. Write "No issues found." when there are none>
+<finding lines>
 
+<details block>
+```
+
+## Finding line
+
+One per finding in the review body. `<SEVERITY>` is CRITICAL, HIGH, MEDIUM, LOW or NIT; `<where>` is `file:line` (with the counterpart PR for a cross-PR finding), "already raised: <link>" for one someone else raised first, or "still open: <link>" for an earlier PR-Owl finding. Keep all three.
+
+```markdown
+- **[<SEVERITY>]** <title> · <where>
+```
+
+## Details block
+
+The details file, collapsed at the bottom of the review body. `<details file name>` is `prowl-review-<batch-id>-<repo>-<n>.md`: keep it on the `<summary>` line, where the Builder and later reviews find the file. `<details fence>` is a fence longer than any inside the file.
+
+```markdown
 <details>
 <summary>📄 <details file name>: the full review, for whoever fixes these (copy it into your coding agent)</summary>
 
-````markdown
+<details fence>markdown
 <details file>
-````
+<details fence>
 
 </details>
-`````
+```
 
-Leave the `<details>` section out when the PR has no findings.
+## Details continued
+
+Ends the first part of a details file too long for one review body (GitHub's limit is 65,536 characters). `<part 2 link>` is the comment holding the rest.
+
+```markdown
+_The details file continues in [part 2](<part 2 link>), a comment on this PR._
+```
+
+## Details part 2
+
+The rest of a details file that didn't fit, posted as a comment on the PR before the review. Keep `<details file name>` and the words "part 2" on the `<summary>` line: the Builder joins the two parts by them.
+
+```markdown
+<details>
+<summary>📄 <details file name> (part 2): the rest of the full review</summary>
+
+<details fence>markdown
+<details file>
+<details fence>
+
+</details>
+```
 
 ## Details file
 
-The full review of one PR, as a markdown file named `prowl-review-<batch-id>-<repo>-<n>.md`, collapsed at the bottom of the review body. Write it for a coding agent that will fix the findings and has only this file and the repo: give it everything it needs, and leave nothing to the inline comments.
+The full review of one PR, for whoever fixes the findings. `<findings>` is a *Details finding* per new finding that counts, `<still open>` the same for earlier PR-Owl findings still in the code, and `<parked section>` the *Details parked* template when something is parked: keep those three. The rest: `<repo>`, `<n>`, `<PR title>`, `<PR link>`, `<head sha>` and `<short sha>` (the commit reviewed), `<verdict>`, `<batch-id>`, `<ticket>`, `<goal>`, `<role>`, `<merge order>`, `<related>`, `<conventions>`, `<axes>`, `<clean>`, `<unverified>`.
 
-````markdown
-# PR-Owl Review: <owner/repo>#<n> — <PR title>
+`````markdown
+# PR-Owl Review: <repo>#<n> — <PR title>
 
 - **PR:** <PR link>, reviewed at <head sha>
 - **Verdict:** <verdict>
-- **Batch:** <batch-id>, for <ticket key and link>
+- **Batch:** <batch-id>, for <ticket>
 - **Goal of the work (as verified):** <goal>
-- **This PR's role and merge order:** <role and merge order>
-- **Other PRs in the batch:** <one per line: link — role — what this PR shares with it>
-- **Conventions:** <the repo's convention files the reviewers applied, or "none found">
+- **This PR's role and merge order:** <role> <merge order>
+- **Other PRs in the batch:** <related>
+- **Conventions:** <conventions>
 
 ## How to use this file
 
-Fix the findings below in order, most severe first. Each one quotes the code at <short head sha>; if the code has moved since, find it by the quote. A finding marked cross-PR names the PR that should carry the fix. Don't change behaviour beyond what a fix needs, and add or update the test each one names.
+Fix the findings below in order, most severe first. Each one quotes the code at <short sha>; if the code has moved since, find it by the quote. A finding marked cross-PR names the PR that should carry the fix. Don't change behaviour beyond what a fix needs, and add or update the test each one names.
 
 ## Findings
 
-### <F-id> [<SEVERITY>] <title>
-
-- **Where:** `<file>:<line>` (<inline comment | not in the diff | already raised by @<author>: <link>>)
-- **Axis:** <axis name>
-- **Cross-PR:** <counterpart PR link; which PR carries the fix and why>   (cross-PR findings only)
-
-**Code:**
-
-```<language>
-<the quoted lines>
-```
-
-**Problem:** <what is wrong, in full>
-
-**Failure scenario:** <the concrete input, state or sequence that triggers it, and what happens>
-
-**Fix:** <what to change, where, and why that fixes it, including any callers, siblings or data that must change with it>
-
-**How to check the fix:** <the test to add or run, or the steps that show it's fixed>
-
-**Verified:** <the verifier's confirmation, and any risk it noted in the suggested fix>
+<findings>
 
 ## Still open from the previous review
 
-<each earlier Prowl finding still open, from any reviewer's Prowl, in the same form as above, with a link to its comment thread; or "None.">
+<still open>
 
-## Parked
-
-<re-reviews with Prowl's Park human-only findings on, and only when there are any: each prior finding parked because only a person can resolve it outside the code, one line each: its title, what a person needs to do, and a link to its comment thread. Parked findings don't count toward the verdict>
+<parked section>
 
 ## Coverage
 
 **Axes reviewed:**
-<one line per axis, by its full name without its letter, as "- Correctness & Logic">
+<axes>
 
 **Checked and found clean:**
-<one line per axis, the same way>
+<clean>
 
 **Could not verify:**
-<anything the reviewers or verifiers could not check, and why; or "nothing">
-````
+<unverified>
+`````
+
+## Details finding
+
+One finding in the details file. Keep the line `### <id> [<SEVERITY>] <title><ref>` as it is: later reviews read a finding's title and severity from it. `<ref>` is the earlier finding's batch id and id, in brackets, for one carried over. `<cross-pr>` is a line naming the counterpart PR or an outside consumer, dropped when there is none.
+
+`````markdown
+### <id> [<SEVERITY>] <title><ref>
+
+- **Where:** <where>
+- **Axis:** <axis>
+<cross-pr>
+
+**Code:**
+
+<code>
+
+**Problem:** <explanation>
+
+**Failure scenario:** <scenario>
+
+**Fix:** <fix detail>
+
+**How to check the fix:** <check>
+
+**Verified:** <verification>
+`````
+
+## Details parked
+
+The details file's section for parked findings: ones a person answered on the thread, or that only a person can settle outside the code. Keep the line `## Parked`: the Builder leaves the threads listed under it to a person.
+
+```markdown
+## Parked
+
+<parked lines>
+```
+
+## Parked line
+
+One parked finding. Keep `<link>` (its thread) at the end of the line.
+
+```markdown
+- <title> (<ref>): <note> · <link>
+```
 
 ## No blocking issues (approvals off)
 
@@ -138,48 +197,62 @@ PR-Owl gives this PR its stamp of approval. It is waiting on a human reviewer's 
 
 ## Inline comment
 
-One per verified finding anchored to the diff. Write it the way a teammate would: one or two plain sentences saying what goes wrong and when, then the fix. No headings, labels, severity or jargon; the details file has the rest.
+One per finding anchored to the diff: `<problem>` is one or two plain sentences saying what goes wrong and when, `<fix>` the fix in a sentence. No headings, labels, severity or jargon; the details file has the rest.
 
 ```markdown
-<comment prefix> <one or two sentences: what goes wrong and when>
+<comment prefix> <problem>
 
-**Fix:** <the fix, in a sentence>
+**Fix:** <fix>
 ```
 
-When someone else raised the same point only in a review summary or conversation comment, and understated it, the fix ends with:
+## Also raised by
+
+Ends an inline comment for a problem someone else raised only in a review summary or conversation comment, and understated.
 
 ```text
 Also raised by @<author>: <link>
 ```
 
-## Reply: still present
+## Cross-PR note
 
-On an earlier thread (someone else's, resolved or outdated) whose problem is still in the code at head, or that understates it. Like an inline comment, keep it to a sentence or two; the details file has the rest:
+Ends an inline comment for a finding that involves another PR of the batch: `<counterpart>` is that PR, `<why>` what the two share.
 
-```markdown
-<comment prefix> This is still happening at <short head sha>: <one or two sentences: what goes wrong and when><, now at file:line, if it moved>
-
-**Fix:** <the fix, in a sentence>
+```text
+Goes with <counterpart>: <why>
 ```
 
-## Re-review replies
+## Reply: still present
 
-On each thread from an earlier Prowl review, whoever's Prowl posted it. **Verified fixed** (the thread is then resolved):
+On an earlier thread (someone else's, resolved or outdated) whose problem is still in the code at the commit reviewed, or that understates it. `<moved>` says where the code is now, when the thread is outdated.
+
+```markdown
+<comment prefix> This is still happening at <sha>: <problem><moved>
+
+**Fix:** <fix>
+```
+
+## Reply: verified fixed
+
+On the thread of an earlier PR-Owl finding, whoever's Prowl raised it, once it is verified fixed (the thread is then resolved). `<sha>` is the fixing commit.
 
 ```text
 <comment prefix> Verified fixed in <sha>
 ```
 
-**Still open:**
+## Reply: still open
+
+On the thread of an earlier PR-Owl finding still in the code. `<note>` is one line on why.
 
 ```text
-<comment prefix> Still open as of <sha>: <one line why>
+<comment prefix> Still open as of <sha>: <note>
 ```
 
-**No longer applies** (the code is gone, or the author's reply shows there is nothing to fix; the thread is then resolved):
+## Reply: no longer applies
+
+On the thread of an earlier PR-Owl finding that no longer applies: the code is gone, or the author's reply shows there is nothing to fix (the thread is then resolved).
 
 ```text
-<comment prefix> No longer applies as of <sha>: <one line why>
+<comment prefix> No longer applies as of <sha>: <note>
 ```
 
 ## Fix reply

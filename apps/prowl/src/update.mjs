@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { CONFIG_DIR, CONFIG_PATH, HOME, loadConfig, newSettings, saveConfig, writeJson } from './config.mjs';
+import { staleHeadings } from './templates.mjs';
 
 // Releases are version bumps in .claude-plugin/plugin.json on main; the installer there does the update.
 const RAW = 'https://raw.githubusercontent.com/darrenxhays/agents/main/apps/prowl';
@@ -121,7 +122,9 @@ export function syncConfigFiles(defaultDir, userDir, synced, announce) {
         notes.push({ text: `${name} updated to the new default (you hadn't edited it)`, path: mine });
       } else {
         const why = name in synced ? `The default ${name} changed. Your edited copy was kept` : `Your ${name} differs from this version's default and was kept`;
-        notes.push({ text: `${why}: compare it with the new default`, path: path.join(defaultDir, name) });
+        // Prowl fills output.md's templates itself: a copy lacking one, or a placeholder it needs, gets the default's for that heading.
+        const stale = name === 'output.md' ? staleHeadings(cur) : [];
+        notes.push({ text: `${why}: compare it with the new default${stale.length ? `. Until your copy has them (with the placeholders they need), these templates use the default's: ${stale.join(', ')}` : ''}`, path: path.join(defaultDir, name) });
       }
     }
     synced[name] = h;
