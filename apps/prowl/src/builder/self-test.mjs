@@ -332,6 +332,7 @@ export async function run(assert) {
     await quickBuilds(assert);
     await staleHits(assert);
     await forkBranches(assert);
+    await pickupKeeps(assert);
   } finally {
     globalThis.fetch = realFetch;
     for (const k of Object.keys(process.env)) if (!(k in envBefore)) delete process.env[k];
@@ -351,6 +352,102 @@ async function forkBranches(assert) {
   await h.poll();
   const w = h.b.history()[0];
   assert.deepEqual([w.status, h.gh.prs.length, w.prs.some(p => p.number === 999)], ['following', 2, false], "publishing beside a fork's same-named branch PR opens its own PRs");
+  h.done();
+}
+
+// Picking up work: what is kept and what is redone.
+async function pickupKeeps(assert) {
+  // Part 1: commits a session made on top of your branch and never pushed are kept on a local prowl/kept-… branch.
+  for (const [board, id] of [['ado', '123'], ['jira', 'PROJ-123']]) {
+    const mine = board === 'ado' ? 'feature/123-cart' : 'feature/proj_123-cart';
+    const kept = `prowl/kept-${id}-${mine.replace('/', '-')}`;
+    for (const commits of [true, false]) {
+      let made = '';
+      const h = harness(board, twoRepoBuild({ finish: w => {
+        if (commits) made = commit(w.repos.find(r => r.continued).worktree, { 'WIP.md': 'half done\n' }, 'half done');
+        return { result: { status: 'blocked', reason: 'no access' } };
+      } }));
+      pushTo(h, 'octo-org/web', mine, { 'src/cart.js': 'mine\n' });
+      await h.poll();
+      const w = h.b.history()[0];
+      const clone = path.join(h.projects, 'web');
+      if (commits) git(clone, 'branch', kept, 'HEAD'); // the name is taken already: -2
+      await h.b.skip(h.b.needs()[0]);
+      const rec = w.repos.find(r => r.continued);
+      if (commits) {
+        assert.deepEqual([w.status, git(clone, 'rev-parse', `${kept}-2`), rec.keptBranch], ['stopped', made, `${kept}-2`], `${board}: stopped work's commits are kept on a local branch`);
+        assert.ok(h.logs.some(l => l.includes(`kept the session's commits on your branch ${mine}, never pushed, on the local branch ${kept}-2 in ${clone}. Push them with git -C "${clone}" push origin ${kept}-2:${mine}, or delete it with git -C "${clone}" branch -D ${kept}-2.`)), `${board}: and the Log says how to push or delete them`);
+      } else {
+        assert.ok(!git(clone, 'branch', '--list', 'prowl/kept-*') && !rec.keptBranch, `${board}: no new commit, no branch`);
+      }
+      h.done();
+    }
+  }
+  // Commits that were pushed leave nothing to keep.
+  let h = harness('ado', twoRepoBuild({ finish: finishOnTop }));
+  pushTo(h, 'octo-org/web', 'feature/123-cart', { 'src/cart.js': 'mine\n' });
+  await h.poll();
+  assert.ok(h.b.history()[0].status === 'following' && !git(path.join(h.projects, 'web'), 'branch', '--list', 'prowl/kept-*'), 'pushed: no kept branch');
+  assert.ok(read(path.join(h.b.history()[0].briefDir, 'ticket.md')).includes('## Work already done') && h.session.turns[0].prompt.includes('- Continuing: the user has work in progress on this ticket (ticket.md, *Work already done*).'));
+  h.done();
+
+  // Part 2: a fix round at pick-up that is dropped because you pushed is worked out again from the new heads.
+  const pr9 = key => ({ repo: 'octo-org/web', number: 9, url: 'https://github.com/octo-org/web/pull/9', title: `${key}: Save the cart`, body: '', head: 'feature/cart', base: 'main', draft: false, state: 'OPEN', author: 'octocat',
+    reviews: [], threads: [], checks: [{ name: 'build', bucket: 'fail', link: 'https://github.com/octo-org/web/actions/runs/1' }], replies: [] });
+  /** A round's session that commits a fix; before it ends, `youPush` moves the remote branch under it. */
+  const fixRound = (youPush, after = () => {}) => (w2, prompt) => {
+    if (!prompt.startsWith('/prowl:prowl-build feedback ')) return twoRepoBuild()(w2, prompt);
+    const p = w2.round.prs[0];
+    const sha = commit(p.worktree, { 'src/cart.js': `fixed ${w2.turns.length}\n` }, `${w2.key}: fix the build`);
+    if (youPush()) pushTo(h, 'octo-org/web', 'feature/cart', { [`yours-${w2.turns.length}.js`]: 'x\n' }, 'Prowl Test', 'feature/cart');
+    after(w2);
+    return { result: { status: 'fixed', summary: 'Fixed.', commits: [{ pr: `${p.repo}#${p.number}`, sha }], checks: [], items: [], questions: [] } };
+  };
+  for (const board of ['ado', 'jira']) {
+    const key = board === 'ado' ? 'AB#123' : 'PROJ-123';
+    const tagsNow = () => (board === 'ado' ? h.server.tags(123) : h.server.labels('PROJ-123'));
+    const building = board === 'ado' ? 'In Development' : 'In-Development';
+    // Dropped once, the checks failing again at the new head: a second round. Dropped again: Needs you, nothing handed on.
+    h = harness(board, fixRound(() => true));
+    pushTo(h, 'octo-org/web', 'feature/cart', { 'src/cart.js': 'mine\n' });
+    h.gh.prs.push(pr9(key));
+    await h.poll();
+    const w = h.b.history()[0];
+    assert.ok(h.logs.some(l => new RegExp(`${key}: round 1 dropped, nothing pushed: .*\\. Working out again what its PRs need, from the new heads\\.`).test(l)), `${board}: the first drop says it is worked out again: ${h.logs.filter(l => l.includes('dropped')).join(' | ')}`);
+    const item = h.b.needs()[0];
+    assert.ok(item?.kind === 'conflict' && item.question.startsWith('The round at pick-up on octo-org/web#9 was dropped twice, nothing pushed (') && item.question.endsWith(`What it was to fix is still there, so ${key} isn't handed on. Retry works it out again from the branches' heads; s ends the work.`), `${board}: dropped twice: ${item?.question}`);
+    assert.deepEqual([h.session.turns.length, w.rounds, tagsNow().includes(building), w.finishAfterRound], [2, 0, true, true], `${board}: two rounds ran, none counted, the ticket keeps its in-progress tag, the finish is still to come`);
+    h.done();
+  }
+  // Checks pending on the new head: the wait line once, no session. Green with no feedback: no round, the finish session starts.
+  let pushes = 1;
+  h = harness('ado', fixRound(() => pushes-- > 0, () => { h.gh.prs[0].checks = [{ name: 'build', bucket: 'pending', link: '' }]; }), { cfgOver: { waitForChecksMinutes: 20 } });
+  pushTo(h, 'octo-org/web', 'feature/cart', { 'src/cart.js': 'mine\n' });
+  h.gh.prs.push(pr9('AB#123'));
+  await h.poll();
+  let w = h.b.history()[0];
+  w._retryAt = 0;
+  await h.b.drain();
+  const waitLine = 'AB#123: waiting for GitHub to finish the checks, or work out the conflicts, on the new head of octo-org/web#9 before the round';
+  assert.deepEqual([h.session.turns.length, w.step, w.rounds, h.server.tags(123).includes('In Development')], [1, 'round', 0, true], 'checks pending on the new head: it waits, with the tag on');
+  assert.ok(h.logs.some(l => l.includes(waitLine)));
+  h.gh.prs[0].checks = [{ name: 'build', bucket: 'pass', link: '' }];
+  w._retryAt = 0;
+  await h.b.drain();
+  assert.ok(h.logs.some(l => l.includes('AB#123: nothing left to fix on its PRs; a session finishes the rest')) && h.session.turns[1].prompt.startsWith('/prowl:prowl-build finish '), 'nothing left to fix: the finish session starts with no round');
+  assert.deepEqual([w.rounds, w.roundAgain, w.pickupCarried], [0, false, null]);
+  h.done();
+  // The wait runs out: going on as if they were fixed.
+  pushes = 1;
+  h = harness('ado', fixRound(() => pushes-- > 0, () => { h.gh.prs[0].checks = [{ name: 'build', bucket: 'pending', link: '' }]; }), { cfgOver: { waitForChecksMinutes: 20 } });
+  pushTo(h, 'octo-org/web', 'feature/cart', { 'src/cart.js': 'mine\n' });
+  h.gh.prs.push(pr9('AB#123'));
+  await h.poll();
+  w = h.b.history()[0];
+  w.settleSince = Date.now() - 21 * 60_000;
+  w._retryAt = 0;
+  await h.b.drain();
+  assert.ok(h.logs.some(l => l.includes("AB#123: GitHub still hasn't settled the checks or conflicts of octo-org/web#9 after 20 min; going on as if they were fixed")) && h.session.turns[1]?.prompt.startsWith('/prowl:prowl-build finish '));
   h.done();
 }
 
@@ -549,6 +646,21 @@ async function trackersTests(assert) {
   globalThis.fetch = jiraServer().fetch;
   const jiraData = await jira.workItem(cfg, p123.ref);
   assert.equal(brief.ticketMd(jiraData, { prs: [], trackerName: jira.name }), fixture('ticket-jira.md'), 'ticket.md: Jira');
+  // What is already done: a closing section, only when work was found.
+  const work = { continued: [{ repo: 'acme/api', pr: 'https://github.com/acme/api/pull/9', draft: true, branch: 'feature/123-x', head: '1a2b3c4d5e6f7a8b9c0d', base: 'main', stat: { files: 3, additions: 40, deletions: 2 } },
+    { repo: 'acme/web', pr: '', branch: 'feature/123-web', head: '0f9e8d7c6b5a4f3e2d1c', base: 'release/2.4', stat: { files: 1, additions: 12, deletions: 0 } }],
+  skipped: ["acme/api#7: acme/api#7 isn't yours, so Prowl won't push to it"] };
+  const withWork = brief.ticketMd(jiraData, { prs: [], trackerName: jira.name, work });
+  assert.ok(withWork.startsWith(fixture('ticket-jira.md').trimEnd()) && withWork.endsWith(["## Work already done", '',
+    "Found by Prowl: the user's own work in progress on this ticket. Each repo below is checked out at its branch's head, not at the base: continue on top of it.", '',
+    '- acme/api: PR https://github.com/acme/api/pull/9 (draft), branch feature/123-x at 1a2b3c4d5e6f, onto main; 3 files, +40 -2',
+    '- acme/web: branch with no PR yet, branch feature/123-web at 0f9e8d7c6b5a, onto release/2.4; 1 file, +12 -0', '',
+    'Found, but not continued:', '', "- acme/api#7: acme/api#7 isn't yours, so Prowl won't push to it", ''].join('\n')), 'ticket.md: Work already done');
+  const foundOnly = brief.ticketMd(jiraData, { prs: [], trackerName: jira.name, work: { continued: [], skipped: work.skipped } });
+  assert.ok(foundOnly.includes('## Work found but not continued') && foundOnly.includes('so this is a build from the base') && !foundOnly.includes('## Work already done'));
+  assert.equal(brief.ticketMd(jiraData, { prs: [], trackerName: jira.name, work: { continued: [], skipped: [] } }), fixture('ticket-jira.md'), 'nothing found: as before');
+  const quickW = { key: 'BUILD#1', title: 'Dark mode', instructions: 'add it' };
+  assert.ok(brief.quickMd(quickW, work).includes("the user's own work in progress on this build.") && brief.quickMd(quickW, null) === brief.quickMd(quickW) && !brief.quickMd(quickW).includes('## Work'));
   assert.equal((await jira.workItem({ ...cfg, jira: { ...cfg.jira, fields: { acceptanceCriteria: '', reproSteps: '' } } }, p123.ref)).acceptanceCriteria, null, 'no custom field set: no section');
 }
 

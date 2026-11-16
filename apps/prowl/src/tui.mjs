@@ -1230,7 +1230,8 @@ export function startTui(app, actions, io = {}) {
     else if (k === 'a' && w.url) openExternal(w.url);
     else if (k === 'enter') openExternal(w.briefDir);
     else if (k === 's' && view() === RUNNING) {
-      ui.confirm = { text: `Stop ${w.key}? It stops before its next push, PR, tag or turn, and '${app.cfg.builder.tags.inProgress}' comes off.`, yes: () => actions.stop('builder', w) };
+      const yours = (w.repos || []).find(r => r.continued);
+      ui.confirm = { text: `Stop ${w.key}? It stops before its next push, PR, tag or turn, and '${app.cfg.builder.tags.inProgress}' comes off.${yours ? ` Any commits the session made on your branch ${yours.branch} and didn't push are kept on a local prowl/kept-… branch.` : ''}`, yes: () => actions.stop('builder', w) };
     } else if (k === 'w' && view() === HISTORY) {
       if (!w.ref) return flash(`${w.key} has no ticket to follow.`);
       if (!isOn('builder')) return flash('w follows a ticket\'s PRs with the Builder: turn it on first (e).');

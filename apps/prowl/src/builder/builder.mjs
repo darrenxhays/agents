@@ -406,6 +406,11 @@ export function createBuilder(app, deps) {
   const ticketTexts = data => [data.description, data.acceptanceCriteria, data.reproSteps, ...data.comments.map(c => c.text),
     ...[data.parent, ...data.children, ...data.related].filter(Boolean).map(i => i.description), ...data.links.map(l => l.url)];
   const prRef = p => ({ repo: p.repo, number: p.number, url: p.url, title: p.title });
+  /** What a survey found and left alone, a line each with its reason, for the brief file. */
+  const skippedOf = sv => [...(sv?.context || []).map(c => `${c.number ? prName(c) : `${c.branch} in ${c.repo}`}: ${c.why}`),
+    ...(sv?.listed || []).map(l => `${l.branch}${l.repo ? ` in ${l.repo}` : ''}: ${l.why}`)];
+  /** The brief file's account of work found but not continued, for a build from the base; null when the survey found none. */
+  const foundOnly = w => (skippedOf(w.survey).length ? { continued: [], skipped: skippedOf(w.survey) } : null);
 
   /**
    * What has been done on `w` already, per repo: its open PRs (drafts too, with Pick up drafts) and its pushed
@@ -543,14 +548,15 @@ export function createBuilder(app, deps) {
     const s = w.survey || { prs: [], branches: [], context: [], listed: [] };
     fs.mkdirSync(w.briefDir, { recursive: true });
     let candidates = [];
+    let writeBrief; // written once the work is checked out: its Work already done section names each branch's head
     if (w.ref) {
       const data = await trackerOf(w).workItem(cfg(), w.ref);
       w.title = data.title || w.title;
       const prs = await gh.prsMentioning(cfg().githubOwner, w.key).catch(() => []);
-      fs.writeFileSync(path.join(w.briefDir, 'ticket.md'), brief.ticketMd(data, { prs, trackerName: trackerOf(w).name }));
+      writeBrief = work => fs.writeFileSync(path.join(w.briefDir, 'ticket.md'), brief.ticketMd(data, { prs, trackerName: trackerOf(w).name, work }));
       candidates = rules.repoCandidates(ticketTexts(data), prs.map(p => p.repo));
     } else {
-      fs.writeFileSync(path.join(w.briefDir, 'quick.md'), brief.quickMd(w));
+      writeBrief = work => fs.writeFileSync(path.join(w.briefDir, 'quick.md'), brief.quickMd(w, work));
       candidates = quickRepos(w.instructions);
     }
     const repos = [];
@@ -573,6 +579,7 @@ export function createBuilder(app, deps) {
         continued: { head, draft: Boolean(e.draft) }, ...(e.url && { pr: { url: e.url, number: e.number, repo: e.repo, title: e.title } }) });
       existing.push({ repo: e.repo, branch: e.branch, head, base: e.base, draft: e.draft, pr: e.url || '', stat: e.stat, worktree });
     }
+    writeBrief({ continued: existing, skipped: skippedOf(s) });
     const unavailable = [];
     for (const repo of candidates.filter(r => !repos.some(x => x.repo.toLowerCase() === r.toLowerCase()))) {
       if (!rules.ownerAllowed(repo, cfg())) unavailable.push({ repo, why: "it isn't under the GitHub org or Other owners" });
@@ -620,14 +627,14 @@ export function createBuilder(app, deps) {
     const prs = await gh.prsMentioning(cfg().githubOwner, w.key).catch(() => []);
     const candidates = rules.repoCandidates(ticketTexts(data), prs.map(p => p.repo));
     fs.mkdirSync(w.briefDir, { recursive: true });
-    fs.writeFileSync(path.join(w.briefDir, 'ticket.md'), brief.ticketMd(data, { prs, trackerName: tracker.name }));
+    fs.writeFileSync(path.join(w.briefDir, 'ticket.md'), brief.ticketMd(data, { prs, trackerName: tracker.name, work: foundOnly(w) }));
     return prepareBuild(w, candidates, [data.title, data.description, data.acceptanceCriteria].join('\n'));
   }
 
   /** A quick build without a ticket: quick.md from the user's text, and the repos it names (or none: the session asks). */
   async function readQuick(w) {
     fs.mkdirSync(w.briefDir, { recursive: true });
-    fs.writeFileSync(path.join(w.briefDir, 'quick.md'), brief.quickMd(w));
+    fs.writeFileSync(path.join(w.briefDir, 'quick.md'), brief.quickMd(w, foundOnly(w)));
     return prepareBuild(w, quickRepos(w.instructions), [w.title, w.instructions].join('\n'));
   }
 
@@ -969,10 +976,33 @@ export function createBuilder(app, deps) {
    * Removes `w`'s build worktrees, and the branches Prowl made there unless they hold commits that were never pushed.
    * A round's worktrees (`rounds`) are detached at a PR's head and made no branch, so no branch is ever deleted for them.
    */
+  /**
+   * Before a continued repo's worktree goes: commits a session made on top of your branch and never pushed are kept
+   * on a local prowl/kept-<id>-<your branch> branch in your clone. Prowl never pushes, deletes or builds on one.
+   */
+  async function keepContinued(w, rec) {
+    if (!fs.existsSync(rec.worktree)) return;
+    const head = (await git(rec.worktree, 'rev-parse', 'HEAD').catch(() => '')).trim();
+    const start = rec.pushedSha || rec.continued.head; // what is on the remote: the head checked out, or Prowl's last push there
+    if (!head || head === start) return;
+    const count = await git(rec.worktree, 'rev-list', '--count', `${start}..HEAD`).then(o => Number(o.trim()), () => NaN);
+    if (count === 0) return; // if git can't say, it counts as some
+    const base = `prowl/kept-${w.ref ? rules.branchId(w.key) : w.id}-${rec.branch.replace(/[^A-Za-z0-9_.-]+/g, '-')}`;
+    let name = base;
+    for (let n = 2; await succeeds(rec.clone, 'rev-parse', '--verify', '--quiet', `refs/heads/${name}`); n++) name = `${base}-${n}`;
+    await git(rec.clone, 'branch', name, head);
+    rec.keptBranch = name;
+    log('warn', `${w.key}: kept the session's commits on your branch ${rec.branch}, never pushed, on the local branch ${name} in ${rec.clone}. Push them with git -C "${rec.clone}" push origin ${name}:${rec.branch}, or delete it with git -C "${rec.clone}" branch -D ${name}.`);
+  }
+
   async function tidy(w, recs, rounds = []) {
     for (const p of rounds) await removeWorktree(p.clone, p.worktree).catch(() => {});
     for (const rec of recs) {
-      if (rec.continued) { await removeWorktree(rec.clone, rec.worktree).catch(() => {}); continue; } // detached at your branch: no branch of Prowl's
+      if (rec.continued) { // detached at your branch: no branch of Prowl's, so commits never pushed would be left dangling
+        await keepContinued(w, rec).catch(e => log('warn', `${w.key}: couldn't keep the session's commits on your branch ${rec.branch} (${e.message})`));
+        await removeWorktree(rec.clone, rec.worktree).catch(() => {});
+        continue;
+      }
       let keep = false;
       if (rec.branch && fs.existsSync(rec.worktree)) {
         const head = (await git(rec.worktree, 'rev-parse', 'HEAD').catch(() => '')).trim();
@@ -1058,6 +1088,14 @@ export function createBuilder(app, deps) {
   /** Starts a feedback round: claims the ticket again, checks out each PR at its head, and briefs a fresh session. */
   async function round(w) {
     checkStop(w);
+    if (w.pickupCarried && w.finishAfterRound) {
+      const needs = await reworkPickup(w);
+      if (needs === 'wait') return undefined;
+      if (needs === 'none') {
+        log('ok', `${w.key}: nothing left to fix on its PRs; a session finishes the rest`);
+        return next(w, 'end-round');
+      }
+    }
     const tracker = trackerOf(w);
     const back = why => {
       Object.assign(w, { step: null, status: 'following' });
@@ -1157,11 +1195,77 @@ export function createBuilder(app, deps) {
 
   const forPr = (it, p) => [p.url, `${p.repo}#${p.number}`].some(x => String(it.pr || '').toLowerCase() === x.toLowerCase());
 
+  /**
+   * A fix round at pick-up dropped because your branch moved under it: the work isn't let go. The ticket keeps its
+   * tag (the PRs their label), the round isn't counted, and what each PR needed is carried over for round() to work
+   * out again from the new heads. Dropped a second time, nothing is handed on: Needs you.
+   */
+  async function dropAtPickup(w, why) {
+    const n = w.rounds;
+    const prs = w.round.prs.map(prName).join(', ');
+    await tidy(w, [], w.round.prs);
+    w.pickupCarried ??= Object.fromEntries(Object.entries(w.pickupFix || {}).map(([url, f]) => [url, { reasons: f.reasons, failing: (f.failing || []).map(c => c.name) }]));
+    Object.assign(w, { rounds: n - 1, round: null, roundPrs: [], roundClaimed: true, settleSince: null });
+    if (w.roundAgain) {
+      return raise(w, 'conflict', `The round at pick-up on ${prs} was dropped twice, nothing pushed (${why}). What it was to fix is still there, so ${w.key} isn't handed on. Retry works it out again from the branches' heads; s ends the work.`,
+        { retry: 'round', blocked: `${w.key} waits for you` });
+    }
+    w.roundAgain = true;
+    log('warn', `${w.key}: round ${n} dropped, nothing pushed: ${why}. Working out again what its PRs need, from the new heads.`);
+    return next(w, 'round');
+  }
+
+  /**
+   * After a dropped round at pick-up: what each of your PRs needs now, at its new head, as w.pickupFix. Resolves
+   * 'wait' while GitHub hasn't settled a PR's checks or conflicts (for at most Wait for CI), 'none' when nothing
+   * needs fixing any more, else 'round'.
+   */
+  async function reworkPickup(w) {
+    const pk = pickup();
+    const fix = {};
+    const unsettled = [];
+    for (const p of w.prs) {
+      const was = w.pickupCarried[p.url];
+      const facts = await gh.prFacts(p);
+      if (facts.state !== 'OPEN') continue;
+      const reasons = [];
+      const [reviews, threads] = await Promise.all([gh.prReviews(p), gh.prThreads(p)]);
+      if (rules.feedbackDue({ reviews, threads }, 0, b().fixFrom)) reasons.push('feedback');
+      let failing = [];
+      if (pk.checks) {
+        const checks = await gh.requiredChecks(p.url).catch(() => []);
+        failing = checks.filter(c => ['fail', 'cancel'].includes(c.bucket));
+        if (failing.length) reasons.push('failing checks');
+        // Had failing checks: not known yet while they still run, or one that failed isn't reported for the new head.
+        else if (was?.failing.length && (github.checksState(checks) === 'pending' || was.failing.some(name => !checks.some(c => c.name === name)))) unsettled.push(p);
+      }
+      const conflicting = pk.conflicts && facts.mergeable === 'CONFLICTING';
+      if (conflicting) reasons.push(`conflicts with ${facts.base}`);
+      else if (pk.conflicts && facts.mergeable === 'UNKNOWN' && was?.reasons.some(r => r.startsWith('conflicts'))) unsettled.push(p);
+      if (reasons.length) fix[p.url] = { reasons, failing: failing.map(c => ({ name: c.name, link: c.link || '' })), conflict: conflicting };
+    }
+    const minutes = b().waitForChecksMinutes;
+    if (unsettled.length && minutes > 0) {
+      w.settleSince ||= Date.now();
+      const names = [...new Set(unsettled.map(prName))].join(', ');
+      if (Date.now() - w.settleSince < minutes * 60_000) {
+        w._retryAt = Date.now() + 60_000;
+        touch(w);
+        log('info', `${w.key}: waiting for GitHub to finish the checks, or work out the conflicts, on the new head of ${names} before the round`, `settle:${w.uid}`);
+        return 'wait';
+      }
+      log('warn', `${w.key}: GitHub still hasn't settled the checks or conflicts of ${names} after ${minutes} min; going on as if they were fixed`);
+    }
+    w.pickupFix = fix;
+    return Object.keys(fix).length ? 'round' : 'none';
+  }
+
   /** Checks, guards, pushes and replies for a round. A branch that moved since the round started drops the round. */
   async function pushRound(w) {
     checkStop(w);
     // Its feedback stays due (lastActivityAt as it was): the next round starts from the new head.
     const drop = async why => {
+      if (w.finishAfterRound) return dropAtPickup(w, why);
       if (byLabels(w)) labelPrs(w, w.round.prs, '');
       else await trackerOf(w).retag(cfg(), w.ref, tags().mine, '');
       await tidy(w, [], w.round.prs);
@@ -1202,6 +1306,7 @@ export function createBuilder(app, deps) {
         p.pushedSha = head;
         (w.pushedShas ??= []).push(head); // kept once the round is over: a rebuild steps past a branch Prowl pushed to
         w.lastPushAt = Date.now();
+        w.roundAgain = false; // a round that pushes clears the dropped-once mark
         const surveyed = w.survey?.prs.find(x => x.url === p.url);
         if (surveyed) surveyed.head = head; // the finish session that follows a pick-up's round starts from here
         touch(w);
@@ -1261,8 +1366,8 @@ export function createBuilder(app, deps) {
     if (w.finishAfterRound) {
       // A pick-up's fix round: a finish session comes next, and hands off once it is done.
       if (w.round) await tidy(w, [], w.round.prs);
-      Object.assign(w, { finishAfterRound: false, pickupFix: null, round: null, roundPrs: [], roundClaimed: false, lastActivityAt: w.round?.collectedAt || Date.now() });
-      log('ok', `${w.key}: fix round ${w.rounds} done; a session finishes the rest`);
+      if (w.round) log('ok', `${w.key}: fix round ${w.rounds} done; a session finishes the rest`);
+      Object.assign(w, { finishAfterRound: false, pickupFix: null, round: null, roundPrs: [], roundClaimed: false, lastActivityAt: w.round?.collectedAt || Date.now(), roundAgain: false, pickupCarried: null, settleSince: null });
       return next(w, 'finish');
     }
     const handedOff = await handOff(w);

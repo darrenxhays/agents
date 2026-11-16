@@ -21,7 +21,30 @@ const itemLines = item => [
  * ticket.md: the ticket and everything linked to it, read by Prowl with its own sign-in. `data` is a tracker's
  * workItem(); `prs` the PRs on GitHub that mention the key; `trackerName` names the tracker.
  */
-export function ticketMd(data, { prs = [], trackerName }) {
+const size = s => (s ? `${s.files} file${s.files === 1 ? '' : 's'}, +${s.additions} -${s.deletions}` : '');
+
+/**
+ * The brief file's closing section on work that exists already, as lines ([] with nothing found). `work`:
+ * { continued: [{ repo, pr, draft, branch, head, base, stat }] (the user's PRs and branches the session continues),
+ * skipped: [text] (what the survey found and left alone, each with its reason) }.
+ */
+export function workDone(work, noTicket = false) {
+  const { continued = [], skipped = [] } = work || {};
+  if (!continued.length && !skipped.length) return [];
+  const on = noTicket ? 'on this build' : 'on this ticket';
+  if (!continued.length) {
+    return ['## Work found but not continued', '',
+      `Prowl found none of the user's work in progress ${on} to continue, so this is a build from the base. What it found and left alone is below; mention it in your summary if it bears on the work.`,
+      '', ...skipped.map(t => `- ${t}`)];
+  }
+  return ['## Work already done', '',
+    `Found by Prowl: the user's own work in progress ${on}. Each repo below is checked out at its branch's head, not at the base: continue on top of it.`,
+    '',
+    ...continued.map(e => `- ${e.repo}: ${e.pr ? `PR ${e.pr}${e.draft ? ' (draft)' : ''}` : 'branch with no PR yet'}, branch ${e.branch} at ${String(e.head).slice(0, 12)}, onto ${e.base}${e.stat ? `; ${size(e.stat)}` : ''}`),
+    ...(skipped.length ? ['', 'Found, but not continued:', '', ...skipped.map(t => `- ${t}`)] : [])];
+}
+
+export function ticketMd(data, { prs = [], trackerName, work = null }) {
   const lines = [
     `# ${data.key}: ${data.title}`,
     '',
@@ -58,6 +81,7 @@ export function ticketMd(data, { prs = [], trackerName }) {
   }
   if (data.links?.length) lines.push('## Links', '', 'Commits, branches and other links on the ticket.', '', ...data.links.map(l => `- ${l.name}: ${l.url}`), '');
   if (data.attachments?.length) lines.push('## Attachments', '', ...data.attachments.map(a => `- ${a}`), '');
+  lines.push(...workDone(work));
   return `${lines.join('\n').trimEnd()}\n`;
 }
 
@@ -71,9 +95,10 @@ export function answersMd(answers) {
 const repoLines = repos => repos.map(r => `  - ${r.repo}: ${r.worktree} (detached at ${r.defaultBranch}, the default branch)`);
 
 /** quick.md: what a quick build without a ticket is to build, in the user's own words. */
-export function quickMd(w) {
+export function quickMd(w, work = null) {
+  const done = workDone(work, true);
   return `${[`# ${w.key}: ${w.title}`, '', 'A quick build the user asked Prowl for, with no ticket. What they asked for, in their own words:', '',
-    '<instructions>', trim(w.instructions) || '(none: work from the PRs listed in your invocation)', '</instructions>'].join('\n')}\n`;
+    '<instructions>', trim(w.instructions) || '(none: work from the PRs listed in your invocation)', '</instructions>', ...(done.length ? ['', ...done] : [])].join('\n')}\n`;
 }
 
 /** The user's instructions for a quick build of a ticket: theirs, so followed where the ticket allows. */
@@ -120,6 +145,7 @@ export function finishPrompt({ briefDir, ticket, repos, existing, listed = [], c
     '',
     workLine(briefDir, ticket),
     `- Work on it has started already: finish it. It started ${ticket.quick ? 'because the user asked for it in Prowl' : 'automatically'}. Nobody is watching this session: never stop to ask in the conversation; ask in result.json.`,
+    `- Continuing: the user has work in progress on this ${ticket.url ? 'ticket (ticket.md' : 'build (quick.md'}, *Work already done*). Compare that work with ${ticket.url ? 'the ticket' : 'what they asked for'}, plan only what is left, and end complete when nothing is.`,
     `- Brief folder: ${briefDir} (also in PROWL_BRIEF_DIR). Write investigation.md, plan.md and result.json there, and write result.json again, in full, as the last step of every turn.`,
     '- The work so far, the user\'s own, each in a git worktree Prowl checked out detached at the branch\'s head:',
     ...existing.map(e => `  - ${e.repo}: ${e.branch} at ${e.head}, from ${e.base}${e.pr ? `; PR ${e.pr}${e.draft ? ' (a draft)' : ''}` : '; no PR yet'}${e.stat ? `; ${stat(e.stat)}` : ''}: ${e.worktree}`),

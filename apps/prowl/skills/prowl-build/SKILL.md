@@ -44,11 +44,18 @@ If you can't go on (something is missing that no answer will provide), end with 
 Work on the ticket has already started: the user's own PRs or pushed branches, each listed in your invocation with its repo, branch, head, base, whether it is a draft, its size and its worktree, detached at the branch's head. Other people's work, and branches Prowl can't continue, are listed for context only.
 
 1. **Investigate** as in build mode, starting from what is there: read each branch's diff against its base (`git diff <base>...HEAD` in its worktree) and the ticket, and work out what is left to do.
-2. **Plan only what is left**, as in build mode, and end with `needs-approval`. If nothing is left, end with `complete` instead (no plan, no commits).
+2. **Plan only what is left**, as in build mode, and end with `needs-approval`. If nothing is left, end with `complete` instead (no commits; `plan.md` says why).
 3. **Implement**, once approved: in an existing branch's worktree, commit on top of its head; in other repos, on the branches Prowl names in the `approve` message. Keep the user's design and approach: extend it, don't redo it.
 4. **Check, review your diff and commit** as in build mode, then end with `done`.
 
 Never rewrite, rebase, squash or amend anything on the user's branches, and never commit on someone else's work listed as context.
+
+- `ticket.md` (or `quick.md`) has a *Work already done* section: the user started this work and Prowl is finishing it. A *Work found but not continued* section on its own is a build's: what Prowl found and left alone. Build as usual; the finish rules don't apply.
+- Investigate that work against the ticket first: what each branch already does, what its tests cover, and what the acceptance criteria still need. Say both in `investigation.md`.
+- Name a continued repo in `changes` only if it needs more commits. If nothing is left in any repo, write `plan.md` saying why and end with `complete`.
+- Never rewrite a continued branch's history: no amend, rebase, reset or squash, and never merge or cherry-pick other branches into it.
+- Keep the user's names, structure and approach unless the ticket requires otherwise; then say why in the plan, and keep the change as small as it allows.
+- PRs: a continued PR keeps its title and body. Give a `prs` entry only for a repo that has no PR yet, a continued branch with no PR included (in `done`, and in `complete` when such a branch needs its PR opened).
 
 ## Feedback mode: `/prowl:prowl-build feedback <feedback.md>`
 
