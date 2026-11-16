@@ -396,6 +396,49 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
     assert.deepEqual([claimedWith?.rev, claimedWith?.tags.includes('fresh')], [9, true], 'with the label still on: the claim is made with the fresh read');
   }
 
+  // ---- C-18: a quick review doesn't start on PRs another review has ----
+  {
+    const two = [prOf(1), prOf(2, { title: 'unrelated' })];
+    let h = reviewerOver({ open: two, cfgOver: { quickName: 'number', maxConcurrentReviews: 5, quickLabels: false } });
+    await h.side.poll(); // the tagged review of AB#42 runs on r1#1
+    assert.deepEqual(h.side.state.runs.map(r => r.prs.map(p => p.number)), [[1]]);
+    await assert.rejects(h.side.quickReview('octo-org/r1#1'), { message: 'Quick review: octo-org/r1#1 is under review in AB#42; start it again once that one ends' });
+    await assert.rejects(h.side.quickReview('octo-org/r1#1 octo-org/r2#2'), /octo-org\/r1#1 is under review in AB#42/, 'one held PR is enough');
+    h.side.state.runs[0].contextPrs = [prOf(2)];
+    assert.equal((await h.side.quickReview('octo-org/r2#2')).ticket, 'QUICK#1', "an overlap with a running review's context PR starts");
+    // Two quick reviews of the same PR started together: exactly one run.
+    let release;
+    const hold = new Promise(r => { release = r; });
+    h = reviewerOver({ open: two, cfgOver: { quickName: 'auto', maxConcurrentReviews: 5, quickLabels: false }, deps: { autoName: async () => { await hold; return 'Named'; } } });
+    const a = h.side.quickReview('octo-org/r2#2');
+    await sleep(5);
+    await assert.rejects(h.side.quickReview('octo-org/r2#2'), { message: 'Quick review: octo-org/r2#2 is already being set up for a review; start it again once that one ends' });
+    release();
+    await a;
+    assert.equal(h.side.state.runs.length, 1);
+    // A review that starts on the PR while the first is being named: the second check refuses it.
+    let release2;
+    const hold2 = new Promise(r => { release2 = r; });
+    h = reviewerOver({ open: two, cfgOver: { quickName: 'auto', maxConcurrentReviews: 5, quickLabels: false }, deps: { autoName: async () => { await hold2; return 'Named'; } } });
+    const b = h.side.quickReview('octo-org/r2#2');
+    await sleep(5);
+    h.side.state.runs.push({ id: 'x', ticket: 'PROJ-9', status: 'running', prs: [prOf(2)], pid: null, phase: 'checks', _building: hold2 });
+    release2();
+    await assert.rejects(b, /octo-org\/r2#2 is under review in PROJ-9/);
+    // A wait whose PR is under another review isn't ended: it logs once and tries again each poll.
+    h = reviewerOver({ open: [prOf(1, { labels: ['Ready for Review'] })], tickets: [], cfgOver: { quickName: 'number', maxConcurrentReviews: 5 } });
+    h.side.state.runs.push({ id: 'q1', ticket: 'QUICK#1', quick: true, status: 'done', endedAt: 1, reviewNo: 1, prs: [prOf(1)], approved: {}, reportPath: '/nowhere.md' },
+      { id: 'other', ticket: 'PROJ-9', status: 'running', prs: [prOf(1)], pid: null, phase: 'checks', _building: hold2 });
+    h.side.waits().push({ key: 'QUICK#1', title: 't', ticketUrl: '', paste: { prs: [{ repo: 'octo-org/r1', number: 1 }], tickets: [] }, runId: 'q1', since: 1, letGo: {} });
+    await h.side.poll();
+    await h.side.poll();
+    assert.equal(h.seen.logs.filter(l => l.includes("QUICK#1: couldn't start its re-review (Quick review: octo-org/r1#1 is under review in PROJ-9")).length, 1, 'logged once');
+    assert.equal(h.side.waits().length, 1, 'still waiting');
+    h.side.state.runs.find(r => r.id === 'other').status = 'done';
+    await h.side.poll();
+    assert.ok(h.side.state.runs.some(r => r.ticket === 'QUICK#1' && r.status === 'running'), 'and starts on the poll after that review ends');
+  }
+
   // ---- C-06: verifier model and effort ----
   {
     const first = promptCases.first;

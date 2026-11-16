@@ -16,6 +16,7 @@ Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z`
 - Check commands get `PROWL_NOTHING_TO_RUN_FILE`: a command that finds nothing of its kind to do creates that file and exits 0. Before a push that counts as a pass.
 - A review started by the trigger tag now takes only the PRs whose **title** names that ticket, and no other ticket. A PR that mentions the ticket only in its description, or whose title names several tickets, is left out, and the Log says so. If your team names the ticket only in PR descriptions, put it in the title. A quick review of a pasted ticket still takes every PR that mentions it.
 - A ticket another copy of Prowl (or a person) claimed a moment ago is no longer picked up a second time because the board search was a few seconds behind: a found ticket is taken only if, read now, it still carries the trigger or start tag. Before, on Azure DevOps a ticket another Builder had just taken could be built twice.
+- Two reviews can no longer run on the same PR at once and post over each other: a quick review is refused while any of its PRs is under a review that is running or being set up, and says which. Start it again once that review ends; a quick review waiting on its PRs tries again by itself each poll.
 
 ## 2.23.6
 - An answer pasted into a Needs-you form is now what Submit sends. Before, pasting into **Other**, **Send it back with a note** or **Ask about this** and pressing enter sent the option that was already picked: the recommended answer, or an approval of the plan.

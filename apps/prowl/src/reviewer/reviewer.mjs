@@ -41,6 +41,27 @@ export function createReviewer(app, deps) {
     return () => { if (held) { held = false; starting--; } };
   };
 
+  // Reviews being set up, with the PRs they have: a tagged ticket's from the moment its PRs are known, a quick
+  // review's from the moment it is admitted, each until its run is recorded. And the PRs of quick reviews still being
+  // looked up or named. Two reviews must never run on one PR at once and post over each other.
+  const settingUp = new Map(); // a key of its own -> { ticket, prs }
+  const naming = new Set(); // PR URLs
+
+  /** Why a quick review of `ready` can't start, or ''. `reserved`: also count PRs another quick review is naming. */
+  function heldBy(ready, reserved) {
+    const left = [...ready];
+    const parts = [];
+    const take = (has, what) => {
+      const held = left.filter(p => has(p.url));
+      if (!held.length) return;
+      for (const p of held) left.splice(left.indexOf(p), 1);
+      parts.push(`${held.map(p => `${p.repo}#${p.number}`).join(', ')} ${held.length > 1 ? 'are' : 'is'} ${what}`);
+    };
+    for (const r of [...side.running(), ...settingUp.values()]) take(u => (r.prs || []).some(q => q.url === u), `under review in ${r.ticket}`); // its context PRs don't count
+    if (reserved) take(u => naming.has(u), 'already being set up for a review');
+    return parts.length ? `Quick review: ${parts.join('; ')}; start it again once ${parts.length > 1 ? 'they end' : 'that one ends'}` : '';
+  }
+
   // Tags this side sets itself are matched exactly; only the trigger tag is matched loosely.
   const ours = t => [cfg().tags.inProgress, cfg().tags.done].some(x => norm(x) === norm(t));
   const isTrigger = t => !ours(t) && tagMatches(t, cfg().tags.trigger, cfg().tagMatchMaxTypos);
@@ -202,14 +223,16 @@ export function createReviewer(app, deps) {
     ticket = await tracker.current(c, ticket);
     if (!(ticket.tags || []).some(isTrigger)) return;
     const free = hold();
+    const mark = {}; // what this ticket holds in settingUp
     try {
-      await prepareTicket(tracker, ticket, key, free);
+      await prepareTicket(tracker, ticket, key, free, mark);
     } finally {
       free();
+      settingUp.delete(mark);
     }
   }
 
-  async function prepareTicket(tracker, ticket, key, free) {
+  async function prepareTicket(tracker, ticket, key, free, mark) {
     const { state } = side;
     const c = cfg();
     // Drafts are treated as if they weren't there: a draft often waits on the ticket's other PRs.
@@ -221,6 +244,7 @@ export function createReviewer(app, deps) {
     if (others.length) log('info', `${ticket.key}: left out ${others.map(p => `${p.repo}#${p.number}`).join(', ')}: only a PR whose title names ${ticket.key}, and no other ticket, is reviewed with it`, `${key}:left-out`);
     const prs = open.filter(p => !p.draft);
     if (!prs.length) return log('info', `${ticket.key}: tagged, but no open, ready PR names ${ticket.key}, and no other ticket, in its title yet`, key);
+    settingUp.set(mark, { ticket: ticket.key, prs }); // a quick review of any of these waits for this one
     const mine = prs.filter(p => rv.isOwn(p, app.me));
     if (mine.length && !c.reviewOwnPrs) {
       // Skip the whole ticket, not just your PRs: prowl-review reviews a ticket's PRs as one set.
@@ -250,6 +274,7 @@ export function createReviewer(app, deps) {
       leftOut.push(...toReview.filter(p => !fresh.includes(p)));
       toReview = fresh;
     }
+    settingUp.get(mark).prs = toReview; // the approved, unchanged ones are only context
     const skipped = approved.length ? ` (already approved, unchanged: ${approved.map(p => `${p.repo}#${p.number}`).join(', ')})` : '';
     if (app.dryRun()) return log('info', `${ticket.key}: would review ${toReview.map(p => p.url).join(' ') || 'nothing'}${skipped}`, key);
     if (!on()) return undefined; // switched off while this poll ran
@@ -341,6 +366,7 @@ export function createReviewer(app, deps) {
     if (!on()) throw new Error('the Reviewer is off');
     if (busy() >= c.maxConcurrentReviews) throw new Error(`${c.maxConcurrentReviews} reviews are already running (Max parallel reviews)`);
     const free = hold();
+    const reserved = [];
     try {
       app.me ||= await gh.me();
       const tracker = app.tracker();
@@ -352,10 +378,14 @@ export function createReviewer(app, deps) {
         if (offer) log('info', `${tickets.map(t => t.key).join(', ')}: ${offer.polled ? `could be tagged '${c.tags.trigger}' instead` : `could be tagged '${c.tags.trigger}', with ${offer.boards.join(', ')} added to the boards`}; reviewing now, as asked`);
       }
       const prs = await resolve({ prs: paste.prs, tickets: paste.tickets }, { fresh: true });
+      const held = heldBy(readyOf(prs), true);
+      if (held) throw new Error(held);
+      for (const p of readyOf(prs)) { naming.add(p.url); reserved.push(p.url); } // naming can take up to a minute
       const spec = await named(c, { prs: paste.prs, tickets: paste.tickets }, tickets, prs, opts);
       return await startQuick(c, spec, prs, free);
     } finally {
       free();
+      for (const u of reserved) naming.delete(u);
     }
   };
 
@@ -372,6 +402,9 @@ export function createReviewer(app, deps) {
       saveConfig: () => (deps.saveConfig ? deps.saveConfig() : saveConfig(app.cfg)),
     });
   };
+
+  /** The PRs of a paste that a review would cover: open, readable, not drafts. */
+  const readyOf = prs => prs.filter(p => !p.gone && !p.unreadable && !p.draft);
 
   /** The key and title a quick review runs under: a ticket's (one pasted, or named with as), or QUICK#n and a name. */
   async function named(c, paste, tickets, prs, { as = '', name = '' }) {
@@ -434,6 +467,20 @@ export function createReviewer(app, deps) {
     if (drafts.length) throw lasting(`${names(drafts)} ${drafts.length > 1 ? 'are drafts' : 'is a draft'}: mark ${drafts.length > 1 ? 'them' : 'it'} ready, then paste again`);
     const open = prs.filter(p => !p.gone && !p.unreadable);
     if (!open.length) throw lasting('none of its PRs is open');
+    // Again, just before the session starts: another review may have started on one of them meanwhile. It may end, so
+    // this start is one that can go better by waiting.
+    const held = heldBy(open, false);
+    if (held) throw new Error(held);
+    const mark = {};
+    settingUp.set(mark, { ticket: spec.key, prs: open });
+    try {
+      return await startReady(c, spec, open, free);
+    } finally {
+      settingUp.delete(mark);
+    }
+  }
+
+  async function startReady(c, spec, open, free) {
     const done = side.state.runs.filter(r => r.ticket === spec.key && r.status === 'done').sort((a, b) => b.endedAt - a.endedAt);
     const prior = done[0];
     const covered = new Set(done.flatMap(r => [...r.prs, ...(r.contextPrs || [])].map(p => p.url)));
