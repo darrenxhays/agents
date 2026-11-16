@@ -321,7 +321,7 @@ async function boards(assert) {
 /** GitHub, in memory, for the Reviewer: PRs by number, each with its ticket, head, labels and state. */
 function reviewerGitHub() {
   const prs = {};
-  const add = (n, extra = {}) => (prs[n] = { url: `https://github.com/octo-org/r${n}/pull/${n}`, title: `PR ${n}`, number: n, repo: `octo-org/r${n}`, author: 'teammate', draft: false, state: 'open', headSha: `sha${n}`, labels: [], ticket: '', ...extra });
+  const add = (n, extra = {}) => (prs[n] = { url: `https://github.com/octo-org/r${n}/pull/${n}`, title: extra.ticket ? `${extra.ticket}: PR ${n}` : `PR ${n}`, number: n, repo: `octo-org/r${n}`, author: 'teammate', draft: false, state: 'open', headSha: `sha${n}`, labels: [], ticket: '', ...extra });
   const of = pr => prs[pr.number];
   return {
     prs, add,
@@ -358,7 +358,7 @@ async function reviews(assert, appDir) {
     readItem: async (c, ref) => structuredClone(Object.values(tickets).find(t => t.ref.id === ref.id)),
     boardOf: async (c, t) => (t.key === 'AB#42' ? { project: 'Shop', team: 'Web' } : null),
     claim: async (c, t, drop, add) => { tagged.push([t.key, add]); },
-    findTickets: async () => ({ tickets: [], variants: [] }),
+    findTickets: async () => ({ tickets: [], variants: [] }), current: async (c, t) => t,
   };
   const tagged = [];
   const logs = [];

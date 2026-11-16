@@ -41,7 +41,7 @@ export const CONFIG_FIELDS = [
   { key: 'jira.fields.reproSteps', label: 'Repro steps field', type: 'text', empty: true, emptyShows: '(none)', when: JIRA, help: "The Jira custom field id holding repro steps, for the Builder's ticket.md. Empty: no such section." },
 
   { heading: 'GitHub and projects' },
-  { key: 'githubOwner', label: 'GitHub org', type: 'text', help: 'Open PRs whose title or description mentions the ticket (AB#123 or PROJ-123) are searched for here, and the Builder works in its repos.' },
+  { key: 'githubOwner', label: 'GitHub org', type: 'text', help: 'Open PRs whose title or description mentions the ticket (AB#123 or PROJ-123) are searched for here; a tagged review takes those whose title names it alone. The Builder works in its repos.' },
   { key: 'workDir', label: 'Projects directory', type: 'text', help: 'Sessions run here and load its CLAUDE.md, e.g. your projects root. Repos not cloned here are cloned before use; worktrees go in its .prowl-worktrees folder.', valid: v => isDir(v) || 'folder not found' },
 
   // In the order a ticket meets them: built, then reviewed. The Builder hands off by setting the review trigger tag.

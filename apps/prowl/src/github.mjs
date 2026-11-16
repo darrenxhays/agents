@@ -25,6 +25,21 @@ export async function prsMentioning(owner, key, state = '') {
     .map(p => ({ url: p.url, title: p.title, number: p.number, repo: p.repository.nameWithOwner, author: p.author?.login || '', draft: Boolean(p.isDraft), state: p.state || '' }));
 }
 
+/** The ticket keys with `key`'s prefix (AB# or PROJ-) that `text` mentions, other than `key`. */
+export function otherKeys(text, key) {
+  const prefix = String(key).replace(/\d+$/, '');
+  if (!prefix || prefix === key) return [];
+  const re = new RegExp(`(?<![a-z0-9])${prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\d+)(?!\\d)`, 'gi');
+  const own = Number(String(key).slice(prefix.length));
+  return [...new Set([...String(text || '').matchAll(re)].map(m => Number(m[1])).filter(n => n !== own))].map(n => `${prefix}${n}`);
+}
+/**
+ * True when a PR's title names ticket `key` and no other ticket of its kind: a tagged review takes only those PRs.
+ * On Jira, only another issue of the same project counts as another ticket: a bare PROJ-n pattern would also match
+ * words like UTF-8.
+ */
+export const titleNamesOnly = (title, key) => mentions(title, key) && !otherKeys(title, key).length;
+
 /**
  * The PRs in typed text: PR links (https://github.com/owner/repo/pull/12) or owner/repo#12, separated by spaces or
  * commas, each once, as [{ repo, number }]. A message naming what's wrong when there are none, or one isn't a PR.

@@ -696,7 +696,7 @@ assert.ok(SECRET_PATTERNS.length >= 10);
 const { loadConfig, parseJsonc, saveConfig, CONFIG_PATH } = await import('./config.mjs');
 const { createReviewer } = await import('./reviewer/reviewer.mjs');
 const rvTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'prowl-test-'));
-const prOf = (n, extra = {}) => ({ url: `https://github.com/octo-org/r${n}/pull/${n}`, title: `PR ${n}`, number: n, repo: `octo-org/r${n}`, author: 'teammate', draft: false, ...extra });
+const prOf = (n, extra = {}) => ({ url: `https://github.com/octo-org/r${n}/pull/${n}`, title: `AB#42: PR ${n}`, number: n, repo: `octo-org/r${n}`, author: 'teammate', draft: false, ...extra });
 /** A Reviewer with fake GitHub and board: `open` are the ticket's open PRs; resolves with what it claimed, started and logged. */
 async function reviewOnce(open, { runs = [], cfgOver = {}, me = 'octocat', switchOffAt = '', retagFails = 0, tags = ['Ready for Review'], claimFails = null, dry = false, failures = {} } = {}) {
   const cfg = { ...loadConfig(), githubOwner: 'octo-org', workDir: rvTmp, ...cfgOver };
@@ -708,7 +708,7 @@ async function reviewOnce(open, { runs = [], cfgOver = {}, me = 'octocat', switc
     findTickets: async () => ({ tickets: [ticket], variants: ['Ready for Review'] }),
     claim: async (c, t, drop, add) => { if (claimFails) throw claimFails; seen.claims.push(add); if (switchOffAt === 'claim') app.on = false; },
     retag: async (c, ref, drop, add) => { if (retagFails-- > 0) throw new Error('503 Service Unavailable'); seen.retags.push(add); },
-    ticketText: async () => '',
+    ticketText: async () => '', current: async (c, t) => t,
   };
   const gh = { me: async () => me, openPrs: async () => open, headSha: async pr => `sha${pr.number}`, postComment: async () => '', humanApproved: async () => false,
     cloneMissing: async () => { seen.claimsAtClone = seen.claims.length; if (switchOffAt === 'clone') app.on = false; return []; } };
@@ -731,7 +731,7 @@ assert.ok(!seen.started[0].approvedPrs.length && !seen.started[0].leftOut.length
 assert.ok(!seen.logs.some(l => l.includes('r2') || l.includes('#2')), 'the draft is not named in the Log');
 seen = await reviewOnce([prOf(2, { draft: true }), prOf(3, { draft: true })]);
 assert.deepEqual([seen.claims, seen.started], [[], []], 'all drafts: waits, tagged and unclaimed');
-assert.match(seen.logs.at(-1), /no open, ready PR mentions AB#42 yet/);
+assert.match(seen.logs.at(-1), /no open, ready PR names AB#42, and no other ticket, in its title yet/);
 seen = await reviewOnce([prOf(1), prOf(4, { draft: true, author: 'octocat' })]);
 assert.equal(seen.started.length, 1, 'your own draft no longer makes the ticket yours');
 seen = await reviewOnce([prOf(1), prOf(2, { draft: true })], { runs: [doneRun([prOf(1), prOf(2)])] });
@@ -869,7 +869,7 @@ assert.deepEqual(await failRun({}, { capped: 'spend cap $50' }), [[''], 1, 'fail
     let release;
     gh.openPrs = () => new Promise(r => { release = r; });
     app.boards = () => [{ project: 'Shop', team: 'Web' }];
-    app.tracker = () => ({ name: 'Azure DevOps', boardLabel: () => 'Shop / Web', findTickets: async () => ({ tickets: [{ key: 'AB#9', title: 't' }], variants: ['Ready for Review'] }) });
+    app.tracker = () => ({ name: 'Azure DevOps', boardLabel: () => 'Shop / Web', findTickets: async () => ({ tickets: [{ key: 'AB#9', title: 't', tags: ['Ready for Review'] }], variants: ['Ready for Review'] }), current: async (c, t) => t });
     const polling = side.poll();
     await new Promise(r => setTimeout(r, 0));
     await assert.rejects(side.quickReview('octo-org/r1#1'), /Max parallel reviews/, "a ticket's review being prepared holds its slot");

@@ -6,6 +6,8 @@ import path from 'node:path';
 import { CONFIG_PATH, HOME, loadConfig, newSettings } from './config.mjs';
 import { killChecks, reviewSteps, runChecks, runCommand, runSteps } from './checks.mjs';
 import { addWorktree, noHooks, noHooksEnv } from './git.mjs';
+import { otherKeys, titleNamesOnly } from './github.mjs';
+import { norm, tagMatches } from './match.mjs';
 import { baseSteps, checkPlan, checksLine, prChecks } from './reviewer/checks.mjs';
 import { createReviewer } from './reviewer/reviewer.mjs';
 import { MODELS } from './config.mjs';
@@ -109,7 +111,7 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
   };
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
-  const prOf = (n, extra = {}) => ({ url: `https://github.com/octo-org/r${n}/pull/${n}`, title: `PR ${n}`, number: n, repo: `octo-org/r${n}`, author: 'teammate', draft: false, state: 'open', headSha: `sha${n}`, labels: [], ...extra });
+  const prOf = (n, extra = {}) => ({ url: `https://github.com/octo-org/r${n}/pull/${n}`, title: `AB#42: PR ${n}`, number: n, repo: `octo-org/r${n}`, author: 'teammate', draft: false, state: 'open', headSha: `sha${n}`, labels: [], ...extra });
   /**
    * A Reviewer over fakes: `open` are the open PRs GitHub's search finds, `tickets` what the board search returns.
    * Resolves with { side, seen: { claims, retags, started, launched, logs }, app, gh, tracker }.
@@ -124,14 +126,15 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
       findTickets: async () => ({ tickets: tickets || [ticket], variants: [cfg.tags.trigger] }),
       claim: async (c, t, drop, add) => { seen.claims.push(add); },
       retag: async (c, ref, drop, add) => { seen.retags.push(add); },
-      ticketText: async () => '', lookup: async (c, key) => ({ ...ticket, key }), current: async (c, t) => t,
+      ticketText: async () => '', lookup: async (c, key) => ({ ...ticket, key }), current: async (c, t) => t, boardOf: async () => null, readItem: async () => ticket,
       ...trackerOver,
     };
     const gh = { me: async () => 'octocat', openPrs: async () => open, headSha: async pr => `sha${pr.number}`, postComment: async () => '', humanApproved: async () => false, cloneMissing: async () => [],
       prByRef: async ref => open.find(p => p.repo === ref.repo && p.number === ref.number) || (() => { throw new Error('HTTP 404'); })(), reviewedSince: async () => true, isOpen: async () => true, ...ghOver };
+    const byKey = new Map(); // a message repeated for the same key is logged once, as in prowl.mjs
     const labelCalls = [];
     const labels = { own() {}, set: (...a) => labelCalls.push(a), refused: () => '', pending: () => false };
-    const side = createReviewer(app, { log: (level, msg) => { if (seen.logs.at(-1) === msg) return false; seen.logs.push(msg); if (level === 'warn' || level === 'error') seen.warns.push(msg); return true; }, forget() {}, hoot() {}, appDir, trackers: { ado: tracker, jira: tracker }, github: gh, labels, autoName: async () => 'Named', ...deps });
+    const side = createReviewer(app, { log: (level, msg, key) => { if (key && byKey.get(key) === msg) return false; if (key) byKey.set(key, msg); seen.logs.push(msg); if (level === 'warn' || level === 'error') seen.warns.push(msg); return true; }, forget: key => byKey.delete(key), hoot() {}, appDir, trackers: { ado: tracker, jira: tracker }, github: gh, labels, autoName: async () => 'Named', ...deps });
     side.state = { runs: structuredClone(runs), failures: {} };
     let n = 0;
     const fake = (c, opts) => ({ id: `AB42-${++n}`, tracker: opts.tracker, ref: opts.ticket.ref, ticket: opts.ticket.key, title: opts.ticket.title, ticketUrl: opts.ticket.url, prs: opts.prs, contextPrs: opts.approvedPrs || [], reviewNo: (opts.prior?.reviewNo || 0) + 1, priorId: opts.prior?.id || null,
@@ -346,6 +349,29 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
     h = reviewerOver({ open: [prOf(1)], cfgOver: { reviewChecks: true }, deps: { readChecks: () => { throw new Error("checks.json isn't valid JSON (x)"); } } });
     await h.side.poll();
     assert.ok(!h.side.state.runs[0].phase && h.seen.warns.some(l => l.includes("isn't valid JSON")));
+  }
+
+  // ---- C-11: a tagged review takes only PRs whose title names the ticket ----
+  {
+    assert.deepEqual(['AB#7: thing', '[ab#7] thing (AB#7)', 'thing', 'AB#77 thing', 'AB#7, AB#8: thing', 'AB#7 and ab#77', 'XAB#7 thing', 'AB#7 (JIRA-8, #12)'].map(t => titleNamesOnly(t, 'AB#7')),
+      [true, true, false, false, false, false, false, true]);
+    assert.deepEqual(['PROJ-7: thing', '[proj-7] thing', 'PROJ-77 thing', 'PROJ-7, PROJ-8: thing', 'XPROJ-7 thing', 'PROJ-7 (OTHER-9, UTF-8)'].map(t => titleNamesOnly(t, 'PROJ-7')),
+      [true, true, false, false, false, true]);
+    assert.deepEqual(otherKeys('AB#7, ab#8 and AB#8, AB#9', 'AB#7'), ['AB#8', 'AB#9']);
+    const three = [prOf(1), prOf(2, { title: 'Follow-up work' }), prOf(3, { title: 'AB#42, AB#43: both' })];
+    let h = reviewerOver({ open: three });
+    await h.side.poll();
+    assert.deepEqual(h.seen.started[0].prs.map(p => p.number), [1], 'only the PR whose title names the ticket alone is reviewed');
+    const leftOut = 'AB#42: left out octo-org/r2#2, octo-org/r3#3: only a PR whose title names AB#42, and no other ticket, is reviewed with it';
+    h.side.state.runs = [];
+    await h.side.poll();
+    assert.equal(h.seen.logs.filter(l => l === leftOut).length, 1, 'the left-out line is logged once across two polls');
+    h = reviewerOver({ open: [prOf(2, { title: 'Follow-up work' })] });
+    await h.side.poll();
+    assert.ok(h.seen.logs.includes('AB#42: tagged, but no open, ready PR names AB#42, and no other ticket, in its title yet') && !h.seen.claims.length, 'mentioned only in the body: nothing claimed');
+    h = reviewerOver({ open: three, ghOver: {} });
+    const quick = await h.side.quickReview('AB#42');
+    assert.deepEqual((quick.offer ? (await h.side.answerOffer(quick.offer, 'review')) : quick).prs.map(p => p.number), [1, 2, 3], 'a quick review of the ticket still takes all three');
   }
 
   // ---- C-06: verifier model and effort ----

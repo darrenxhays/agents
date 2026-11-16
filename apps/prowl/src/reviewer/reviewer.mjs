@@ -209,9 +209,14 @@ export function createReviewer(app, deps) {
     const { state } = side;
     const c = cfg();
     // Drafts are treated as if they weren't there: a draft often waits on the ticket's other PRs.
-    const open = await gh.openPrs(c.githubOwner, ticket.key);
+    // A tagged review takes only the PRs whose title names the ticket, and no other: one that mentions it only in its
+    // description, or names several tickets, is left out. Everything below sees the ticket's own PRs alone.
+    const found = await gh.openPrs(c.githubOwner, ticket.key);
+    const open = found.filter(p => github.titleNamesOnly(p.title, ticket.key));
+    const others = found.filter(p => !p.draft && !open.includes(p));
+    if (others.length) log('info', `${ticket.key}: left out ${others.map(p => `${p.repo}#${p.number}`).join(', ')}: only a PR whose title names ${ticket.key}, and no other ticket, is reviewed with it`, `${key}:left-out`);
     const prs = open.filter(p => !p.draft);
-    if (!prs.length) return log('info', `${ticket.key}: tagged, but no open${open.length ? ', ready' : ''} PR mentions ${ticket.key} yet`, key);
+    if (!prs.length) return log('info', `${ticket.key}: tagged, but no open, ready PR names ${ticket.key}, and no other ticket, in its title yet`, key);
     const mine = prs.filter(p => rv.isOwn(p, app.me));
     if (mine.length && !c.reviewOwnPrs) {
       // Skip the whole ticket, not just your PRs: prowl-review reviews a ticket's PRs as one set.
