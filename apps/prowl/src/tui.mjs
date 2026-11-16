@@ -5,6 +5,7 @@ import { askLabel, labelNames } from './names.mjs';
 import { label as jiraLabel } from './jira.mjs';
 import { cleanName, notARef, parsePaste } from './paste.mjs';
 import { createMascot, wrap } from './mascot.mjs';
+import { shortstat } from './github.mjs';
 import { copyText, openExternal } from './proc.mjs';
 import { awaitingHuman, isOwn } from './reviewer/reviews.mjs';
 import { spendText } from './builder/rules.mjs';
@@ -247,12 +248,13 @@ export function startTui(app, actions, io = {}) {
     panes: new Map(), // the scrolling panes, by id: { at, ops, top, room, total, follow, focus, painted, owner }
     front: null, // the pane the scroll keys go to, as the last frame painted it: { id, arrows, sig }
     bodyH: 0, // the rows the view had in the last frame
+    picked: { reviewer: null, builder: null }, // the selected Running row, by id (and ticket): re-found each frame, so rows coming and going don't shift the selection
   };
   const acc = (name = ui.side) => ACCENT[name];
   const cursor = on => (on ? [acc().fg, ' ❯ '] : ['', '   ']);
   const onClick = (row, hit) => Object.assign(row, { hit });
   // A click on a list's row selects it; a click on the row already selected does what enter does.
-  const pick = (tab, i) => () => { if (sel()[tab] === i) onKey('enter'); else sel()[tab] = i; };
+  const pick = (tab, i) => () => { if (sel()[tab] === i) onKey('enter'); else { sel()[tab] = i; ui.picked[ui.side] = null; } };
   const flash = text => { ui.flash = text; ui.flashUntil = Date.now() + 4000; };
   const side = () => sides[ui.side];
   const view = () => ui.view[ui.side];
@@ -410,6 +412,20 @@ export function startTui(app, actions, io = {}) {
   const scrollPane = (id, k) => { ui.panes.get(id)?.ops.push(k); };
   const SCROLL_KEYS = ['pageup', 'pagedown', 'home', 'end'];
 
+  const rowId = r => (r._wait ? `wait:${r.key}` : r.id || r.uid || r.key);
+  /** Running's selection: the remembered row where it is now (a review's own row, once it replaces its preparing row), until ↑ ↓ or a click moves it. */
+  function selectRunning(list) {
+    const want = ui.picked[ui.side];
+    if (want) {
+      let i = list.findIndex(r => rowId(r) === want.id);
+      if (i < 0 && String(want.id).startsWith('preparing:')) i = list.findIndex(r => !r._wait && r.ticket === want.ticket);
+      if (i >= 0) sel()[RUNNING] = i;
+    }
+    const at = clampSel(RUNNING, list.length);
+    ui.picked[ui.side] = { id: rowId(list[at]), ticket: list[at].ticket };
+    return at;
+  }
+
   /** A list above, a rule, and a pane of details below: the list keeps up to half the view, the details get what they need of the rest. */
   function withDetails(count, listRows, blocks, W, H, id, owner) {
     const need = blocks.reduce((n, b) => n + linesOf(b, W).length, 0);
@@ -418,11 +434,25 @@ export function startTui(app, actions, io = {}) {
     return [...listRows(Math.max(1, H - 1 - h)), rule(W), ...pane(id, blocks, W, h, { owner, front: true })];
   }
 
-  function activity(rows, r, H, W) {
-    const blocks = (r._activity || []).map(a => ({ key: keyOf(a), src: a, ...(a.error ? { segs: [[ST.red, `  ${a.text}`]], hang: 2 }
+  /**
+   * A session's Activity under the Running list: its heading (`head`, with where the pane is at its right end when it
+   * doesn't all fit), a grey row per PR with a known size (at most 3), then a following pane of its lines, keyed by
+   * session and start time so a Builder ticket's next turn starts a fresh one.
+   */
+  function activity(rows, r, H, W, head) {
+    const base = r._activityBase || 0; // lines trimmed from the start: a line's key holds while old lines go
+    const blocks = (r._activity || []).map((a, i) => ({ key: base + i, src: a, ...(a.error ? { segs: [[ST.red, `  ${a.text}`]], hang: 2 }
       : a.sub ? { segs: [[ST.grey, '    ↳ '], [ST.grey, a.text]], hang: 6 } : { segs: [[ST.cyan, '  • '], [a.said ? '' : ST.dim, a.text]], hang: 4 }) }));
-    if (!blocks.length) return [...rows, [[ST.grey, '  starting…']]];
-    return [...rows, ...pane('activity', blocks, W, Math.max(1, H - rows.length), { follow: true, owner: r.id || r.uid || r.key, front: true })];
+    const sized = (r.prs || []).filter(p => r.stats?.[p.url]);
+    const room = Math.max(0, Math.min(3, H - rows.length - 3)); // never so many that Activity has no row left
+    const shownPrs = sized.length > room ? sized.slice(0, Math.max(0, room - 1)) : sized;
+    const sizes = room ? [...shownPrs.map(p => { const st = r.stats[p.url]; return [['', '  '], [ST.link, prName(p), p.url], [ST.grey, `  ${shortstat(st)}${st.commits ? ` · ${plural(st.commits, 'commit')}` : ''}`]]; }),
+      ...(sized.length > shownPrs.length ? [[[ST.grey, `  and ${plural(sized.length - shownPrs.length, 'more PR')} · the Log has the total`]]] : [])] : [];
+    const id = `act:${r.id || r.uid || r.key}:${r.startedAt || r.sessionStartedAt || ''}`;
+    const body = blocks.length ? pane(id, blocks, W, Math.max(1, H - rows.length - 2 - sizes.length), { follow: true, status: false, front: true }) : [[[ST.grey, '  starting…']]];
+    const st = ui.panes.get(id);
+    const where = blocks.length && st.total > st.room ? [[ST.grey, `${whereText(st)} `]] : [];
+    return [...rows, rule(W), where.length ? spread(clip(head, Math.max(10, W - width(where) - 1)), where, W) : head, ...sizes, ...body];
   }
 
   function runningView(W, H) {
@@ -437,7 +467,7 @@ export function startTui(app, actions, io = {}) {
         : n ? `  No reviews running. Watching ${plural(n, 'board')} for '${app.cfg.tags.trigger}'.`
           : '  No boards configured yet: press 4 for Config, then a to add one.']]];
     }
-    const at = clampSel(RUNNING, runs.length);
+    const at = selectRunning(runs);
     const rows = windowed(runs, at, Math.min(runs.length, Math.max(3, Math.floor(H / 3)))).map(({ item: r, i }) => {
       if (r._wait) {
         const n = r.waitingOn?.length || 0;
@@ -461,8 +491,7 @@ export function startTui(app, actions, io = {}) {
         ...(r.notes || []).map(n => [[ST.grey, `  • ${n}`]]));
       return rows;
     }
-    rows.push(rule(W), [[ST.bold, ` Activity · ${r.ticket}  `], [ST.grey, prsOf(r).map(prName).join('  ')]]);
-    return activity(rows, r, H, W);
+    return activity(rows, r, H, W, [[ST.bold, ` Activity · ${r.ticket}  `], [ST.grey, prsOf(r).map(prName).join('  ')]]);
   }
 
   // The Reviewer's Running list: its reviews, those being set up, then the quick reviews waiting on their PRs.
@@ -558,15 +587,14 @@ export function startTui(app, actions, io = {}) {
         : n ? `  Nothing being built. Watching ${plural(n, 'board')} for '${app.cfg.builder.tags.start}'${app.cfg.builder.assignedToMe ? ' on tickets assigned to you' : ''}.`
           : '  No boards configured yet: press 4 for Config, then a to add one.']]];
     }
-    const at = clampSel(RUNNING, items.length);
+    const at = selectRunning(items);
     const rows = windowed(items, at, Math.min(items.length, Math.max(3, Math.floor(H / 3)))).map(({ item: w, i }) => {
       const left = [cursor(i === at), [w.stopRequested ? ST.red : acc().fg, `${w.stopRequested ? '■' : spin()} `], [ST.bold, `${w.key}  `], ...(w.quick ? [[ST.cyan, 'quick  ']] : [])];
       const right = [[ST.grey, `  ${w.stopRequested ? 'stopping' : STEP_NAMES[w.step] || 'waiting'} · ${plural(w.turns?.length || 0, 'turn')} · ${spendText(w)} · ${dur(Date.now() - (w.claimedRoundAt || w.claimedAt || w.createdAt))} `]];
       return onClick(spread([...left, ['', trunc(w.title, W - width(left) - width(right) - 1)]], right, W), pick(RUNNING, i));
     });
     const w = items[at];
-    rows.push(rule(W), [[ST.bold, ` Activity · ${w.key}  `], [ST.grey, (w.turnKind === 'round' ? w.round?.prs || [] : w.repos || []).map(r => r.repo.split('/')[1]).join('  ')]]);
-    return activity(rows, w, H, W);
+    return activity(rows, w, H, W, [[ST.bold, ` Activity · ${w.key}  `], [ST.grey, (w.turnKind === 'round' ? w.round?.prs || [] : w.repos || []).map(r => r.repo.split('/')[1]).join('  ')]]);
   }
 
   function verdict(r) {
@@ -1439,6 +1467,7 @@ export function startTui(app, actions, io = {}) {
     if (ui.front?.sig === frontSig() && (SCROLL_KEYS.includes(k) || (ui.front.arrows && (k === 'up' || k === 'down')))) { scrollPane(ui.front.id, k); return undefined; }
     if (SCROLL_KEYS.includes(k)) return undefined;
     if ((k === 'up' || k === 'down') && currentItem()) return formMove(k); // Needs you: through the form
+    if (k === 'up' || k === 'down') ui.picked[ui.side] = null; // the selection moves: Running remembers the new row
     if (k === 'up') { sel()[view()] = Math.max(0, sel()[view()] - 1); return undefined; }
     if (k === 'down') { sel()[view()]++; return undefined; }
     if (k === 'q') {

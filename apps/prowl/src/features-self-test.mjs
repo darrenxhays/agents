@@ -6,7 +6,7 @@ import path from 'node:path';
 import { CONFIG_PATH, HOME, loadConfig, newSettings, takeNameNotes } from './config.mjs';
 import { killChecks, reviewSteps, runChecks, runCommand, runSteps } from './checks.mjs';
 import { addWorktree, noHooks, noHooksEnv } from './git.mjs';
-import { branchHadPr, fromOwnBranch, otherKeys, prForBranch, titleNamesOnly } from './github.mjs';
+import { branchHadPr, fromOwnBranch, otherKeys, prForBranch, shortstat, titleNamesOnly } from './github.mjs';
 import { ticketsFrom } from './ado.mjs';
 import { createLabels } from './labels.mjs';
 import { norm, tagMatches } from './match.mjs';
@@ -16,8 +16,9 @@ import { builderTags, gateDecision, workState } from './builder/rules.mjs';
 import { baseSteps, checkPlan, checksLine, prChecks } from './reviewer/checks.mjs';
 import { createReviewer } from './reviewer/reviewer.mjs';
 import { MODELS } from './config.mjs';
+import { sizeNote, sizeTotal } from './reviewer/reviews.mjs';
 import { agentModel, buildPrompt, CHECKS_SLOT, createReview, fenced, fillChecks, fillPrep, finalize, PREP_SLOT, reviewArgs, reviewRoles, rolesWarning } from './reviewer/reviews.mjs';
-import { readActivity, sessionEnded } from './sessions.mjs';
+import { ACTIVITY_LINES, readActivity, resetActivity, sessionEnded, trimActivity } from './sessions.mjs';
 import { holdBack, keys as readKeys, restOf, startTui, timedOut, wrapSegs } from './tui.mjs';
 
 const WIN = process.platform === 'win32';
@@ -1084,6 +1085,94 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
     assert.equal(t.tui.ui.notes, null);
     // ESC [ 5 never presses 5: the pane keys are read only as whole sequences.
     assert.deepEqual([...readKeys(holdBack('\x1b[5')[0])], []);
+  }
+
+  // ---- C-29: more in Running ----
+  {
+    const r = { _activity: Array.from({ length: ACTIVITY_LINES + 5 }, (_, i) => ({ text: `l${i}` })) };
+    trimActivity(r);
+    assert.deepEqual([r._activity.length, r._activityBase, r._activity[0].text], [2000, 5, 'l5']);
+    r._activity.push({ text: 'a' }, { text: 'b' });
+    trimActivity(r);
+    assert.deepEqual([r._activity.length, r._activityBase], [2000, 7], 'a second trim adds to it');
+    resetActivity(r);
+    assert.equal(r._activityBase, undefined);
+    const bad = { logPath: path.join(tmp, 'bad-line.ndjson') };
+    fs.writeFileSync(bad.logPath, `not json\n${JSON.stringify({ type: 'assistant', message: { content: [null, 'x', { type: 'text', text: 'after it' }] } })}\n`);
+    readActivity(bad);
+    assert.deepEqual(bad._activity.map(a => [a.text, Boolean(a.error)]), [['not json', true], ['after it', false]], "a line that can't be parsed is shown, and the lines after it still read");
+    assert.equal(shortstat({ files: 1, additions: 1, deletions: 0 }), '1 file changed, 1 insertion(+), 0 deletions(-)');
+    assert.equal(shortstat({ files: 12, additions: 340, deletions: 1 }), '12 files changed, 340 insertions(+), 1 deletion(-)');
+    const two = [prOf(1), prOf(2)];
+    assert.equal(sizeNote(two, { [two[0].url]: { files: 5, additions: 120, deletions: 30 } }), ' (5 files changed, +120 -30, not counting every PR)');
+    assert.deepEqual([sizeNote(two, {}), sizeNote(two, { [two[0].url]: { files: 1, additions: 1, deletions: 0 }, [two[1].url]: { files: 4, additions: 9, deletions: 2 } }), sizeTotal(two, { [two[0].url]: { files: 1, additions: 2, deletions: 3 } })],
+      ['', ' (5 files changed, +10 -2)', '1 file changed, +2 -3']);
+
+    // A clone that hangs: Running shows the preparing row with what the setup is doing; then the review's row takes its place, still selected.
+    let cloned;
+    const hang = new Promise(res => { cloned = res; });
+    const stats = { files: 3, additions: 20, deletions: 4, commits: 2 };
+    const h = reviewerOver({ open: [prOf(1)], cfgOver: { ticketContext: true }, deps: { sizeWaitMs: 50 },
+      ghOver: { cloneMissing: async (prs, dir, onClone) => { onClone('octo-org/r1', path.join(dir, 'r1')); await hang; return ['octo-org/r1']; }, prStats: async () => stats } });
+    const older = { id: 'AB41-1', ticket: 'AB#41', title: 'Older', prs: [prOf(9)], status: 'running', startedAt: Date.now() - 5000, reviewNo: 1, pid: null, _activity: [] };
+    h.side.state.runs.push(older);
+    const sidePart = { running: () => h.side.running(), preparing: () => h.side.preparing(), waits: () => [], state: h.side.state, stopText: x => h.side.stopText(x) };
+    const t = tuiOver({ reviewer: sidePart });
+    const polling = h.side.poll();
+    await sleep(20);
+    let f = t.text(110, 30);
+    assert.ok(/AB#42\s+Thing\s+1 PR · preparing · /.test(f) && f.includes('1 Running (2)'), f);
+    t.tui.key('down');
+    f = t.text(110, 30);
+    assert.ok(f.includes(`Cloning octo-org/r1 into ${path.join(tmp, 'r1')}`) && f.includes('Activity · AB#42'), f);
+    assert.deepEqual([h.seen.claims.length, h.side.state.runs.length], [0, 1], 'nothing is claimed while it is set up');
+    cloned();
+    await polling;
+    const run = h.side.state.runs.find(x => x.ticket === 'AB#42');
+    assert.deepEqual([h.side.preparing().length, run._activity.map(a => a.text).slice(0, 3).map(x => x.replace(/ in \d+s$/, '')), run.stats], [0, [`Cloning octo-org/r1 into ${path.join(tmp, 'r1')}`, `Cloned octo-org/r1 into ${tmp}`, 'Reading AB#42'], { [prOf(1).url]: stats }]);
+    assert.ok(h.seen.logs.includes('AB#42: review started on 1 PR (3 files changed, +20 -4)'), h.seen.logs.join('\n'));
+    f = t.text(110, 30);
+    assert.ok(f.includes('Activity · AB#42') && /❯ . AB#42/.test(f) && f.includes('r1#1  3 files changed, 20 insertions(+), 4 deletions(-) · 2 commits'), `the review's row is selected in its place:\n${f}`);
+    t.tui.key('up');
+    assert.ok(t.text(110, 30).includes('Activity · AB#41'), '↑ moves the selection, and it is remembered from there');
+    // A clone that fails is told too, and sizes that arrive late are logged once.
+    const late = [];
+    const h2 = reviewerOver({ open: [prOf(1), prOf(2)], deps: { sizeWaitMs: 10 }, ghOver: { cloneMissing: async () => { throw new Error('no network'); }, prStats: () => new Promise(res => { late.push(() => res(stats)); }) } });
+    await h2.side.poll();
+    const run2 = h2.side.state.runs[0];
+    assert.ok(run2._activity[0].text === "Couldn't clone: no network" && h2.seen.logs.includes('AB#42: review started on 2 PRs'), h2.seen.logs.join('\n'));
+    late.forEach(go => go());
+    await sleep(20);
+    assert.ok(h2.seen.logs.some(l => /^AB#42: its PRs are \d+ files? changed, \+\d+ -\d+/.test(l)), h2.seen.logs.join('\n'));
+    // A dry run: no row, no sizes read.
+    let asked = 0;
+    const h3 = reviewerOver({ open: [prOf(1)], dry: true, ghOver: { prStats: async () => { asked++; return stats; } } });
+    await h3.side.poll();
+    assert.deepEqual([asked, h3.side.preparing().length], [0, 0]);
+
+    // Sizes for 5 PRs at 80×30: 2 rows, and the rest in a line.
+    const five = [1, 2, 3, 4, 5].map(n => prOf(n));
+    const big = { id: 'AB50-1', ticket: 'AB#50', title: 'Big', prs: five, status: 'running', startedAt: Date.now(), reviewNo: 1, stats: Object.fromEntries(five.map(p => [p.url, stats])),
+      _activity: Array.from({ length: 500 }, (_, i) => ({ text: `step ${i + 1}` })) };
+    const t2 = tuiOver({ reviewer: { running: () => [big] } });
+    f = t2.text(80, 30);
+    assert.ok(f.includes('r1#1  3 files changed') && f.includes('r2#2  3 files changed') && !f.includes('r3#3  3 files') && f.includes('and 3 more PRs · the Log has the total'), f);
+    assert.ok(/Activity · AB#50.*latest \d+ of 500 lines · PgUp to scroll back/.test(f) && f.includes('step 500'), 'where it is shows at the right of the heading');
+    // 500 lines: PgUp twice, 50 more arrive, the same lines stay; End follows again.
+    t2.tui.key('pageup');
+    t2.text(80, 30);
+    t2.tui.key('pageup');
+    f = t2.text(80, 30);
+    const steps = fr => fr.split('\n').filter(l => /• step \d+/.test(l)).join('\n');
+    const held = steps(f);
+    big._activity.push(...Array.from({ length: 50 }, (_, i) => ({ text: `step ${i + 501}` })));
+    f = t2.text(80, 30);
+    assert.ok(steps(f) === held && /lines \d+–\d+ of 550 · End: latest/.test(f), f);
+    big._activity.splice(0, 100); // old lines go, their count kept: it still holds
+    big._activityBase = 100;
+    assert.equal(steps(t2.text(80, 30)), held);
+    t2.tui.key('end');
+    assert.ok(t2.text(80, 30).includes('step 550'));
   }
 
   fs.rmSync(tmp, { recursive: true, force: true });

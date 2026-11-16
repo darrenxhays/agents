@@ -61,13 +61,26 @@ export const capHit = (result, { maxBudgetUsd, maxTurns } = {}) =>
   ({ error_max_budget_usd: `spend cap $${maxBudgetUsd}`, error_max_turns: `turn cap ${maxTurns}` }[result?.subtype] || null);
 
 /** Forgets what readActivity() read, before a new session writes to a new log. */
-export const resetActivity = run => { for (const k of ['_activity', '_offset', '_partial', '_decoder', '_result', '_ours', '_resultLast', '_tasks', '_lastOutputAt']) delete run[k]; };
+export const resetActivity = run => { for (const k of ['_activity', '_offset', '_partial', '_decoder', '_result', '_ours', '_resultLast', '_tasks', '_lastOutputAt', '_activityBase']) delete run[k]; };
 
 /**
  * True once the session for `run` has ended: its process has exited. A `result` event while it runs is only a turn's:
  * a session with background subagents ends its turn while they work, and starts a new one as each finishes.
  */
 export const sessionEnded = (run, isAlive = alive) => !isAlive(run);
+
+/** How many Activity lines a session keeps: Running scrolls back through them. */
+export const ACTIVITY_LINES = 2000;
+/**
+ * Drops a session's oldest Activity lines past ACTIVITY_LINES, adding their count to run._activityBase: a line's key
+ * is _activityBase + its index, so a scrolled-back Activity holds still while old lines go.
+ */
+export function trimActivity(run) {
+  const over = (run._activity?.length || 0) - ACTIVITY_LINES;
+  if (over <= 0) return;
+  run._activity.splice(0, over);
+  run._activityBase = (run._activityBase || 0) + over;
+}
 
 /**
  * True when a session's work is done and nothing it started can start another turn: the last event in its log is a
@@ -103,7 +116,7 @@ export function readActivity(run) {
     const lines = (run._partial + run._decoder.write(buf)).split('\n');
     run._partial = lines.pop();
     for (const line of lines) parseLine(run, line);
-    if (run._activity.length > 400) run._activity.splice(0, run._activity.length - 400);
+    trimActivity(run);
   }
   return run._result;
 }

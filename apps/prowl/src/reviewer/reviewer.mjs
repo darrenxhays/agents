@@ -180,12 +180,11 @@ export function createReviewer(app, deps) {
    * Creates a review and does its setup, with a stand-in in Running meanwhile: its PRs checked out in worktrees, and
    * their facts, diffs and comments written to files. Nothing is claimed or saved yet. The whole setup has a
    * 10-minute limit (a step can't be interrupted): past it the session sets itself up, and whatever the abandoned
-   * setup checks out later is removed as soon as it finishes. Resolves { run, stand }.
+   * setup checks out later is removed as soon as it finishes. `stand`: its Running row (standFor). Resolves { run, stand }.
    */
-  async function setUp(c, opts, prior) {
+  async function setUp(c, opts, prior, stand) {
     const run = (side.createReview || rv.createReview)(c, { ...opts, appDir, prepping: true, checking: checksFor(opts.prs).length > 0 });
-    const stand = { id: `preparing:${run.ticket}`, ticket: run.ticket, ticketUrl: run.ticketUrl, title: run.title, prs: run.prs, status: 'preparing', startedAt: run.startedAt, _activity: [], ...(run.quick && { quick: true }), _run: run };
-    preparing.set(run.ticket, stand);
+    stand._run = run;
     let timer;
     const work = Promise.resolve().then(() => (deps.prepareReview || prepareReview)(c, appDir, run, { prior, progress: text => note(stand, text) }));
     const prep = await Promise.race([work.catch(() => null), new Promise(r => { timer = setTimeout(() => r(undefined), deps.prepLimitMs ?? 10 * 60_000); })]);
@@ -209,10 +208,56 @@ export function createReviewer(app, deps) {
     return { run, stand };
   }
 
-  /** The session of a review that was set up: started now, or after its checks. Its setup's Activity lines stay at the top of its own. */
-  function launchPrepared(c, run, stand) {
+  /** The session of a review that was set up: started now, or after its checks. */
+  function launchPrepared(c, run) {
     if (run.phase !== 'checks') (side.launchReview || rv.launchReview)(c, appDir, run);
+  }
+
+  /**
+   * A review's Running row from the moment the Reviewer decides to review, before it clones anything: held in memory
+   * only, replaced by the review's own row when its session starts. Each PR's size is read from GitHub meanwhile
+   * (all at once; one that can't be read is left out).
+   */
+  function standFor(ticket, prs, quick = false) {
+    const stand = { id: `preparing:${ticket.key}`, ticket: ticket.key, ticketUrl: ticket.url || '', title: ticket.title, prs, status: 'preparing', startedAt: Date.now(), stats: {}, _activity: [], ...(quick && { quick: true }) };
+    stand._sizes = Promise.allSettled(prs.map(async p => { stand.stats[p.url] = await gh.prStats(p); })); // a GitHub stand-in without it (the self-test) reads no sizes
+    preparing.set(ticket.key, stand);
+    return stand;
+  }
+
+  /** Clones the repos a review's PRs need, with a line in its Activity for each step. A clone that fails is not fatal: the review goes on from GitHub. */
+  async function cloneFor(c, stand, prs) {
+    const t0 = Date.now();
+    try {
+      const cloned = await gh.cloneMissing(prs, c.workDir, (repo, target) => note(stand, `Cloning ${repo} into ${target}`));
+      if (!cloned.length) return;
+      note(stand, `Cloned ${cloned.join(', ')} into ${c.workDir} in ${Math.round((Date.now() - t0) / 1000)}s`);
+      log('info', `${stand.ticket}: cloned ${cloned.join(', ')} into ${c.workDir}`);
+    } catch (e) {
+      note(stand, `Couldn't clone: ${e.message}`);
+      log('warn', `${stand.ticket}: ${e.message}; reviewing from GitHub without a local clone`);
+    }
+  }
+
+  /**
+   * A review's row takes its stand-in's place: the setup's lines stay at the top of its Activity, and its PRs' sizes
+   * go with it (the same object, so a size that arrives later still shows). The review waits at most 10 seconds for
+   * the sizes; ones that arrive after that are logged once.
+   */
+  async function takeOver(run, stand) {
+    const waited = Date.now() - stand.startedAt;
+    let all = false;
+    await Promise.race([stand._sizes.then(() => { all = true; }), new Promise(r => setTimeout(r, Math.max(0, (deps.sizeWaitMs ?? 10_000) - waited)))]);
     run._activity = [...stand._activity, ...(run._activity || [])];
+    run.stats = stand.stats;
+    const had = Object.keys(run.stats).length;
+    if (!all) {
+      stand._sizes.then(() => {
+        if (Object.keys(run.stats).length === had) return;
+        save();
+        log('info', `${run.ticket}: its PR${run.prs.length > 1 ? 's are' : ' is'} ${rv.sizeTotal(run.prs, run.stats)}`);
+      });
+    }
   }
 
   /** On quit: every checks phase is aborted; a run left in its checks phase has them run again from the start next launch. */
@@ -351,14 +396,12 @@ export function createReviewer(app, deps) {
     // Everything slow comes before the claim, so nothing is awaited between the claim and the session's start: a
     // quit or crash while a repo clones then leaves the ticket tagged, not In Review with no review running.
     let ticketText = '';
-    if (toReview.length) {
-      try {
-        const cloned = await gh.cloneMissing(toReview, c.workDir);
-        if (cloned.length) log('info', `${ticket.key}: cloned ${cloned.join(', ')} into ${c.workDir}`);
-      } catch (e) {
-        log('warn', `${ticket.key}: ${e.message}; reviewing from GitHub without a local clone`);
-      }
+    const stand = toReview.length ? standFor(ticket, toReview) : null; // Running lists it from here
+    try {
+    if (stand) {
+      await cloneFor(c, stand, toReview);
       if (c.ticketContext) {
+        note(stand, `Reading ${ticket.key}`);
         try {
           ticketText = await tracker.ticketText(c, ticket);
         } catch (e) {
@@ -370,28 +413,26 @@ export function createReviewer(app, deps) {
     // Prowl's own setup comes before the claim too: a quit or crash during it leaves the ticket tagged, with nothing to give back.
     const opts = { tracker: c.taskBoard, ticket, prs: toReview, approvedPrs: approved, leftOut: prior ? leftOut : [], prior, me: app.me, heads, ticketText };
     let set = null;
-    if (toReview.length && prepping()) {
+    if (stand && prepping()) {
       try {
-        set = await setUp(c, opts, prior);
+        set = await setUp(c, opts, prior, stand);
       } catch (e) {
-        preparing.delete(ticket.key);
         return log('error', `${ticket.key}: could not start the review: ${e.message}`);
       }
-      if (set.stand.stopped || !on()) {
-        await dropPrep(set.run);
-        preparing.delete(ticket.key);
-        if (!set.stand.stopped) return undefined; // switched off during the setup: nothing claimed, the ticket stays tagged for the next poll
-        // Nothing was claimed, so there is no in-progress tag to remove: the trigger tag comes off, or the next poll would start it again.
-        try {
-          await tracker.retag(c, ticket.ref, isTrigger, '');
-          return log('warn', `${ticket.key}: review stopped during its setup. Re-tag '${c.tags.trigger}' to run it again.`);
-        } catch (e) {
-          return log('error', `${ticket.key}: review stopped during its setup, but taking '${c.tags.trigger}' off failed (${e.message}); remove it by hand, or the next poll starts it again`);
-        }
+    }
+    if (stand && (stand.stopped || !on())) {
+      if (set) await dropPrep(set.run);
+      if (!stand.stopped) return undefined; // switched off during the setup: nothing claimed, the ticket stays tagged for the next poll
+      // Nothing was claimed, so there is no in-progress tag to remove: the trigger tag comes off, or the next poll would start it again.
+      try {
+        await tracker.retag(c, ticket.ref, isTrigger, '');
+        return log('warn', `${ticket.key}: review stopped during its setup. Re-tag '${c.tags.trigger}' to run it again.`);
+      } catch (e) {
+        return log('error', `${ticket.key}: review stopped during its setup, but taking '${c.tags.trigger}' off failed (${e.message}); remove it by hand, or the next poll starts it again`);
       }
     }
     /** The setup's worktrees go when the review doesn't start after all. */
-    const unset = async () => { if (set) { await dropPrep(set.run); preparing.delete(ticket.key); } };
+    const unset = async () => { if (set) await dropPrep(set.run); };
     const to = toReview.length ? c.tags.inProgress : tagsNow().approved; // nothing to re-review: straight to approved, in one write a teammate's poller can't race
     try {
       await tracker.claim(c, ticket, t => isTrigger(t) || ours(t), to);
@@ -420,7 +461,8 @@ export function createReviewer(app, deps) {
     let run;
     try {
       if (prior && c.reReviewScope === 'delta' && !prior.reviewedHeads) log('info', `${ticket.key}: re-reviewing in full, as the last review is from before Prowl recorded the commits it reviewed`, `scope:${ticket.key}`);
-      if (set) { ({ run } = set); launchPrepared(c, run, set.stand); } else run = begin(c, opts);
+      if (set) { ({ run } = set); launchPrepared(c, run); } else run = begin(c, opts);
+      await takeOver(run, stand);
     } catch (e) {
       log('error', `${ticket.key}: could not start the review: ${e.message}`);
       await unset();
@@ -436,9 +478,12 @@ export function createReviewer(app, deps) {
     forget(key);
     const checking = run.phase === 'checks';
     hoot(checking ? `Building and testing the PRs for ${ticket.title} before reviewing them` : toReview.length > 1 ? `Starting a batch review of ${toReview.length} PRs` : `Starting a review of ${toReview[0].title}`);
-    log('ok', `${ticket.key}: ${prior ? `re-review #${run.reviewNo}` : 'review'} started on ${toReview.length} PR${toReview.length > 1 ? 's' : ''}${skipped}${checking ? ', building and testing first' : ''}`);
+    log('ok', `${ticket.key}: ${prior ? `re-review #${run.reviewNo}` : 'review'} started on ${toReview.length} PR${toReview.length > 1 ? 's' : ''}${rv.sizeNote(toReview, run.stats)}${skipped}${checking ? ', building and testing first' : ''}`);
     if (checking) runChecks(run);
     return announce(run);
+    } finally {
+      preparing.delete(ticket.key); // whichever way it went, its stand-in goes
+    }
   }
 
   // ---- Quick reviews: a paste of PRs and tickets, reviewed together ----
@@ -623,28 +668,28 @@ export function createReviewer(app, deps) {
     const strip = pr => ({ url: pr.url, title: pr.title, number: pr.number, repo: pr.repo, author: pr.author, draft: false });
     const ticket = { key: spec.key, title: spec.title, url: spec.ticketUrl || '', ref: null };
     if (app.dryRun()) { log('info', `${spec.key}: would review ${toReview.map(p => p.url).join(' ')}`); return null; }
-    try {
-      const cloned = await gh.cloneMissing(toReview, c.workDir);
-      if (cloned.length) log('info', `${spec.key}: cloned ${cloned.join(', ')} into ${c.workDir}`);
-    } catch (e) {
-      log('warn', `${spec.key}: ${e.message}; reviewing from GitHub without a local clone`);
-    }
-    if (!on()) throw new Error('the Reviewer was switched off before the review started');
-    const opts = { tracker: null, ticket, prs: toReview.map(strip), approvedPrs: approved.map(strip), leftOut: prior ? leftOut.map(strip) : [], prior, me: app.me, heads, quick: true };
+    const stand = standFor(ticket, toReview.map(strip), true); // Running lists it from here
     let run;
-    if (prepping()) {
+    try {
+      await cloneFor(c, stand, toReview);
+      const opts = { tracker: null, ticket, prs: toReview.map(strip), approvedPrs: approved.map(strip), leftOut: prior ? leftOut.map(strip) : [], prior, me: app.me, heads, quick: true };
       // No claim here: its labels are written after the launch, as always.
-      const set = await setUp(c, opts, prior).catch(e => { preparing.delete(spec.key); throw e; });
-      const dropped = async () => { await dropPrep(set.run); preparing.delete(spec.key); };
-      if (set.stand.stopped) {
-        await dropped();
-        log('warn', `${spec.key}: review stopped during its setup; nothing was reviewed`);
-        throw lasting('it was stopped while it was being set up');
+      const set = !stand.stopped && on() && prepping() ? await setUp(c, opts, prior, stand) : null;
+      try {
+        if (stand.stopped) {
+          log('warn', `${spec.key}: review stopped during its setup; nothing was reviewed`);
+          throw lasting('it was stopped while it was being set up');
+        }
+        if (!on()) throw new Error('the Reviewer was switched off before the review started');
+        if (set) { ({ run } = set); launchPrepared(c, run); } else run = begin(c, opts);
+        await takeOver(run, stand);
+      } catch (e) {
+        if (set) await dropPrep(set.run);
+        throw e;
       }
-      if (!on()) { await dropped(); throw new Error('the Reviewer was switched off before the review started'); }
-      try { ({ run } = set); launchPrepared(c, run, set.stand); } catch (e) { await dropped(); throw e; }
+    } finally {
       preparing.delete(spec.key);
-    } else run = begin(c, opts);
+    }
     Object.assign(run, { paste: spec.paste, ...(labelsOn() && { labels: true }) });
     side.state.runs.push(run);
     if (run.rolesNote) log('warn', rv.rolesWarning(run), 'roles');
@@ -661,7 +706,7 @@ export function createReviewer(app, deps) {
     }
     const checking = run.phase === 'checks';
     hoot(checking ? `Building and testing the PRs for ${spec.title} before reviewing them` : toReview.length > 1 ? `Starting a quick review of ${toReview.length} PRs` : `Starting a quick review of ${toReview[0].title}`);
-    log('ok', `${spec.key}: quick ${prior ? `re-review #${run.reviewNo}` : 'review'} started on ${names(toReview)}${approved.length ? ` (already approved, unchanged: ${names(approved)})` : ''}${checking ? ', building and testing first' : ''}`);
+    log('ok', `${spec.key}: quick ${prior ? `re-review #${run.reviewNo}` : 'review'} started on ${names(toReview)}${rv.sizeNote(run.prs, run.stats)}${approved.length ? ` (already approved, unchanged: ${names(approved)})` : ''}${checking ? ', building and testing first' : ''}`);
     if (checking) runChecks(run);
     await announce(run);
     return run;

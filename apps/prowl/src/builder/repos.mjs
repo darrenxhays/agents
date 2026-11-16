@@ -11,9 +11,13 @@ export const worktreeRoot = (cfg, w) => path.join(cfg.workDir, '.prowl-worktrees
 export const ghClone = (repo, target) => run('gh', ['repo', 'clone', repo, target], { timeoutMs: 3_600_000 }); // a big repo on a slow line: an hour, not the usual 10 minutes
 
 /** The clone of `repo` in the Projects Directory, cloned with `clone` if it is missing. Throws if the folder holds another repo. */
-export async function ensureClone(cfg, repo, clone = ghClone) {
+export async function ensureClone(cfg, repo, clone = ghClone, onStep = () => {}) {
   const dir = path.join(cfg.workDir, repo.split('/')[1]);
-  if (!fs.existsSync(dir)) await clone(repo, dir);
+  if (!fs.existsSync(dir)) {
+    onStep(`Cloning ${repo} into ${dir}`);
+    await clone(repo, dir);
+    onStep(`Cloned ${repo}`);
+  }
   const origin = (await git(dir, 'remote', 'get-url', 'origin')).trim();
   if (!sameRepo(origin, repo)) throw new Error(`${dir} is a clone of ${origin}, not ${repo}`);
   // Pushes go to every push URL, which a pushurl or pushInsteadOf can point somewhere else.
@@ -38,10 +42,13 @@ export async function remoteBranches(clone) {
 }
 
 /** Clones or fetches `repo` and checks out a worktree for it at `wt`, detached at its default branch. */
-export async function prepareRepo(cfg, repo, wt, clone) {
-  const dir = await ensureClone(cfg, repo, clone);
+export async function prepareRepo(cfg, repo, wt, clone, onStep = () => {}) {
+  const dir = await ensureClone(cfg, repo, clone, onStep);
+  onStep(`Fetching ${repo}`);
   const defaultBranch = await defaultBranchOf(dir);
   const sha = await fetchBranch(dir, defaultBranch);
+  onStep(`Checking out ${repo} at ${defaultBranch} in ${wt}`);
   await addWorktree(dir, wt, sha);
+  onStep(`${repo} ready at ${defaultBranch} (${String(sha).slice(0, 7)})`);
   return { repo, clone: dir, worktree: wt, defaultBranch };
 }

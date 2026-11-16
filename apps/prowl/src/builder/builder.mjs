@@ -153,6 +153,8 @@ export function createBuilder(app, deps) {
   }
 
   const checkStop = w => { if (w.stopRequested) throw new Stopped(); };
+  /** A line in the ticket's Activity for Prowl's own git work on its repos, shown until the turn's session starts and Activity begins afresh. */
+  const note = (w, text) => { (w._activity ??= []).push({ text, own: true }); }; // own: Prowl's line, not the session's
 
   // ---- Picking up a ticket ----
 
@@ -585,7 +587,8 @@ export function createBuilder(app, deps) {
     const existing = [];
     for (const e of [...s.prs, ...s.branches]) {
       checkStop(w);
-      const dir = await ensureClone(cfg(), e.repo, clone);
+      const dir = await ensureClone(cfg(), e.repo, clone, t => note(w, t));
+      note(w, `Fetching ${e.repo}`);
       const head = await fetchBranch(dir, e.branch);
       if (head !== e.head) {
         // Moved since the survey (someone pushed): look at it again, rather than build on what the survey didn't see.
@@ -596,6 +599,7 @@ export function createBuilder(app, deps) {
       }
       const baseSha = await fetchBranch(dir, e.base).catch(() => '');
       const worktree = path.join(worktreeRoot(cfg(), w), e.repo.split('/')[1]);
+      note(w, `Checking out ${e.repo} at ${e.branch} (${short(head)}) in ${worktree}`);
       await addWorktree(dir, worktree, head);
       repos.push({ repo: e.repo, clone: dir, worktree, defaultBranch: e.defaultBranch || await defaultBranchOf(dir), branch: e.branch, base: e.base, baseSha, mergeBase: baseSha,
         continued: { head, draft: Boolean(e.draft) }, ...(e.url && { pr: { url: e.url, number: e.number, repo: e.repo, title: e.title } }) });
@@ -608,7 +612,7 @@ export function createBuilder(app, deps) {
       else if (repos.length >= b().maxRepos) unavailable.push({ repo, why: `over Max repos per ticket (${b().maxRepos})` });
       else {
         try {
-          repos.push(await prepareRepo(cfg(), repo, path.join(worktreeRoot(cfg(), w), repo.split('/')[1]), clone));
+          repos.push(await prepareRepo(cfg(), repo, path.join(worktreeRoot(cfg(), w), repo.split('/')[1]), clone, t => note(w, t)));
         } catch (e) {
           unavailable.push({ repo, why: `Prowl couldn't check it out (${e.message.split('\n')[0]})` });
         }
@@ -669,7 +673,7 @@ export function createBuilder(app, deps) {
       else if (repos.length >= b().maxRepos) unavailable.push({ repo, why: `over Max repos per ticket (${b().maxRepos})` });
       else {
         try {
-          repos.push(await prepareRepo(cfg(), repo, path.join(worktreeRoot(cfg(), w), repo.split('/')[1]), clone));
+          repos.push(await prepareRepo(cfg(), repo, path.join(worktreeRoot(cfg(), w), repo.split('/')[1]), clone, t => note(w, t)));
         } catch (e) {
           unavailable.push({ repo, why: `Prowl couldn't check it out (${e.message.split('\n')[0]})` });
         }
@@ -725,7 +729,7 @@ export function createBuilder(app, deps) {
     const r = w._result;
     // No result event from a turn that got as far as the model (killed by a cap or a stop, or crashed): what it spent
     // isn't reported, so the caps count the whole of what it was allowed, and History says the cost isn't known.
-    const unknown = !r && (w._activity || []).some(a => !a.error);
+    const unknown = !r && (w._activity || []).some(a => !a.error && !a.own); // Prowl's own lines about its git work say nothing of the model
     const cost = unknown ? w.turnBudgetUsd || 0 : r?.total_cost_usd || 0;
     const t = w.turns.at(-1);
     if (t && t.endedAt == null) { // once per turn, even if this step runs again after a restart
@@ -800,7 +804,7 @@ export function createBuilder(app, deps) {
         continue;
       }
       try {
-        const r = await prepareRepo(cfg(), repo, path.join(worktreeRoot(cfg(), w), repo.split('/')[1]), clone);
+        const r = await prepareRepo(cfg(), repo, path.join(worktreeRoot(cfg(), w), repo.split('/')[1]), clone, t => note(w, t));
         w.repos.push(r);
         w.collected.ready.push(r);
       } catch (e) {
@@ -1164,11 +1168,12 @@ export function createBuilder(app, deps) {
     for (const pr of w.roundPrs) {
       const facts = await gh.prFacts(pr);
       if (facts.state !== 'OPEN' || prRefusal(facts, pr, app.me, b().protectedBranches, { drafts: pickup().drafts })) continue;
-      const dir = await ensureClone(cfg(), pr.repo, clone);
+      const dir = await ensureClone(cfg(), pr.repo, clone, t => note(w, t));
       const sha = await fetchBranch(dir, facts.headBranch);
       // The base too: a session may merge it in (never rebase), and what that brings doesn't count against Max lines per push.
       const baseSha = await fetchBranch(dir, facts.base).catch(() => '');
       const worktree = path.join(worktreeRoot(cfg(), w), `${pr.repo.split('/')[1]}-${pr.number}`);
+      note(w, `Fetching ${pr.repo}#${pr.number} and checking it out at ${short(sha)} in ${worktree}`);
       await addWorktree(dir, worktree, sha);
       const fix = w.pickupFix?.[pr.url];
       const failing = [];

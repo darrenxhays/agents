@@ -14,7 +14,7 @@ import { createLabels } from '../labels.mjs';
 import { mentions } from '../match.mjs';
 import * as brief from './brief.mjs';
 import { createBuilder } from './builder.mjs';
-import { ensureClone } from './repos.mjs';
+import { ensureClone, prepareRepo } from './repos.mjs';
 import * as rules from './rules.mjs';
 import { workArgs, workEnv } from './session.mjs';
 
@@ -1182,6 +1182,14 @@ async function builds(assert) {
   git(path.join(root, 'web'), 'config', '--unset-all', 'remote.origin.pushurl');
   git(path.join(root, 'web'), 'config', 'remote.origin.pushurl', 'ssh://git@example.invalid/octo-org/web.git');
   await assert.rejects(ensureClone({ workDir: root }, 'octo-org/web'), /pushes to ssh:/, 'the same name on another host');
+  // Each step of preparing a repo is told, for the ticket's Activity.
+  const steps = [];
+  const projects = path.join(root, 'fresh');
+  fs.mkdirSync(projects);
+  const wt = path.join(root, 'wt', 'web');
+  await prepareRepo({ workDir: projects }, 'octo-org/web', wt, async (repo, target) => { execFileSync('git', ['clone', '-q', bare, target], { stdio: 'ignore' }); }, t => steps.push(t));
+  assert.deepEqual(steps.slice(0, 4), [`Cloning octo-org/web into ${path.join(projects, 'web')}`, 'Cloned octo-org/web', 'Fetching octo-org/web', `Checking out octo-org/web at main in ${wt}`]);
+  assert.match(steps[4], /^octo-org\/web ready at main \([0-9a-f]{7}\)$/);
   fs.rmSync(root, { recursive: true, force: true });
 
   // Plans with Approve plans set to ask: enter with nothing approves; a note sends it back.

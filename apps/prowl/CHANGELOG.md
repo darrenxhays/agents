@@ -45,6 +45,10 @@ Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z`
 - The Log scrolls: `PgUp` `PgDn`, `Home` `End`, `↑` `↓` and the wheel move through it, and it stays where you put it while new lines arrive (`End` goes back to the latest).
 - Long text wraps instead of being cut with an ellipsis: Activity lines, Log lines, the details under History's list, a Needs-you question with its context, and a setting's help. Where they need more rows than they have they scroll, with `PgUp` `PgDn` `Home` `End` or the wheel over them, and a grey row says where you are.
 - The wheel now scrolls the text under the pointer (anywhere, in the Log) and moves the selection elsewhere; `PgUp` `PgDn` also scroll the key list and the Update Notes.
+- Running shows more: a session's Activity keeps and scrolls back through its last 2,000 lines (it was 400), each PR's size appears under the Activity heading as a review starts, and the Log's "review started" line carries the total.
+- A review's `preparing` row now appears as soon as the Reviewer decides to review, before it clones anything, and its Activity says what the setup is doing. When the session starts, the review's own row takes its place and stays selected.
+- The Builder lists its own git work (cloning, fetching, checking out) in a ticket's Activity before its session starts.
+- Running remembers the selected row by what it is: rows coming and going no longer shift the selection.
 
 ## 2.23.6
 - An answer pasted into a Needs-you form is now what Submit sends. Before, pasting into **Other**, **Send it back with a note** or **Ask about this** and pressing enter sent the option that was already picked: the recommended answer, or an approval of the plan.

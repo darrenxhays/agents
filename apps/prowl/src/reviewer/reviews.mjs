@@ -105,6 +105,19 @@ export function checkerCommand(appDir, resultPath, batchId, urls, node = process
   return `${q(node)} ${q(path.join(appDir, 'prowl.mjs'))} --check-result ${q(resultPath)} --batch ${batchId} --prs "${urls.join(',')}"`;
 }
 
+/**
+ * The total size of a review's PRs for the Log, ` (5 files changed, +120 -30)`: `, not counting every PR` inside the
+ * brackets when some sizes are unknown, '' when none is known. `stats`: { url: { files, additions, deletions } }.
+ */
+export function sizeNote(prs, stats = {}) {
+  const known = prs.map(p => stats?.[p.url]).filter(Boolean);
+  if (!known.length) return '';
+  const sum = k => known.reduce((n, x) => n + (x[k] || 0), 0);
+  return ` (${sum('files')} file${sum('files') === 1 ? '' : 's'} changed, +${sum('additions')} -${sum('deletions')}${known.length < prs.length ? ', not counting every PR' : ''})`;
+}
+/** The same total, as a sentence's end: `5 files changed, +120 -30`. */
+export const sizeTotal = (prs, stats) => sizeNote(prs, stats).replace(/^ \(|(, not counting every PR)?\)$/g, '');
+
 /** True for a running review that has written its result and whose session is done but hasn't exited. */
 export const doneIdle = (run, now = Date.now()) => Boolean(run.resultMode && run.status === 'running' && idleDone(run, now) && fs.existsSync(run.resultPath));
 

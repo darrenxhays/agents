@@ -468,3 +468,13 @@ export async function prDiscussion(pr) {
   ]);
   return { threads, comments, reviews, issueComments };
 }
+
+/** A PR's size, from GitHub: { files, additions, deletions, commits }. One call, with a 60-second limit. */
+export async function prStats(pr) {
+  const v = JSON.parse(await run('gh', ['api', `repos/${pr.repo}/pulls/${pr.number}`, '--jq', '{files: .changed_files, additions, deletions, commits}'], { timeoutMs: 60_000 }));
+  return { files: Number(v.files) || 0, additions: Number(v.additions) || 0, deletions: Number(v.deletions) || 0, commits: Number(v.commits) || 0 };
+}
+
+/** A size as git's --shortstat words it: 12 files changed, 340 insertions(+), 1 deletion(-). */
+export const shortstat = ({ files, additions, deletions }) =>
+  `${files} file${files === 1 ? '' : 's'} changed, ${additions} insertion${additions === 1 ? '' : 's'}(+), ${deletions} deletion${deletions === 1 ? '' : 's'}(-)`;
