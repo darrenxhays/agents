@@ -1156,7 +1156,7 @@ assert.ok(fits(tui.frame(80, 30), 'n, sent').includes('Reviewing 2 PRs together 
   const quickWait = { key: 'QUICK#3', title: 'Cart work', since: Date.now(), waitingOn: [prOf(5).url], letGo: {}, notes: ["octo-org/r6#6 is labelled 'In Review', but it is approved and only context: it doesn't hold the wait"] };
   frame = fits(tui.frame(80, 30), 'waits');
   assert.ok(/◷ QUICK#3 +Cart work +waiting on 1 PR/.test(frame), 'Running lists a waiting review: its mark, the count, labelled');
-  assert.ok(frame.includes("Re-reviewed once r5#5 is labelled 'Ready for Review'") && frame.includes('approved and only context'), 'its Activity: the PRs waited on, and why one doesn\'t hold it');
+  assert.ok(frame.includes("Re-reviewed once r5#5 is labelled 'prowl: review'") && frame.includes('approved and only context'), 'its Activity: the PRs waited on, and why one doesn\'t hold it');
   tui.key('s');
   assert.ok(fits(tui.frame(80, 30), 'stop wait').includes("Stop waiting on QUICK#3's PRs? Their labels stay as they are."));
   tui.key('y');

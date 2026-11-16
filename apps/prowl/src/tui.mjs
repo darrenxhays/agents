@@ -1,6 +1,7 @@
 import { pathToFileURL } from 'node:url';
 import { CONFIG_PATH } from './config.mjs';
 import { CONFIG_FIELDS, JIRA } from './fields.mjs';
+import { askLabel, labelNames } from './names.mjs';
 import { cleanName, notARef, parsePaste } from './paste.mjs';
 import { createMascot, wrap } from './mascot.mjs';
 import { copyText, openExternal } from './proc.mjs';
@@ -335,7 +336,7 @@ export function startTui(app, actions, io = {}) {
       const prs = (r.waitingOn || []).map(u => /github\.com\/[^/]+\/([^/]+)\/pull\/(\d+)/.exec(u)).filter(Boolean).map(m => `${m[1]}#${m[2]}`);
       rows.push(rule(W), [[ST.bold, ` Activity · ${r.key}  `], [ST.grey, 'waiting on its PRs']],
         [[ST.cyan, '  • '], ['', r.retry ? 'Its review failed: it is retried once, as soon as a slot frees.'
-          : prs.length ? `Re-reviewed once ${prs.join(', ')} ${prs.length > 1 ? 'are' : 'is'} labelled '${app.cfg.tags.trigger}' (s stops waiting; labels stay as they are).` : 'Checked each poll.']],
+          : prs.length ? `Re-reviewed once ${prs.join(', ')} ${prs.length > 1 ? 'are' : 'is'} labelled '${askLabel(app.cfg)}' (s stops waiting; labels stay as they are).` : 'Checked each poll.']],
         ...Object.entries(r.letGo || {}).map(([u, why]) => [[ST.grey, `  • ${u.split('/').slice(-3).join('/')}: let go, ${why}`]]),
         ...(r.notes || []).map(n => [[ST.grey, `  • ${n}`]]));
       return rows;
@@ -362,7 +363,7 @@ export function startTui(app, actions, io = {}) {
   /** The quick review's input: PRs and tickets to review together. */
   function prsInput(W) {
     const labelled = app.cfg.quickLabels !== false;
-    const about = `Paste PR links (https://github.com/owner/repo/pull/12), owner/repo#12 or tickets, separated by spaces or commas. A ticket stands for its open, ready PRs. Prowl reviews them together as one set, the way it reviews a ticket's PRs, and posts a review on each; no tag is written.${labelled ? ` It labels them '${app.cfg.tags.inProgress}', then '${app.cfg.tags.done}', and re-reviews once they are labelled '${app.cfg.tags.trigger}'.` : ''}`;
+    const about = `Paste PR links (https://github.com/owner/repo/pull/12), owner/repo#12 or tickets, separated by spaces or commas. A ticket stands for its open, ready PRs. Prowl reviews them together as one set, the way it reviews a ticket's PRs, and posts a review on each; no tag is written.${labelled ? ` It labels them '${labelNames(app.cfg).inReview}', then '${labelNames(app.cfg).approved}' or '${labelNames(app.cfg).changes}', and re-reviews once they are labelled '${askLabel(app.cfg)}'.` : ''}`;
     return [[], [[ST.bold, '  Quick review: PRs reviewed together']], [],
       [[ST.grey, '  PRs  '], ...editSegs(W - 8)], [],
       ...wrap(about, W - 4, 4).map(l => [[ST.grey, `  ${l}`]]),
@@ -1159,7 +1160,7 @@ export function startTui(app, actions, io = {}) {
         if (!Number.isInteger(n) || n < f.min || n > f.max) return `Enter a whole number from ${f.min} to ${f.max}`;
         setPath(app.cfg, f.key, n);
       } else {
-        const ok = f.valid ? f.valid(v) : true;
+        const ok = f.valid ? f.valid(v, app.cfg) : true;
         if (ok !== true) return ok;
         setPath(app.cfg, f.key, v);
       }

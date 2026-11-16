@@ -6,6 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { AGENT_MODELS, CHECKS_PATH, CONFIG_DIR, CONFIG_PATH, EFFORTS, MODELS } from './config.mjs';
+import { fiveLabels, sameLabel } from './names.mjs';
 
 const isDir = p => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
 const https = v => /^https:\/\/\S+$/.test(v) || 'must be an https:// URL';
@@ -14,6 +15,14 @@ export const JIRA = c => c.taskBoard === 'jira';
 const opens = 'enter opens it. Updates never overwrite your edits.';
 const inFile = 'Edit them in the settings file: enter opens it.';
 const capped = "It fails with the cap named and isn't retried, so a runaway review isn't paid for twice.";
+
+const LABEL_ROWS = { ask: 'Review label', inReview: 'In review label', approved: 'Approved label', changes: 'Changes requested label', building: 'Building label' };
+/** A label setting's check: no two of Prowl's five labels may read the same (ignoring case and outer spaces). */
+const oneOfFive = role => (v, cfg) => {
+  const others = Object.entries(fiveLabels(cfg)).filter(([r]) => r !== role);
+  const clash = others.find(([, name]) => sameLabel(name, v || (role === 'ask' ? cfg.tags.trigger : '')));
+  return clash ? `reads the same as the ${LABEL_ROWS[clash[0]]}` : true;
+};
 
 export const CONFIG_FIELDS = [
   { heading: 'Prowl' },
@@ -67,7 +76,12 @@ export const CONFIG_FIELDS = [
   { key: 'caffeinate', label: 'Keep Mac awake', type: 'bool', when: () => process.platform === 'darwin', help: "on: the Mac doesn't idle-sleep while a session runs (caffeinate), since sleep stalls it and stretches it out. Closing the lid still sleeps it." },
 
   { heading: 'Quick reviews and builds' },
-  { key: 'quickLabels', label: 'Quick reviews: GitHub labels', type: 'bool', help: "on: a quick review (n) labels its PRs In Review, then Reviewed, and waits: it re-reviews once every PR it didn't approve is labelled Ready for Review (with all approved, once one is labelled so and has new commits). Running shows the waits; s stops one. off: no labels, and a quick review runs once." },
+  { key: 'quickLabels', label: 'Quick reviews: GitHub labels', type: 'bool', help: "on: a quick review (n) labels its PRs 'prowl: in review', then 'prowl: approved' or 'prowl: changes requested', and waits: it re-reviews once every PR it didn't approve is labelled 'prowl: review' (with all approved, once one is labelled so and has new commits). Running shows the waits; s stops one. off: no labels, and a quick review runs once." },
+  { key: 'reviewLabel', label: 'Review label', type: 'text', empty: true, emptyShows: "(the Review trigger tag's name)", valid: oneOfFive('ask'), help: "The GitHub label that asks for a review of a PR. A waiting quick review re-reviews once its PRs carry it, and a quick build without a ticket puts it on its PRs when it hands them on. Matched exactly, ignoring case. Empty: the Review trigger tag's name." },
+  { key: 'labels.inReview', label: 'In review label', type: 'text', valid: oneOfFive('inReview'), help: 'Set on each PR while a quick review of it runs.' },
+  { key: 'labels.approved', label: 'Approved label', type: 'text', valid: oneOfFive('approved'), help: 'Set on a PR when its quick review ends with nothing blocking it.' },
+  { key: 'labels.changes', label: 'Changes requested label', type: 'text', valid: oneOfFive('changes'), help: 'Set on a PR when its quick review ends with a finding that blocks it.' },
+  { key: 'labels.building', label: 'Building label', type: 'text', valid: oneOfFive('building'), help: 'Set on the PRs of a quick build without a ticket while the Builder works on them.' },
   { key: 'quickName', label: 'Quick names', type: 'enum', values: ['auto', 'ask', 'number'], help: 'How a quick review or quick build without exactly one ticket is named. auto: a short model call names it from the paste. ask: you type the name after the paste. number: QUICK#n only. One ticket: always the ticket. enter cycles.' },
   { key: 'builder.quickBranchTemplate', label: 'Quick build branch names', type: 'text', help: 'For a quick build without a ticket: {slug} is its name. A clash adds -2, -3, …' },
 

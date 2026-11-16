@@ -8,7 +8,9 @@ import { killChecks, reviewSteps, runChecks, runCommand, runSteps } from './chec
 import { addWorktree, noHooks, noHooksEnv } from './git.mjs';
 import { branchHadPr, fromOwnBranch, otherKeys, prForBranch, titleNamesOnly } from './github.mjs';
 import { ticketsFrom } from './ado.mjs';
+import { createLabels } from './labels.mjs';
 import { norm, tagMatches } from './match.mjs';
+import { askLabel, labelNames, labelRole, labelWrite, renamedWrite, sameLabel } from './names.mjs';
 import { baseSteps, checkPlan, checksLine, prChecks } from './reviewer/checks.mjs';
 import { createReviewer } from './reviewer/reviewer.mjs';
 import { MODELS } from './config.mjs';
@@ -135,12 +137,12 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
       prByRef: async ref => open.find(p => p.repo === ref.repo && p.number === ref.number) || (() => { throw new Error('HTTP 404'); })(), reviewedSince: async () => true, isOpen: async () => true, ...ghOver };
     const byKey = new Map(); // a message repeated for the same key is logged once, as in prowl.mjs
     const labelCalls = [];
-    const labels = { own() {}, set: (...a) => labelCalls.push(a), refused: () => '', pending: () => false };
+    const labels = deps.labels || { own() {}, set: (...a) => labelCalls.push(a), refused: () => '', pending: () => false };
     const side = createReviewer(app, { log: (level, msg, key) => { if (key && byKey.get(key) === msg) return false; if (key) byKey.set(key, msg); seen.logs.push(msg); if (level === 'warn' || level === 'error') seen.warns.push(msg); return true; }, forget: key => byKey.delete(key), hoot() {}, appDir, trackers: { ado: tracker, jira: tracker }, github: gh, labels, autoName: async () => 'Named', ...deps });
     side.state = { runs: structuredClone(runs), failures: {} };
     let n = 0;
     const fake = (c, opts) => ({ id: `AB42-${++n}`, tracker: opts.tracker, ref: opts.ticket.ref, ticket: opts.ticket.key, title: opts.ticket.title, ticketUrl: opts.ticket.url, prs: opts.prs, contextPrs: opts.approvedPrs || [], reviewNo: (opts.prior?.reviewNo || 0) + 1, priorId: opts.prior?.id || null,
-      status: 'running', startedAt: Date.now(), pid: null, logPath: path.join(tmp, `fake-${n}.ndjson`), reportPath: path.join(tmp, `fake-${n}.md`), reviewedHeads: opts.heads || {}, approved: {}, ...(opts.quick && { quick: true }), ...(opts.checking && { phase: 'checks' }) });
+      status: 'running', startedAt: Date.now(), pid: null, logPath: path.join(tmp, `fake-${n}.ndjson`), reportPath: path.join(tmp, `fake-${n}.md`), reviewedHeads: opts.heads || {}, approved: Object.fromEntries((opts.approvedPrs || []).filter(p => opts.prior?.approved?.[p.url]).map(p => [p.url, opts.prior.approved[p.url]])), ...(opts.quick && { quick: true }), ...(opts.checking && { phase: 'checks' }) });
     side.startReview = (c, dir, opts) => { seen.started.push(opts); return fake(c, opts); };
     side.createReview = (c, opts) => { seen.started.push(opts); return fake(c, opts); };
     side.launchReview = (c, dir, run) => { seen.launched.push(structuredClone(run.checks || [])); delete run.phase; };
@@ -515,6 +517,71 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
     assert.deepEqual(await prForBranch('acme/widgets', 'prowl/123-x', exec([fork, own])), { url: own.html_url, number: 4 });
     assert.deepEqual([await branchHadPr('acme/widgets', 'prowl/123-x', exec([fork, gone])), await branchHadPr('acme/widgets', 'prowl/123-x', exec([own]))], [false, true]);
     assert.ok(asked[0] === 'repos/acme/widgets/pulls?state=open&head=acme:prowl%2F123-x' && asked.at(-1).includes('state=all'));
+  }
+
+  // ---- C-14: GitHub labels with their own prowl: names, and each PR's outcome ----
+  {
+    const cfg = loadConfig();
+    assert.ok(sameLabel('Prowl: Review ', 'prowl: review') && !sameLabel('prowl-review', 'prowl: review'));
+    assert.deepEqual([cfg.reviewLabel, cfg.labels], ['prowl: review', { inReview: 'prowl: in review', approved: 'prowl: approved', changes: 'prowl: changes requested', building: 'prowl: building' }]);
+    assert.equal(labelNames({ ...cfg, labels: { ...cfg.labels, approved: '' } }).approved, 'prowl: approved', 'a labels.* value left empty takes its default');
+    assert.equal(askLabel({ ...cfg, reviewLabel: '' }), cfg.tags.trigger, 'an empty review label: the trigger tag\'s name');
+    assert.deepEqual(['prowl: review', 'Prowl: In Review', 'prowl-review', 'prowl in review', 'Ready for Reveiw', 'In-Review', 'Reviewed', 'In Development', 'Approved', 'prowl: approved', 'prowl: changes requested', 'prowl: building'].map(l => labelRole(cfg, l)),
+      ['ask', 'inReview', '', '', 'ask', 'inReview', 'done', 'building', '', 'approved', 'changes', 'building'], "today's five exactly; the old names as they were; a team's own label is nobody's");
+    // The queue: exact for Prowl's own, the old names as before.
+    const on = { 1: ['In Review', 'Ready for Review', 'bug'], 2: ['prowl-review', 'Approved'], 3: [] };
+    const created = [];
+    const ghLabels = { prLabels: async pr => [...on[pr.number]], addLabel: async (pr, name, color) => { created.push([name, color]); on[pr.number].push(name); },
+      removeLabel: async (pr, name) => { on[pr.number] = on[pr.number].filter(l => l !== name); } };
+    const file = path.join(tmp, 'labels-c14.json');
+    const pr = n => ({ url: `https://github.com/o/r/pull/${n}`, repo: 'o/r', number: n });
+    let q = createLabels({ gh: ghLabels, log() {}, file });
+    const start = labelWrite(cfg, 'prowl: in review', ['ask', 'approved', 'changes'], ['ask', 'inReview', 'done']);
+    q.set('reviewer', 'r1', pr(1), start);
+    q.set('reviewer', 'r1', pr(2), start);
+    await q.drain();
+    assert.deepEqual([on[1], on[2]], [['bug', 'prowl: in review'], ['prowl-review', 'Approved', 'prowl: in review']], 'a start write leaves exactly the in-review label; prowl-review and a team\'s Approved stay');
+    assert.deepEqual(created[0], ['prowl: in review', 'fbca04'], 'created in its own colour');
+    // A write queued under an old name lands under the new one.
+    fs.writeFileSync(file, JSON.stringify({ ops: [{ side: 'reviewer', owner: 'old', url: pr(3).url, repo: 'o/r', number: 3, add: 'In Review', remove: ['Ready for Review', 'Reviewed'], typos: 2, loose: ['Ready for Review'], at: 1 },
+      { side: 'reviewer', owner: 'old', url: pr(3).url, repo: 'o/r', number: 3, add: 'Reviewed', remove: ['In Review', 'Ready for Review'], typos: 2, loose: ['Ready for Review'], at: 2 }] }));
+    q = createLabels({ gh: ghLabels, log() {}, file });
+    q.rename(op => renamedWrite(cfg, op, 'prowl: approved'));
+    assert.deepEqual(q.state().ops.map(o => o.add), ['prowl: in review', 'prowl: approved']);
+    await q.drain();
+    assert.deepEqual(on[3], ['prowl: approved'], 'the old in-progress name lands as the in-review label, the old done name as the outcome');
+    assert.equal(renamedWrite(cfg, { exact: [] }), null, "a write in today's form is left");
+    // The Reviewer: a quick review of two PRs, one approved in the report.
+    const prLabels = { 1: [], 2: [] };
+    const fakeGh = { prLabels: async p => [...prLabels[p.number]], addLabel: async (p, name) => { prLabels[p.number].push(name); }, removeLabel: async (p, name) => { prLabels[p.number] = prLabels[p.number].filter(l => l !== name); } };
+    const queue = createLabels({ gh: fakeGh, log() {}, file: path.join(tmp, 'labels-c14b.json') });
+    const two = [prOf(1), prOf(2)];
+    const h = reviewerOver({ open: two, tickets: [], cfgOver: { quickName: 'number', maxConcurrentReviews: 5 }, deps: { labels: queue }, ghOver: { prByRef: async ref => ({ ...two[ref.number - 1], labels: [...prLabels[ref.number]] }) } });
+    let run = await h.side.quickReview('octo-org/r1#1 octo-org/r2#2');
+    await queue.drain();
+    assert.deepEqual([prLabels[1], prLabels[2]], [['prowl: in review'], ['prowl: in review']]);
+    prLabels[2].push('prowl: review'); // asked for again while the review runs
+    const done = async r => {
+      fs.writeFileSync(r.reportPath, `---\nverdict: REQUEST CHANGES\napproved: ${two[0].url}@sha1\n---\n`);
+      r._result = { subtype: 'success', is_error: false };
+      await h.side.finish(r);
+      await queue.drain();
+    };
+    await done(run);
+    assert.deepEqual([prLabels[1], prLabels[2]], [['prowl: approved'], ['prowl: review', 'prowl: changes requested']], 'each PR labelled with how it went; a review label put on meanwhile is still on');
+    assert.equal(h.side.waits().length, 1, 'a wait exists on the second');
+    await h.side.poll();
+    assert.equal(h.side.state.runs.filter(r => r.status === 'running').length, 1, 'and the next poll re-reviews');
+    run = h.side.state.runs.find(r => r.status === 'running');
+    await queue.drain();
+    assert.deepEqual(prLabels[2], ['prowl: in review'], 'the re-review uses the ask up');
+    await done(run);
+    for (const [label, starts] of [['prowl: in review', false], ['prowl-review', false], ['Ready for Review', true]]) {
+      prLabels[2] = ['prowl: changes requested', label];
+      const before = h.side.state.runs.length;
+      await h.side.poll();
+      assert.equal(h.side.state.runs.length > before, starts, `labelled '${label}': ${starts ? 'the re-review starts' : 'no re-review'}`);
+    }
   }
 
   // ---- C-06: verifier model and effort ----

@@ -10,7 +10,8 @@ import { actionable, appendAnswer, parkedUrls, pastAnswers, readAnswers, replies
 import { addWorktree, attrSource, fetchBranch, git, hooksOff, ownNumstat, push, remoteSha, removeWorktree, short, succeeds } from '../git.mjs';
 import * as github from '../github.mjs';
 import { branchRefusal, guardFailures, prRefusal } from '../guards.mjs';
-import { createLabels, matching } from '../labels.mjs';
+import { createLabels } from '../labels.mjs';
+import { askLabel, labelNames, labelsOf, labelWrite } from '../names.mjs';
 import { mentions } from '../match.mjs';
 import { offerFor, acceptOffer } from '../offers.mjs';
 import { autoName, cleanName, parsePaste, ticketKey } from '../paste.mjs';
@@ -299,7 +300,7 @@ export function createBuilder(app, deps) {
    */
   async function handOff(w, prs = w.prs) {
     if (byLabels(w)) {
-      labelPrs(w, prs, b().requestReview ? cfg().tags.trigger : '');
+      labelPrs(w, prs, b().requestReview ? 'ask' : '');
       return Date.now();
     }
     const { isStart, has } = tags();
@@ -323,25 +324,28 @@ export function createBuilder(app, deps) {
     return at;
   }
 
-  const marked = w => `${byLabels(w) ? 'its PRs ' : ''}${b().requestReview ? `marked '${cfg().tags.trigger}'` : `'${b().tags.inProgress}' removed`}`;
+  const marked = w => (byLabels(w) ? `its PRs ${b().requestReview ? `marked '${askLabel(cfg())}'` : `no longer '${labelNames(cfg()).building}'`}`
+    : b().requestReview ? `marked '${cfg().tags.trigger}'` : `'${b().tags.inProgress}' removed`);
 
   /**
-   * A ticketless build's markers: `add` ('' for none) on each of `prs`, the Builder's other label off. The Builder's
-   * labels are In Development and Ready for Review; it never touches In Review or Reviewed.
+   * A ticketless build's markers on each of `prs`: 'building' while it works, 'ask' (the review label) as it hands
+   * them on, or '' for none. A building or review-label write takes off the other of the two, both outcome labels
+   * (the PR is being changed, or handed on again) and the old names; a write of none leaves an outcome label, since
+   * nothing changed. The Builder never touches the in-review label: that is a Reviewer's claim.
    */
-  function labelPrs(w, prs, add) {
-    const mine = [b().tags.inProgress, cfg().tags.trigger];
+  function labelPrs(w, prs, role) {
+    const c = cfg();
+    const add = role === 'ask' ? askLabel(c) : role ? labelNames(c)[role] : '';
     labels.own('builder', w.uid, prs.map(p => p.url));
-    for (const p of prs) labels.set('builder', w.uid, p, add, mine.filter(t => t !== add), cfg().tagMatchMaxTypos, [cfg().tags.trigger]);
+    for (const p of prs) labels.set('builder', w.uid, p, labelWrite(c, add, role ? ['building', 'ask', 'approved', 'changes'] : ['building', 'ask'], ['building', 'ask']));
   }
 
-  /** Why a ticketless build's round waits (a PR labelled In Review or Ready for Review, or a label write still queued), or ''. */
+  /** Why a ticketless build's round waits (a PR labelled as under review or as asking for one, or a label write still queued), or ''. */
   async function labelHold(w, prs = w.prs) {
-    const { inProgress: reviewing, trigger } = cfg().tags;
     for (const p of prs) {
       if (labels.pending(p.url)) return `${prName(p)} has a label change still queued`;
       const on = await gh.prLabels(p);
-      const hit = [reviewing, trigger].find(t => matching(on, t, t === trigger ? cfg().tagMatchMaxTypos : 0).length);
+      const hit = labelsOf(cfg(), on, 'inReview')[0] || labelsOf(cfg(), on, 'ask')[0];
       if (hit) return `${prName(p)} is labelled '${hit}'`;
     }
     return '';
@@ -474,7 +478,7 @@ export function createBuilder(app, deps) {
     }
     const work = [...found.prs.map(prName), ...found.branches.map(x => `${x.repo} ${x.branch}`)].join(', ');
     Object.assign(w, { prs: found.prs.map(prRef), adopted: true, lastActivityAt: 0 });
-    if (byLabels(w) && found.prs.length) labelPrs(w, found.prs, b().tags.inProgress);
+    if (byLabels(w) && found.prs.length) labelPrs(w, found.prs, 'building');
     if (Object.keys(fix).length) {
       log('ok', `${w.key}: picking up ${work}; a fix round first (${Object.entries(fix).map(([url, f]) => `${prName(found.prs.find(x => x.url === url))}: ${f.reasons.join(', ')}`).join('; ')})`);
       Object.assign(w, { pickupFix: fix, finishAfterRound: true, roundPrs: found.prs.filter(p => fix[p.url]).map(prRef), roundClaimed: Boolean(w.claimedAt) || byLabels(w), step: 'round', status: 'active' });
@@ -1106,7 +1110,7 @@ export function createBuilder(app, deps) {
       const held = await labelHold(w, w.roundPrs || w.prs);
       if (held) return back(held);
       if (!on() && !w.finishAfterRound) return back('the Builder is off');
-      labelPrs(w, w.roundPrs || w.prs, b().tags.inProgress);
+      labelPrs(w, w.roundPrs || w.prs, 'building');
       w.roundClaimed = true;
       touch(w);
     }

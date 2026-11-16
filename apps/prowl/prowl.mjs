@@ -52,6 +52,7 @@ const { migrateFixes, needsMigration } = await import('./src/migrate.mjs');
 const update = await import('./src/update.mjs');
 const github = await import('./src/github.mjs');
 const { createLabels } = await import('./src/labels.mjs');
+const { renamedWrite } = await import('./src/names.mjs');
 
 const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url)); // this folder is also the plugin with prowl-review and prowl-build
 const ONCE = args.has('--once');
@@ -141,6 +142,8 @@ app.offers = []; // offers waiting to pop up in the TUI: a paste of only tickets
 const sideDeps = name => ({ log: (...a) => log(name, ...a), forget: key => forget(name, key), hoot, appDir: PLUGIN_DIR, trackers: TRACKERS, labels, saveConfig: () => saveConfig(app.cfg) });
 const reviewer = createReviewer(app, sideDeps('reviewer'));
 const builder = createBuilder(app, sideDeps('builder'));
+// Label writes queued by a Prowl from before the labels had names of their own land under today's names.
+labels.rename(op => renamedWrite(app.cfg, op, (run => (run ? reviewer.outcomeLabel(run, op.url) : ''))(reviewer.state.runs.find(r => r.id === op.owner))));
 const sides = [reviewer, builder];
 const shell = createShell(app, sides, { log, reload: () => { app.cfg = loadConfig(); }, changed: configChanged });
 

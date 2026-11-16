@@ -3,7 +3,8 @@
 import path from 'node:path';
 import { CHECKS_PATH, readChecks, saveConfig, writeJson } from '../config.mjs';
 import * as github from '../github.mjs';
-import { createLabels, matching, refusal } from '../labels.mjs';
+import { createLabels, refusal } from '../labels.mjs';
+import { askLabel, labelNames, labelsOf, labelWrite } from '../names.mjs';
 import { norm, tagMatches } from '../match.mjs';
 import { acceptOffer, offerFor } from '../offers.mjs';
 import { autoName, cleanName, notARef, parsePaste, ticketKey } from '../paste.mjs';
@@ -543,8 +544,9 @@ export function createReviewer(app, deps) {
     if (run.labels) {
       // This review has these PRs' labels now: an older quick review's writes to them are dropped.
       labels.own('reviewer', run.id, [...toReview, ...approved].map(p => p.url));
-      for (const p of toReview) labels.set('reviewer', run.id, p, c.tags.inProgress, [c.tags.trigger, c.tags.done], c.tagMatchMaxTypos, [c.tags.trigger]);
-      for (const p of approved) labels.set('reviewer', run.id, p, '', [c.tags.trigger], c.tagMatchMaxTypos, [c.tags.trigger]); // context: Ready for Review comes off
+      // In review goes on; the ask, both outcomes and the old names come off. A context PR gets nothing: the review uses its ask up.
+      for (const p of toReview) labels.set('reviewer', run.id, p, labelWrite(c, labelNames(c).inReview, ['ask', 'approved', 'changes'], ['ask', 'inReview', 'done']));
+      for (const p of approved) labels.set('reviewer', run.id, p, labelWrite(c, '', ['ask'], ['ask']));
     }
     const checking = run.phase === 'checks';
     hoot(checking ? `Building and testing the PRs for ${spec.title} before reviewing them` : toReview.length > 1 ? `Starting a quick review of ${toReview.length} PRs` : `Starting a quick review of ${toReview[0].title}`);
@@ -601,16 +603,18 @@ export function createReviewer(app, deps) {
     if (wt.retry) return startAgain(wt, run, prs, 'retrying the review that failed');
     if (rv.roundCapped(c, run)) return endWait(wt, `it has had ${run.reviewNo} reviews, the round cap (Max review rounds)`);
     const approvedNow = p => run.approved?.[p.url] && run.approved[p.url] === p.headSha;
-    const has = (p, tag, typos = 0) => matching(p.labels || [], tag, typos).length > 0;
-    // Ready for Review counts only once Prowl's own labels on the PR have landed.
-    const ready = p => has(p, c.tags.trigger, c.tagMatchMaxTypos) && !labels.pending(p.url);
+    const ask = askLabel(c);
+    // Under another review: the in-review label, or the old name for it. Asked for: the review label, or the old
+    // trigger name, and only once Prowl's own labels on the PR have landed.
+    const underReview = p => labelsOf(c, p.labels, 'inReview')[0] || '';
+    const ready = p => labelsOf(c, p.labels, 'ask').length > 0 && !labels.pending(p.url);
     const notes = [];
-    for (const p of live.filter(x => has(x, c.tags.inProgress) && approvedNow(x))) notes.push(`${p.repo}#${p.number} is labelled '${c.tags.inProgress}', but it is approved and only context: it doesn't hold the wait`);
+    for (const p of live.filter(x => underReview(x) && approvedNow(x))) notes.push(`${p.repo}#${p.number} is labelled '${underReview(p)}', but it is approved and only context: it doesn't hold the wait`);
     wt.notes = notes;
-    const reviewing = live.filter(p => has(p, c.tags.inProgress) && !approvedNow(p));
+    const reviewing = live.filter(p => underReview(p) && !approvedNow(p));
     if (reviewing.length) {
       wt.waitingOn = reviewing.map(p => p.url);
-      return log('info', `${wt.key}: waiting: ${names(reviewing)} ${reviewing.length > 1 ? 'are' : 'is'} labelled '${c.tags.inProgress}'`, key);
+      return log('info', `${wt.key}: waiting: ${names(reviewing)} ${reviewing.length > 1 ? 'are' : 'is'} labelled '${underReview(reviewing[0])}'`, key);
     }
     const waitedOn = live.filter(p => !run.approved?.[p.url]); // the PRs it didn't approve, and new ones
     let go;
@@ -621,11 +625,11 @@ export function createReviewer(app, deps) {
       // Every PR approved: Ready for Review with new commits since the approval re-reviews; Ready for Review alone waits.
       wt.waitingOn = live.map(p => p.url);
       go = live.some(p => ready(p) && !approvedNow(p));
-      if (!go && live.some(ready)) log('info', `${wt.key}: '${c.tags.trigger}' is on, but no PR has new commits since it was approved; still waiting`, key);
+      if (!go && live.some(ready)) log('info', `${wt.key}: '${ask}' is on, but no PR has new commits since it was approved; still waiting`, key);
     }
     save();
     if (!go) return undefined;
-    return startAgain(wt, run, prs, waitedOn.length ? `every PR it didn't approve is labelled '${c.tags.trigger}'` : `labelled '${c.tags.trigger}', with new commits`);
+    return startAgain(wt, run, prs, waitedOn.length ? `every PR it didn't approve is labelled '${ask}'` : `labelled '${ask}', with new commits`);
   }
 
   /** The re-review of a wait, once a slot is free. A start that can't go better by waiting ends the wait, naming why. */
@@ -647,10 +651,17 @@ export function createReviewer(app, deps) {
     return undefined;
   }
 
-  /** The PR's labels after a quick review: `add` on each of `prs`, the Reviewer's other labels off. */
-  function relabel(run, prs, add) {
-    const { tags } = cfg();
-    for (const p of prs) labels.set('reviewer', run.id, p, add, [tags.inProgress, tags.done, tags.trigger].filter(t => t !== add), cfg().tagMatchMaxTypos, [tags.trigger]);
+  /** The label that says how a review of the PR at `url` went: approved, or changes requested. */
+  const outcomeLabel = (run, url) => (run.approved?.[url] ? labelNames(cfg()).approved : labelNames(cfg()).changes);
+  side.outcomeLabel = outcomeLabel;
+
+  /**
+   * The PRs' labels after a quick review: each PR's outcome (`outcome`), or none, with the in-review label, the
+   * other outcome and the old names off. The review label is left: one on the PR now was put there while the review
+   * ran, to ask for another.
+   */
+  function relabel(run, prs, outcome) {
+    for (const p of prs) labels.set('reviewer', run.id, p, labelWrite(cfg(), outcome ? outcomeLabel(run, p.url) : '', ['inReview', 'approved', 'changes'], ['inReview', 'done']));
   }
 
   /**
@@ -772,20 +783,19 @@ export function createReviewer(app, deps) {
     if (run.pendingTag != null) await applyTag(run);
   }
 
-  /** A quick review with labels, settled: Reviewed and a wait on its PRs, a wait to retry it, or its labels off. */
+  /** A quick review with labels, settled: each PR's outcome label and a wait on its PRs, a wait to retry it, or its labels off. */
   function settleLabels(run, retry) {
-    const { tags } = cfg();
     if (run.status !== 'done' && !retry) {
-      relabel(run, run.prs, ''); // not retried, or stopped: In Review comes off
+      relabel(run, run.prs, false); // not retried, or stopped: the in-review label comes off
       return endWaits(run.ticket, run.status === 'stopped' ? 'its review was stopped' : 'its review failed');
     }
-    if (run.status === 'done') relabel(run, run.prs, tags.done);
+    if (run.status === 'done') relabel(run, run.prs, true);
     side.state.waits = side.waits().filter(x => x.key !== run.ticket);
     side.waits().push({ key: run.ticket, title: run.title, ticketUrl: run.ticketUrl || '', paste: run.paste || { prs: run.prs.map(p => ({ repo: p.repo, number: p.number })), tickets: [] },
       runId: run.id, since: Date.now(), letGo: {}, retry, waitingOn: run.prs.filter(p => !run.approved?.[p.url]).map(p => p.url) });
     if (run.status === 'done') {
       const open = run.prs.filter(p => !run.approved?.[p.url]);
-      log('info', `${run.ticket}: labelled '${tags.done}'; ${open.length ? `waiting for '${tags.trigger}' on ${names(open)}` : `every PR approved: waiting for '${tags.trigger}' with new commits`}`);
+      log('info', `${run.ticket}: its PRs are labelled with how the review went; ${open.length ? `waiting for '${askLabel(cfg())}' on ${names(open)}` : `every PR approved: waiting for '${askLabel(cfg())}' with new commits`}`);
     }
     return undefined;
   }

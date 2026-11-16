@@ -47,6 +47,9 @@ function pasting(assert) {
 
 // ---- The label queue both sides share ----
 
+// A label write in the queue's form, from the old (add, remove, typos, loose) arguments: names not in `loose` are matched by letters and digits.
+const legacy = (add, remove = [], typos = 0, loose = []) => ({ add, old: remove.filter(n => !loose.includes(n)), loose, typos });
+
 async function queue(assert) {
   assert.deepEqual([httpStatus(httpError(404)), httpStatus(new Error('boom'))], [404, 0]);
   assert.ok([404, 410].every(c => refusal(httpError(c))) && refusal(httpError(403, 'Resource not accessible by integration')), '403, 404 and 410 last');
@@ -68,8 +71,8 @@ async function queue(assert) {
   const file = path.join(dir, 'labels.json');
   const q = createLabels({ gh, log: (side, level, msg) => logs.push([side, level, msg]), file, now: () => now });
   const pr = n => ({ url: `https://github.com/o/r/pull/${n}`, repo: 'o/r', number: n });
-  q.set('reviewer', 'run1', pr(1), 'In Review', ['Ready for Review', 'Reviewed'], 2);
-  q.set('reviewer', 'run1', pr(1), 'Reviewed', ['In Review', 'Ready for Review'], 2);
+  q.set('reviewer', 'run1', pr(1), legacy('In Review', ['Ready for Review', 'Reviewed'], 2));
+  q.set('reviewer', 'run1', pr(1), legacy('Reviewed', ['In Review', 'Ready for Review'], 2));
   assert.ok(q.pending(pr(1).url) && q.pending(pr(1).url, 'run1') && !q.pending(pr(1).url, 'run2'), 'queued');
   await q.drain();
   assert.deepEqual(calls, [['remove', 1, 'Ready-for-review'], ['add', 1, 'In Review'], ['remove', 1, 'In Review'], ['add', 1, 'Reviewed']], 'in the order asked, a loose match taken off');
@@ -77,9 +80,9 @@ async function queue(assert) {
   // A transient failure waits a minute, and the PR's later writes wait behind it; other PRs go on.
   calls.length = 0;
   fail = { 2: () => httpError(502, 'Bad Gateway') };
-  q.set('builder', 'w1', pr(2), 'In Development', ['Ready for Review']);
-  q.set('builder', 'w1', pr(2), 'Ready for Review', ['In Development']);
-  q.set('builder', 'w1', pr(3), 'In Development', ['Ready for Review']);
+  q.set('builder', 'w1', pr(2), legacy('In Development', ['Ready for Review']));
+  q.set('builder', 'w1', pr(2), legacy('Ready for Review', ['In Development']));
+  q.set('builder', 'w1', pr(3), legacy('In Development', ['Ready for Review']));
   await q.tick();
   assert.deepEqual([calls, q.pending(pr(2).url)], [[['add', 3, 'In Development']], true], 'a failing PR waits; the next PR goes on');
   assert.ok(logs.some(([s, l, m]) => s === 'builder' && /couldn't change its labels yet .*retrying every minute/.test(m)), 'logged on the side that asked');
@@ -90,25 +93,25 @@ async function queue(assert) {
   await q.drain();
   assert.deepEqual(on['o/r#2'], ['Ready for Review'], 'then retried, in order');
   // A newer owner of a PR's labels: the older owner's writes there are dropped.
-  q.set('reviewer', 'old', pr(3), 'Reviewed', ['In Review']);
+  q.set('reviewer', 'old', pr(3), legacy('Reviewed', ['In Review']));
   q.own('reviewer', 'new', [pr(3).url]);
-  q.set('reviewer', 'new', pr(3), 'In Review', ['Reviewed']);
+  q.set('reviewer', 'new', pr(3), legacy('In Review', ['Reviewed']));
   calls.length = 0;
   await q.drain();
   assert.deepEqual(calls, [['add', 3, 'In Review']], "a newer quick review owns the PR's labels");
   assert.equal(q.owner('builder', pr(3).url), '', "the Reviewer's owner of a PR's labels is the Reviewer's only: the Builder's writes there go on");
   // GitHub refuses: for that PR, for that owner, named in the Log; a rate limit is only for now.
   fail = { 1: () => httpError(403, 'Resource not accessible by integration') };
-  q.set('reviewer', 'run1', pr(1), 'In Review', ['Reviewed']);
-  q.set('reviewer', 'run1', pr(1), 'Reviewed', ['In Review']);
+  q.set('reviewer', 'run1', pr(1), legacy('In Review', ['Reviewed']));
+  q.set('reviewer', 'run1', pr(1), legacy('Reviewed', ['In Review']));
   await q.drain();
   assert.ok(q.refused('run1', pr(1).url) && !q.pending(pr(1).url), 'a refusal drops its writes there');
   assert.ok(logs.some(([, , m]) => /o\/r#1: GitHub won't let Prowl change its labels/.test(m)), 'and is named in the Log');
-  q.set('reviewer', 'run1', pr(1), 'In Review', []);
+  q.set('reviewer', 'run1', pr(1), legacy('In Review', []));
   assert.ok(!q.pending(pr(1).url), 'and later writes of that review there are not queued');
   q.clearRefusal('run1', pr(1).url);
   fail = { 1: () => httpError(403, 'API rate limit exceeded') };
-  q.set('reviewer', 'run1', pr(1), 'In Review', []);
+  q.set('reviewer', 'run1', pr(1), legacy('In Review', []));
   await q.tick();
   assert.ok(q.pending(pr(1).url) && !q.refused('run1', pr(1).url), 'a rate-limited 403 is retried');
   q.drop('run1');
@@ -116,14 +119,14 @@ async function queue(assert) {
   // A label already gone counts as removed.
   fail = {};
   gh.removeLabel = async () => {}; // as github.removeLabel does with a 404
-  q.set('reviewer', 'run9', pr(2), '', ['Ready for Review']);
+  q.set('reviewer', 'run9', pr(2), legacy('', ['Ready for Review']));
   await q.drain();
   assert.ok(!q.pending(pr(2).url), 'already removed: done');
   // Only the trigger label is taken off within the typo tolerance: the labels Prowl sets itself are matched exactly.
   on['o/r#2'] = ['Reviewer', 'In Preview', 'Ready for Reveiw', 'reviewed'];
   calls.length = 0;
   gh.removeLabel = async (p, name) => { calls.push(['remove', p.number, name]); on[`${p.repo}#${p.number}`] = on[`${p.repo}#${p.number}`].filter(l => l !== name); };
-  q.set('reviewer', 'run9', pr(2), 'In Review', ['Ready for Review', 'Reviewed'], 2, ['Ready for Review']);
+  q.set('reviewer', 'run9', pr(2), legacy('In Review', ['Ready for Review', 'Reviewed'], 2, ['Ready for Review']));
   await q.drain();
   assert.deepEqual([calls, on['o/r#2']], [[['remove', 2, 'Ready for Reveiw'], ['remove', 2, 'reviewed'], ['add', 2, 'In Review']], ['Reviewer', 'In Preview', 'In Review']], "a label that only looks like one of Prowl's own stays");
   on['o/r#2'] = ['Ready for Reveiw'];
@@ -408,16 +411,16 @@ async function reviews(assert, appDir) {
   assert.deepEqual([r.ticket, r.title, started[0].prs.map(p => p.number), started[0].quick], ['AB#42', 'Save carts', [1, 2], true], "one ticket: its open, ready PRs, under its key and title");
   assert.ok(buildPrompt({ ...r, prior: null, contextPrs: [], leftOut: [] }).includes('- Ticket: AB#42 "Save carts" (https://dev.azure.com/o/Shop/_workitems/edit/42). This is a quick review'), 'its brief names the ticket');
   await labels.drain();
-  assert.deepEqual([gh.prs[1].labels, gh.prs[2].labels, gh.prs[3].labels], [['In Review'], ['In Review'], []], 'labelled In Review as it starts; the draft is left out');
+  assert.deepEqual([gh.prs[1].labels, gh.prs[2].labels, gh.prs[3].labels], [['prowl: in review'], ['prowl: in review'], []], 'labelled in review as it starts; the draft is left out');
   assert.deepEqual(tagged, [], 'no tag written on the ticket');
   // Done, approving #1: Reviewed on both, and it waits on #2, the PR it didn't approve.
   await finishDone(r, [1]);
   await labels.drain();
-  assert.deepEqual([gh.prs[1].labels, gh.prs[2].labels], [['Reviewed'], ['Reviewed']], 'labelled Reviewed when done');
+  assert.deepEqual([gh.prs[1].labels, gh.prs[2].labels], [['prowl: approved'], ['prowl: changes requested']], 'each PR labelled with how its review went');
   assert.deepEqual(only('AB#42').map(w => w.waitingOn), [[gh.prs[2].url]], 'waiting on the PR it did not approve');
-  assert.ok(logs.some(l => /AB#42: labelled 'Reviewed'; waiting for 'Ready for Review' on r2#2/.test(l)));
+  assert.ok(logs.some(l => /AB#42: its PRs are labelled with how the review went; waiting for 'prowl: review' on r2#2/.test(l)));
   // A Ready for Review label counts only after Prowl's own Reviewed label has landed.
-  labels.set('reviewer', r.id, gh.prs[2], 'Reviewed', ['Ready for Review']);
+  labels.set('reviewer', r.id, gh.prs[2], legacy('Reviewed', ['Ready for Review']));
   gh.prs[2].labels = ['Ready-for-review'];
   await side.poll();
   assert.equal(started.length, 1, 'Ready for Review before our Reviewed lands: not counted');
@@ -431,7 +434,7 @@ async function reviews(assert, appDir) {
   r = started[1].run;
   assert.deepEqual([r.ticket, r.reviewNo, started[1].prs.map(p => p.number), started[1].approvedPrs.map(p => p.number)], ['AB#42', 2, [2], [1]], 'the same key, review 2, the approved PR as context');
   await labels.drain();
-  assert.deepEqual([gh.prs[1].labels, gh.prs[2].labels], [['In Review'], ['In Review']], 'context: Ready for Review taken off (none here); the PR under review labelled In Review');
+  assert.deepEqual([gh.prs[1].labels, gh.prs[2].labels], [['In Review'], ['prowl: in review']], 'context: the ask taken off (none here); the PR under review labelled in review, its old labels off');
   // New PRs on a pasted ticket join; with every PR approved, Ready for Review alone keeps it waiting.
   await finishDone(r, [2]);
   gh.prs[1].labels = ['Reviewed'];

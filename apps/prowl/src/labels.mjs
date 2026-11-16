@@ -1,10 +1,12 @@
-// GitHub labels on PRs: the markers of a quick review's or a ticketless build's cycle (In Review, Reviewed, Ready for
-// Review, In Development), named after the tags. Both sides write them through one queue, kept in labels.json, so
-// writes to a PR land in the order they were asked for, whichever side asked. Neither side imports the other.
+// GitHub labels on PRs: the markers of a quick review's or a ticketless build's cycle (prowl: review, prowl: in
+// review, prowl: approved, prowl: changes requested, prowl: building; src/names.mjs). Both sides write them through
+// one queue, kept in labels.json, so writes to a PR land in the order they were asked for, whichever side asked.
+// Neither side imports the other.
 import fs from 'node:fs';
 import path from 'node:path';
 import { HOME, writeJson } from './config.mjs';
 import { norm, tagMatches } from './match.mjs';
+import { sameLabel } from './names.mjs';
 
 export const LABELS_PATH = path.join(HOME, 'labels.json');
 
@@ -17,9 +19,9 @@ export const refusal = e => [404, 410].includes(httpStatus(e)) || (httpStatus(e)
 export const matching = (labels, name, typos = 0) => labels.filter(l => norm(l) === norm(name) || (typos > 0 && tagMatches(l, name, typos)));
 
 /**
- * The queue. `gh`: { prLabels(pr), addLabel(pr, name), removeLabel(pr, name) }; `log(side, level, msg, key)`. Each write
- * is { side, owner, url, repo, number, add, remove: [names], typos, loose: [names] }: `owner` the review or build that
- * asked (its id).
+ * The queue. `gh`: { prLabels(pr), addLabel(pr, name, color), removeLabel(pr, name) }; `log(side, level, msg, key)`.
+ * Each write is { side, owner, url, repo, number, add, exact, old, loose, typos, keep, color }: `owner` the review or
+ * build that asked (its id).
  */
 export function createLabels({ gh, log, file = LABELS_PATH, now = Date.now }) {
   let state;
@@ -39,13 +41,21 @@ export function createLabels({ gh, log, file = LABELS_PATH, now = Date.now }) {
     },
     owner: (side, url) => state.owners[`${side} ${url}`] || '',
     /**
-     * Queues a write: `add` ('' for none) after taking off each of `remove`. Only the names in `loose` (the trigger
-     * tag) are taken off within `typos`; the labels Prowl sets itself are matched exactly.
+     * Queues a write (names.labelWrite): `add` ('' for none) after taking off the names in `exact` (Prowl's own labels:
+     * the same but for case and outer spaces), in `old` (older names: by letters and digits) and in `loose` (the old
+     * trigger name: within `typos`). A label that is exactly one of `keep` (Prowl's five) only comes off through `exact`.
      */
-    set(side, owner, pr, add, remove, typos = 0, loose = []) {
+    set(side, owner, pr, { add = '', exact = [], old = [], loose = [], typos = 0, keep = [], color = '' }) {
       if (q.refused(owner, pr.url)) return;
-      state.ops.push({ side, owner, url: pr.url, repo: pr.repo, number: pr.number, add: add || '', remove: remove.filter(Boolean), typos, loose: loose.filter(Boolean), at: now() });
+      const names = list => list.filter(Boolean);
+      state.ops.push({ side, owner, url: pr.url, repo: pr.repo, number: pr.number, add, exact: names(exact), old: names(old), loose: names(loose), typos, keep: names(keep), color, at: now() });
       save();
+    },
+    /** Once, at launch: each write queued before the labels had names of their own becomes `renamed(op)` (null leaves it). */
+    rename(renamed) {
+      let changed = false;
+      state.ops = state.ops.map(o => { const n = renamed(o); if (!n) return o; changed = true; const { remove, ...rest } = o; return { ...rest, ...n }; });
+      if (changed) save();
     },
     /** True while a write to `url` is queued (by `owner`, or by anyone). */
     pending: (url, owner = '') => state.ops.some(o => o.url === url && (!owner || o.owner === owner)),
@@ -86,10 +96,12 @@ export function createLabels({ gh, log, file = LABELS_PATH, now = Date.now }) {
     if (q.owner(o.side, o.url) && q.owner(o.side, o.url) !== o.owner) return done(); // a newer review or build has these labels now
     try {
       const on = await gh.prLabels(pr);
-      const off = [...new Set(o.remove.flatMap(name => matching(on, name, o.loose?.includes(name) ? o.typos : 0)))] // a write queued before 2.23.5 has no `loose`: exact
-        .filter(l => !(o.add && norm(l) === norm(o.add)));
+      const any = (list, same) => (list || []).some(same);
+      const ours = l => any(o.keep, k => sameLabel(l, k)); // one of Prowl's five: never taken for an older name
+      const off = on.filter(l => !(o.add && sameLabel(l, o.add)) && (any(o.exact, n => sameLabel(l, n))
+        || (!ours(l) && (any([...(o.old || []), ...(o.remove || [])], n => norm(l) === norm(n)) || any(o.loose, n => tagMatches(l, n, o.typos))))));
       for (const l of off) await gh.removeLabel(pr, l); // one already gone counts as removed
-      if (o.add && !matching(on, o.add).length) await gh.addLabel(pr, o.add);
+      if (o.add && !on.some(l => sameLabel(l, o.add))) await gh.addLabel(pr, o.add, o.color || undefined);
       if (o.add) state.landed[`${o.owner} ${o.url}`] = o.add;
       done();
     } catch (e) {

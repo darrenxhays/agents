@@ -70,14 +70,14 @@ export async function prLabels(pr) {
   return (await run('gh', ['api', `repos/${pr.repo}/issues/${pr.number}/labels`, '--paginate', '--jq', '.[].name'])).split('\n').map(l => l.trim()).filter(Boolean);
 }
 
-/** Puts label `name` on a PR, creating it on the repo first when the repo has none of that name. */
-export async function addLabel(pr, name) {
+/** Puts label `name` on a PR, creating it on the repo first (in `color`) when the repo has none of that name. */
+export async function addLabel(pr, name, color = 'c5def5') {
   const missing = await run('gh', ['api', `repos/${pr.repo}/labels/${encodeURIComponent(name)}`, '--jq', '.name']).then(() => false, e => {
     if (/\(HTTP 404\)/.test(e.message)) return true;
     throw e;
   });
   if (missing) {
-    await run('gh', ['api', '-X', 'POST', `repos/${pr.repo}/labels`, '-f', `name=${name}`, '-f', 'color=c5def5', '-f', 'description=Set by Prowl', '--jq', '.name'])
+    await run('gh', ['api', '-X', 'POST', `repos/${pr.repo}/labels`, '-f', `name=${name}`, '-f', `color=${color}`, '-f', 'description=Set by Prowl', '--jq', '.name'])
       .catch(e => { if (!/\(HTTP 422\)/.test(e.message)) throw e; }); // created meanwhile
   }
   await run('gh', ['api', '-X', 'POST', `repos/${pr.repo}/issues/${pr.number}/labels`, '-f', `labels[]=${name}`, '--jq', 'length']);

@@ -1747,7 +1747,7 @@ async function quickBuilds(assert) {
   assert.ok(h.session.turns[0].prompt.includes('octo-org/web:'), 'the repo the text names checked out');
   assert.ok(remoteHas(h.bares['octo-org/web'], 'prowl/dark-mode-toggle'), 'Quick build branch names: prowl/{slug}');
   assert.deepEqual([h.gh.prs.length, h.gh.prs.every(p => !/AB#|undefined/.test(p.title))], [2, true], 'its PRs, with no ticket key');
-  assert.deepEqual(h.gh.prs.map(p => p.labels), [['Ready for Review'], ['Ready for Review']], 'labelled Ready for Review once open');
+  assert.deepEqual(h.gh.prs.map(p => p.labels), [['prowl: review'], ['prowl: review']], 'labelled for review once open');
   assert.ok(!h.server.calls.some(c => c.startsWith('PATCH')), 'no ticket written');
   // The round gate: In Review or Ready for Review labels hold a round; a round labels its PRs In Development.
   h.app.on = true;
@@ -1766,8 +1766,8 @@ async function quickBuilds(assert) {
   await h.labels.drain();
   await h.poll();
   assert.equal(w.rounds, 1, 'reviewed: the round');
-  assert.ok(roundLabels.at(-1).includes('In Development'), 'In Development on (or on its way) as the round starts');
-  assert.deepEqual(web.labels, ['Reviewed', 'Ready for Review'], 'then Ready for Review; In Review and Reviewed are never touched');
+  assert.ok(roundLabels.at(-1).includes('prowl: building'), 'the building label on (or on its way) as the round starts');
+  assert.deepEqual(web.labels, ['Reviewed', 'prowl: review'], "then the review label; a review's own labels are never touched");
   assert.equal((await h.b.history().find(x => x.key === 'BUILD#1')).ref, null);
   h.done();
 
@@ -1804,11 +1804,12 @@ async function quickBuilds(assert) {
   assert.deepEqual([w.key, w.markers, w.scope.map(p => p.number)], ['AB#123', 'tags', [9]], 'one ticket mentioned: its build, on its tags, scoped to the PR');
   await h.b.drain();
   assert.ok(h.session.turns[0].prompt.startsWith('/prowl:prowl-build finish ') && h.gh.prs.length === 2, 'picked up: a finish session, no new PR');
+  h.gh.prs[1].labels = ['prowl: changes requested', 'In Development']; // an earlier review's outcome, and an old-named label
   const q = await h.b.quickBuild('octo-org/api#10');
   assert.deepEqual([q.key, q.markers, q.title], ['BUILD#1', 'labels', 'Dark mode toggle'], 'none mentioned: named, on labels');
   await h.b.drain();
   await h.labels.drain();
-  assert.deepEqual(h.gh.prs[1].labels, ['Ready for Review'], 'its PR labelled for review once finished');
+  assert.deepEqual(h.gh.prs[1].labels, ['prowl: review'], 'its PR labelled for review once finished: the outcome label and the old name are off');
   assert.ok(h.b.history().every(x => x.quick), 'marked quick');
   h.done();
   // Outside Max parallel builds: a quick build waiting on you holds no slot, and a tagged ticket is still picked up.

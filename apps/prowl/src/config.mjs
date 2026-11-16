@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { LABELS, REVIEW_LABEL } from './names.mjs';
 
 export const HOME = process.env.PROWL_HOME || path.join(os.homedir(), '.prowl');
 export const CONFIG_PATH = path.join(HOME, 'config.json');
@@ -42,6 +43,8 @@ const DEFAULTS = {
   reviewChecks: false,
   quickName: 'auto',
   quickLabels: true,
+  reviewLabel: REVIEW_LABEL,
+  labels: { ...LABELS },
   builder: {
     enabled: false,
     tags: { start: 'Ready to Start', inProgress: 'In Development' },
@@ -125,7 +128,13 @@ const NOTES = {
   ticketContext: 'true: add the ticket\'s description (and Azure DevOps acceptance criteria) to each review\'s brief.',
   reviewChecks: "true: build and test each PR with checks.json before its review, and give the review the results. A fork's PR is never built.",
   quickName: 'How a quick review or quick build without a ticket is named: "auto" (a short model call names it from the paste), "ask" (you type the name), or "number" (QUICK#n only).',
-  quickLabels: 'true: a quick review labels its PRs In Review, then Reviewed, on GitHub, and re-reviews them once they are labelled Ready for Review. false: no labels; a quick review runs once.',
+  quickLabels: "true: a quick review labels its PRs 'prowl: in review', then 'prowl: approved' or 'prowl: changes requested', and re-reviews once every PR it didn't approve is labelled 'prowl: review'. false: no labels; a quick review runs once.",
+  reviewLabel: 'The GitHub label that asks for a review of a PR (quick reviews and ticketless quick builds). "" = the name of tags.trigger.',
+  labels: 'The GitHub labels Prowl sets on PRs, with quickLabels on. Matched exactly, ignoring case.',
+  'labels.inReview': 'A quick review of the PR is running.',
+  'labels.approved': 'Its review ended with nothing blocking the PR.',
+  'labels.changes': 'Its review ended with a finding that blocks the PR.',
+  'labels.building': 'A quick build without a ticket is working on the PR.',
   builder: 'The Builder: builds tickets tagged to start, opens their PRs, then follows them through review. How it builds is in config/build.md.',
   'builder.enabled': 'The switch. Off: nothing new is claimed or started, and running sessions finish.',
   'builder.tags': 'The Builder\'s tags (labels on Jira). When its PRs open it sets tags.trigger.',
