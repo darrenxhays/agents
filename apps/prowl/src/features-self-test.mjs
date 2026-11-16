@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { CONFIG_PATH, HOME, loadConfig, newSettings, takeNameNotes } from './config.mjs';
+import { CONFIG_PATH, HOME, loadConfig, modelValid, newSettings, takeNameNotes } from './config.mjs';
 import { killChecks, reviewSteps, runChecks, runCommand, runSteps } from './checks.mjs';
 import { addWorktree, noHooks, noHooksEnv } from './git.mjs';
 import { branchHadPr, fromOwnBranch, otherKeys, prForBranch, shortstat, titleNamesOnly } from './github.mjs';
@@ -1173,6 +1173,110 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
     assert.equal(steps(t2.text(80, 30)), held);
     t2.tui.key('end');
     assert.ok(t2.text(80, 30).includes('step 550'));
+  }
+
+  // ---- C-25: settings picked from a list ----
+  {
+    /** Puts Config's cursor on the setting labelled `label`. */
+    const goTo = (t, label, W = 100) => {
+      t.tui.key('4');
+      for (let i = 0; i < 120; i++) {
+        t.tui.ui.sel[t.tui.ui.side][3] = i;
+        if (t.text(W, 40).split('\n').some(l => new RegExp(`❯ ${label}\\s`).test(l))) return;
+      }
+      throw new Error(`no setting labelled ${label}`);
+    };
+    const saves = t => t.calls.filter(c => c[0] === 'saveConfig').length;
+    let t = tuiOver();
+    goTo(t, 'Re-review scope');
+    t.tui.key('enter');
+    let f = t.text(100, 40);
+    assert.ok(/❯ full ✓/.test(f) && /^\s+│\s+delta\s+│/m.test(f), f);
+    assert.ok(f.includes('Re-review scope: choose a value, then enter.') && /▌Options\s+↑\s+↓\s+choose\s+enter\s+pick\s+esc\s+cancel/.test(f), f);
+    t.tui.key('q');
+    t.tui.key('2');
+    t.tui.paste('https://github.com/o/r/pull/1');
+    assert.ok(t.tui.ui.menu && t.tui.ui.view.reviewer === 3 && !t.tui.ui.confirm && !t.tui.ui.edit, 'q, 2 and a paste do nothing while it is open');
+    t.tui.key('up');
+    assert.equal(t.tui.ui.menu.at, 1, '↑ on the first option lands on the last');
+    t.tui.key('home');
+    t.tui.key('down');
+    t.tui.key('enter');
+    assert.deepEqual([t.app.cfg.reReviewScope, t.tui.ui.menu, saves(t)], ['delta', null, 1], 'picked, saved at once, closed');
+    t.tui.key('enter');
+    t.tui.key('esc');
+    assert.deepEqual([t.app.cfg.reReviewScope, t.tui.ui.menu, saves(t)], ['delta', null, 1], 'enter then esc changes nothing');
+    t.tui.key('enter');
+    t.tui.key('enter');
+    assert.equal(saves(t), 1, 'picking the value already set saves nothing');
+    // A click on an option picks it; a click on another card closes the list.
+    t.tui.key('enter');
+    f = t.text(100, 40).split('\n');
+    const yFull = f.findIndex(l => /^\s+│\s+full\s+│/.test(l));
+    t.tui.mouse(f[yFull].indexOf('full') + 1, yFull);
+    assert.deepEqual([t.app.cfg.reReviewScope, t.tui.ui.menu, saves(t)], ['full', null, 2]);
+    t.tui.mouse(f[yFull].indexOf('full') + 1, yFull);
+    assert.equal(saves(t), 2, 'a second pick in one read does nothing: the list has closed');
+    t.tui.key('enter');
+    f = t.text(100, 40).split('\n');
+    const other = f.findIndex((l, y) => y > 5 && /│/.test(l) && !/full|delta|Re-review scope/.test(l) && !t.tui.ui.frame?.[y]?.menu);
+    t.tui.mouse(10, other);
+    assert.deepEqual([t.tui.ui.menu, t.app.cfg.reReviewScope, saves(t)], [null, 'full', 2], 'a click elsewhere closes it, nothing changed');
+    // The wheel moves the cursor; the config replaced while it is open still gets the value.
+    t.tui.key('enter');
+    t.text(100, 40);
+    t.tui.mouse(10, 10, 65);
+    assert.equal(t.tui.ui.menu.at, 1);
+    t.app.cfg = structuredClone(t.app.cfg);
+    const fresh = t.app.cfg;
+    t.tui.key('enter');
+    assert.equal(fresh.reReviewScope, 'delta', 'saved into the config as it is at the moment of the pick');
+
+    // Models: the IDs, the short names, a value typed by hand, and Other….
+    assert.deepEqual([modelValid('us.anthropic.claude-x-v1:0'), modelValid('claude-opus-5-5[1m]'), modelValid('a b'), modelValid('sonnet-5-5')],
+      [true, true, "'a b' isn't a model name: letters, digits and . - _ : @ / [ ] only", 'A full model ID starts with claude-: did you mean claude-sonnet-5-5?']);
+    const base = loadConfig();
+    t = tuiOver({ cfgOver: { claude: { ...base.claude, model: 'fable-5-1' } } });
+    goTo(t, 'Reviewer model');
+    assert.ok(t.text(100, 40).includes('fable-5-1 (not in the list)'));
+    t.tui.key('enter');
+    const labels = t.tui.ui.menu.options.map(o => o.label);
+    assert.deepEqual([labels.slice(0, MODELS.length), labels.slice(MODELS.length)], [MODELS, ['fable (the latest Fable)', 'opus (the latest Opus)', 'sonnet (the latest Sonnet)', 'haiku (the latest Haiku)', 'fable-5-1 (not in the list)', 'Other… (type it)']]);
+    assert.ok(t.tui.ui.menu.options.at(-2).current && t.tui.ui.menu.at === labels.length - 2 && t.text(100, 46).includes('fable-5-1 (not in the list) ✓'), 'the value typed by hand is listed, ticked');
+    t.tui.key('end');
+    t.tui.key('enter');
+    assert.deepEqual([t.tui.ui.menu, t.tui.ui.edit?.value], [null, 'fable-5-1'], 'Other… opens the box holding the value');
+    for (const ch of '\x7f'.repeat(9)) t.tui.key('backspace');
+    for (const ch of 'a b') t.tui.key(ch);
+    t.tui.key('enter');
+    assert.ok(t.tui.ui.edit.error.includes("isn't a model name"), t.tui.ui.edit.error);
+    for (let i = 0; i < 3; i++) t.tui.key('backspace');
+    for (const ch of 'sonnet-5-5') t.tui.key(ch);
+    t.tui.key('enter');
+    assert.ok(t.tui.ui.edit.error.includes('did you mean claude-sonnet-5-5?'));
+    for (let i = 0; i < 10; i++) t.tui.key('backspace');
+    for (const ch of 'claude-x@20251101') t.tui.key(ch);
+    t.tui.key('enter');
+    assert.deepEqual([t.tui.ui.edit, t.app.cfg.claude.model], [null, 'claude-x@20251101']);
+    t = tuiOver({ cfgOver: { builder: { ...base.builder, enabled: true } } });
+    t.tui.key('B');
+    goTo(t, 'Model');
+    t.tui.key('enter');
+    assert.deepEqual([t.tui.ui.menu.options[0].label, t.tui.ui.menu.options[0].current, t.tui.ui.menu.options.at(-1).other], ["(the Reviewer's Model)", true, true]);
+    t.tui.key('esc');
+    // At 40 columns the options, the cursor and the tick still show.
+    t = tuiOver();
+    goTo(t, 'Re-review scope', 40);
+    t.tui.key('enter');
+    f = t.text(40, 40);
+    assert.ok(/❯ full ✓/.test(f) && f.includes('delta'), f);
+    // A setting gone from the page closes its list.
+    t = tuiOver();
+    goTo(t, 'Task board');
+    t.tui.key('enter');
+    t.tui.ui.menu.key = 'no.such.setting';
+    t.text(100, 40);
+    assert.equal(t.tui.ui.menu, null);
   }
 
   fs.rmSync(tmp, { recursive: true, force: true });

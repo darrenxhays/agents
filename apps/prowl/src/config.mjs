@@ -12,6 +12,15 @@ export const MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 // The names the Agent tool takes for a subagent's model: each is the latest of its family. Never a full model id.
 export const AGENT_MODELS = ['sonnet', 'opus', 'haiku', 'fable'];
+// …which Claude Code takes for a session's model too. How Config lists them, after the full IDs.
+export const MODEL_SHORT_NAMES = { fable: 'fable (the latest Fable)', opus: 'opus (the latest Opus)', sonnet: 'sonnet (the latest Sonnet)', haiku: 'haiku (the latest Haiku)' };
+// A model name typed in Config (Other…): other providers' names fit too (us.anthropic.claude-…-v1:0, claude-…@20251101, an ARN, claude-…[1m]).
+export const MODEL_SHAPE = /^[\w.:@/[\]-]+$/;
+export function modelValid(v) {
+  if (!MODEL_SHAPE.test(v)) return `'${v}' isn't a model name: letters, digits and . - _ : @ / [ ] only`;
+  if (/^(sonnet|opus|haiku|fable)-\d/.test(v)) return `A full model ID starts with claude-: did you mean claude-${v}?`;
+  return true;
+}
 
 // Every setting and its default. CONFIG_PATH overrides these; the Config view (4) edits that file. NOTES documents
 // each one: saveConfig writes it as a comment above the setting.
@@ -108,7 +117,7 @@ const NOTES = {
   maxConcurrentReviews: 'Reviews running at once. Extra tickets stay tagged until a slot frees.',
   workDir: 'Projects directory: sessions run here and load its CLAUDE.md. Missing repos are cloned here; worktrees go in its .prowl-worktrees folder.',
   claude: 'Review sessions (and build sessions, where the Builder leaves its own setting empty).',
-  'claude.model': `The reviewers' model (and the review session's own, unless claude.orchestratorModel is set): ${MODELS.map(m => `"${m}"`).join(', ')}, or any model id Claude Code accepts.`,
+  'claude.model': `The reviewers' model (and the review session's own, unless claude.orchestratorModel is set): ${MODELS.map(m => `"${m}"`).join(', ')}, a short name for the latest of a family ("fable", "opus", "sonnet", "haiku"), or any model id Claude Code accepts.`,
   'claude.effort': `The reviewers' reasoning effort (and the review session's own, unless claude.orchestratorEffort is set): ${EFFORTS.map(e => `"${e}"`).join(', ')}.`,
   'claude.orchestratorModel': 'Model for the review session itself, which orchestrates; its reviewers are still launched on claude.model. "" = claude.model. With one set, claude.model must be "sonnet", "opus", "haiku", "fable" or one of the full ids listed for it.',
   'claude.orchestratorEffort': 'Reasoning effort for the review session itself; its reviewers are launched at claude.effort. "" = claude.effort.',
@@ -158,7 +167,7 @@ const NOTES = {
   'builder.pickup.conflicts': 'true: a picked-up PR that conflicts with its base starts a fix round, which merges the base in (never a rebase).',
   'builder.extraOwners': 'GitHub owners besides githubOwner whose repos a session may ask for, e.g. ["my-other-org"].',
   'builder.maxRepos': 'Repos a ticket may use. A session asking for more goes to Needs you.',
-  'builder.model': `Model for build sessions: ${MODELS.map(m => `"${m}"`).join(', ')}, or any model id. "" = claude.model.`,
+  'builder.model': `Model for build sessions: ${MODELS.map(m => `"${m}"`).join(', ')}, a short name for the latest of a family ("fable", "opus", "sonnet", "haiku"), or any model id. "" = claude.model.`,
   'builder.effort': `Reasoning effort for build sessions: ${EFFORTS.map(e => `"${e}"`).join(', ')}.`,
   'builder.maxBudgetUsd': 'Spend cap per session in USD (all its turns). It goes to Needs you. 0 = no cap.',
   'builder.maxTurns': 'Turn cap per session turn (the build, or one feedback round). 0 = no cap.',

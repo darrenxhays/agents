@@ -120,7 +120,7 @@ function hitAt(row, x) {
 function hovered(row, x) {
   let at = 0;
   const seg = row.find(s => (at += clean(s[1]).length) > x);
-  const keep = segs => Object.assign(segs, { bg: row.bg, hit: row.hit, footer: row.footer, pane: row.pane, main: row.main });
+  const keep = segs => Object.assign(segs, { bg: row.bg, hit: row.hit, footer: row.footer, pane: row.pane, main: row.main, menu: row.menu });
   if (seg?.[3]) return keep(row.map(s => (s[3] === seg[3] ? [s[4] || `${s[0]}${HOVER.seg}`, ...s.slice(1)] : s)));
   if (seg?.[2]) return keep(row.map(s => (s === seg ? [HOVER.link, ...s.slice(1)] : s)));
   if (row.hit) return Object.assign(keep(row.map(s => [`${HOVER.row}${s[0]}`, ...s.slice(1)])), { bg: HOVER.row });
@@ -248,6 +248,7 @@ export function startTui(app, actions, io = {}) {
     panes: new Map(), // the scrolling panes, by id: { at, ops, top, room, total, follow, focus, painted, owner }
     front: null, // the pane the scroll keys go to, as the last frame painted it: { id, arrows, sig }
     bodyH: 0, // the rows the view had in the last frame
+    menu: null, // a setting's values listed under its row, while open: { key, label, options: [{ value, label, current } | { other, label }], at }
     picked: { reviewer: null, builder: null }, // the selected Running row, by id (and ticket): re-found each frame, so rows coming and going don't shift the selection
   };
   const acc = (name = ui.side) => ACCENT[name];
@@ -363,7 +364,7 @@ export function startTui(app, actions, io = {}) {
   const whereText = st => (st.follow && st.at === null ? `latest ${st.room} of ${st.total} lines · PgUp to scroll back`
     : `lines ${st.top + 1}–${Math.min(st.total, st.top + st.room)} of ${st.total} · ${st.follow ? 'End: latest' : 'PgUp PgDn to scroll'}`);
   /** The view (and what is open over it) a frame was painted for: a pane painted for another is not scrolled. */
-  const frontSig = () => `${ui.side}:${view()}:${ui.notes ? 'notes' : ui.keys ? 'keys' : offerOpen() ? 'offer' : ''}`;
+  const frontSig = () => `${ui.side}:${view()}:${ui.notes ? 'notes' : ui.keys ? 'keys' : ui.menu ? 'menu' : offerOpen() ? 'offer' : ''}`;
 
   /**
    * `blocks` ([{ key, segs, hang, wrap, src, hit }]) in at most `h` rows of `w` columns. `follow`: starts at its latest
@@ -536,7 +537,7 @@ export function startTui(app, actions, io = {}) {
 
   // ---- The offer: a paste of only tickets, before a quick review or build ----
 
-  const offerOpen = () => ui.offers.length > 0 && !ui.edit && !ui.confirm && !ui.notes && !ui.keys && !(view() === NEEDS && needs(ui.side).length);
+  const offerOpen = () => ui.offers.length > 0 && !ui.edit && !ui.confirm && !ui.notes && !ui.keys && !ui.menu && !(view() === NEEDS && needs(ui.side).length);
   function offerChoices(o) {
     const it = o.tickets.length > 1 ? 'them' : 'it';
     const tag = o.side === 'builder' ? app.cfg.builder.tags.start : app.cfg.tags.trigger;
@@ -721,6 +722,7 @@ export function startTui(app, actions, io = {}) {
     if (f.type === 'bool') return getPath(c, f.key) ? 'on' : 'off';
     if (f.type === 'list') { const v = getPath(c, f.key); return Array.isArray(v) ? plural(v.length, 'pattern') : plural(Object.keys(v || {}).length, 'rule'); }
     if (f.empty && !getPath(c, f.key)) return f.emptyShows || '(none)';
+    if (f.type === 'enum' && !f.values.includes(getPath(c, f.key))) return `${getPath(c, f.key)} (not in the list)`; // typed by hand
     if (f.names) return f.names[getPath(c, f.key)] || String(getPath(c, f.key));
     // On Jira a tag is a label, written without colons and with dashes for spaces: shown beside the saved name.
     if (f.tag && JIRA(c) && jiraLabel(String(getPath(c, f.key))) !== String(getPath(c, f.key))) return `${getPath(c, f.key)}  (written ${jiraLabel(String(getPath(c, f.key)))})`;
@@ -882,6 +884,7 @@ export function startTui(app, actions, io = {}) {
 
   function configView(W, H) {
     const fields = configRows();
+    if (ui.menu) sel()[CONFIG] = Math.max(0, fields.findIndex(f => f.key === ui.menu.key)); // its row stays the selected one
     const at = clampSel(CONFIG, fields.length);
     const rows = [[[ST.grey, '  Saved to '], [ST.link, CONFIG_PATH, pathToFileURL(CONFIG_PATH).href], [ST.grey, ' on every change. The next poll uses it.']], []];
     // Under the cards, a pane: the selected setting's help (or a failed edit's error), wrapped, then the trigger's variants.
@@ -891,14 +894,32 @@ export function startTui(app, actions, io = {}) {
     const helpH = Math.min(help.reduce((n, b) => n + linesOf(b, W).length, 0), Math.max(3, Math.floor(H / 3)));
     // Each section is a card, in its own colour: a rounded box with its heading in the top edge, a blank row between
     // cards. The window counts the edges and gaps as rows.
+    // A setting's values, listed under its row while its menu is open. The list belongs to its setting by key: when
+    // the setting is gone from the page (Task board switched, say), it closes.
+    const menuAt = ui.menu ? fields.findIndex(f => f.key === ui.menu.key) : -1;
+    if (ui.menu && menuAt < 0) ui.menu = null;
     const lines = fields.flatMap((f, i) => [
       ...(f.section !== fields[i - 1]?.section ? [...(i ? [{ gap: true }] : []), { top: f.section }] : []),
       { f, i },
+      ...(i === menuAt ? ui.menu.options.map((opt, n) => ({ opt, n, f })) : []),
       ...(f.section !== fields[i + 1]?.section ? [{ bottom: f.section }] : []),
     ]);
     const inner = W - 5; // between '  │ ' and '│'
-    for (const { item: { f, i, top, bottom, gap } } of windowed(lines, lines.findIndex(l => l.i === at), Math.max(1, H - 3 - helpH))) {
+    // The window is centred on the option under the cursor while a menu is open, else on the setting's row.
+    const centre = ui.menu ? lines.findIndex(l => l.opt && l.n === ui.menu.at) : lines.findIndex(l => l.i === at);
+    for (const { item: { f, i, top, bottom, gap, opt, n } } of windowed(lines, centre, Math.max(1, H - 3 - helpH))) {
       if (gap) { rows.push([]); continue; }
+      if (opt) {
+        // Under the value column; on a narrow terminal, as far left as still shows the longest option whole.
+        const longest = Math.max(...ui.menu.options.map(o => o.label.length)) + 4; // its cursor and its tick
+        const indent = Math.max(2, Math.min(2 + LABEL_W, inner - 1 - longest));
+        const on = n === ui.menu.at;
+        const body = [['', ' '.repeat(indent)], on ? [acc().fg, '❯ '] : ['', '  '], [opt.other ? ST.grey : on ? ST.bold : '', opt.label], ...(opt.current ? [[ST.green, ' ✓']] : [])];
+        const c = sectionColor(f.section);
+        const padded = clip(body, inner - 1);
+        rows.push(Object.assign([[c, '  │ '], ...padded, ['', ' '.repeat(Math.max(0, inner - 1 - width(padded)))], [c, '│']], { hit: () => menuChoose(n), menu: true }));
+        continue;
+      }
       if (top || bottom) {
         const c = sectionColor(top || bottom);
         rows.push(top ? [[c, '  ╭─'], [`${ST.bold}${c}`, ` ${top} `], [c, `${'─'.repeat(Math.max(0, W - top.length - 8))}╮`]] : [[c, `  ╰${'─'.repeat(W - 5)}╯`]]);
@@ -935,7 +956,7 @@ export function startTui(app, actions, io = {}) {
     W, H, { follow: true, statusTop: true, main: true, front: true, arrows: true });
 
   // Keys, as [key, short label (the bar), what it does (the full list)]. Each view's, most useful first, then the rest.
-  const CONFIG_KEYS = [['enter', 'edit', 'Edit the setting, flip its switch, or open its file'], ['a', 'add board', 'Add a board to watch'], ['d', 'delete board', 'Delete the selected board']];
+  const CONFIG_KEYS = [['enter', 'edit', 'Edit the setting, list its values to pick one, flip its switch, or open its file'], ['a', 'add board', 'Add a board to watch'], ['d', 'delete board', 'Delete the selected board']];
   const LOG_KEYS = [['PgUp PgDn', 'scroll', 'Scroll the Log a page'], ['↑ ↓', 'line', 'Scroll the Log a line'], ['Home End', 'first / latest', 'The first line kept / back to the latest']];
   const VIEW_KEYS = {
     reviewer: [
@@ -1039,7 +1060,8 @@ export function startTui(app, actions, io = {}) {
           : 'Type, then enter to save.';
       [nav, own] = [[say(NAV.text, about)], keys('Typing', ui.edit.form ? [['enter', 'submit'], ['↑ ↓', 'move'], ['esc', 'back'], ['← →', 'cursor']]
         : [['enter', ui.edit.prs ? 'review' : ui.edit.build ? 'build' : ui.edit.naming ? 'name' : 'save'], ['esc', 'cancel'], ['← →', 'move']])];
-    } else if (ui.keys) [nav, own] = [[say(NAV.text, 'All keys: any other key closes this list and does its job.')], keys('Keys', [['↑ ↓', 'scroll'], ['PgUp PgDn', 'page'], ['/', 'close'], ['esc', 'close']])];
+    } else if (ui.menu) [nav, own] = [[say(NAV.text, `${ui.menu.label}: choose a value, then enter.`)], keys('Options', [['↑ ↓', 'choose'], ['enter', 'pick'], ['esc', 'cancel']])];
+    else if (ui.keys) [nav, own] = [[say(NAV.text, 'All keys: any other key closes this list and does its job.')], keys('Keys', [['↑ ↓', 'scroll'], ['PgUp PgDn', 'page'], ['/', 'close'], ['esc', 'close']])];
     else {
       const list = viewKeys();
       own = list.length ? keys(TABS[view()], list) : [[...tag(TABS[view()]), [fg(245), EMPTY[view()] || 'no keys here']]];
@@ -1052,7 +1074,7 @@ export function startTui(app, actions, io = {}) {
         moves = moves.slice(0, -1);
       }
     }
-    if (Date.now() < ui.flashUntil && !ui.notes && !ui.confirm && !ui.edit && !offerOpen()) nav = [say(`${ST.bold}${ST.green}`, ui.flash), ...nav.slice(1).map(() => [])];
+    if (Date.now() < ui.flashUntil && !ui.notes && !ui.confirm && !ui.edit && !ui.menu && !offerOpen()) nav = [say(`${ST.bold}${ST.green}`, ui.flash), ...nav.slice(1).map(() => [])];
     ui.bars = [nav.length, own.length];
     return [...nav.map(r => bar(r, NAV)), ...own.map(r => bar(r, KEYBAR))];
   }
@@ -1294,7 +1316,7 @@ export function startTui(app, actions, io = {}) {
       if (it) setText(formOf(it), e.field, e.value); // pasting is typing: Submit sends the form's text, not the box's
       return undefined;
     }
-    if (ui.notes || ui.confirm || ui.keys || offerOpen()) return undefined;
+    if (ui.notes || ui.confirm || ui.keys || ui.menu || offerOpen()) return undefined;
     return ui.side === 'builder' ? newBuild(text) : newReview(text);
   }
 
@@ -1320,11 +1342,15 @@ export function startTui(app, actions, io = {}) {
         return '';
       }, true);
     }
-    const cur = getPath(app.cfg, f.key);
     if (f.type === 'list') return openExternal(CONFIG_PATH);
-    if (f.type === 'bool') { setPath(app.cfg, f.key, !cur); return saved(); }
-    if (f.type === 'enum') { setPath(app.cfg, f.key, f.values[(f.values.indexOf(cur) + 1) % f.values.length]); return saved(); }
-    return startEdit(String(cur ?? ''), v => {
+    if (f.type === 'bool') { setPath(app.cfg, f.key, !getPath(app.cfg, f.key)); return saved(); }
+    if (f.type === 'enum') return openMenu(f);
+    return typeValue(f);
+  }
+
+  /** The box on a setting's row, with its value in it: a text or number setting, or a model typed through Other…. */
+  function typeValue(f) {
+    return startEdit(String(getPath(app.cfg, f.key) ?? ''), v => {
       if (!v && !f.empty) return 'Cannot be empty';
       if (f.type === 'int') {
         const n = Number(v);
@@ -1338,6 +1364,42 @@ export function startTui(app, actions, io = {}) {
       saved();
       return '';
     });
+  }
+
+  /** Lists a setting's values under its row, the one set now ticked and under the cursor. One typed by hand that the list lacks is listed too. */
+  function openMenu(f) {
+    const cur = getPath(app.cfg, f.key);
+    const options = f.values.map(value => ({ value, label: f.names?.[value] ?? (value === '' ? f.emptyShows || '(none)' : String(value)), current: value === cur }));
+    if (!f.values.includes(cur)) options.push({ value: cur, label: `${cur} (not in the list)`, current: true });
+    if (f.other) options.push({ other: true, label: 'Other… (type it)' });
+    ui.menu = { key: f.key, label: f.label, options, at: Math.max(0, options.findIndex(o => o.current)) };
+    return undefined;
+  }
+
+  /** Picks option `n` of the open menu: saved at once into the config as it is now, unless it is the value already set. Other… opens the box. */
+  function menuChoose(n) {
+    const m = ui.menu;
+    if (!m) return undefined; // a second pick in one read: the list has closed
+    ui.menu = null;
+    const f = configRows().find(x => x.key === m.key);
+    const o = m.options[n];
+    if (!f || !o) return undefined;
+    if (o.other) return typeValue(f);
+    if (o.current) return undefined;
+    setPath(app.cfg, f.key, o.value);
+    return saved();
+  }
+
+  /** A key while a menu is open: ↑ ↓ move (round at the ends), Home End jump, enter picks, esc closes. Every other key is ignored. */
+  function menuKey(k) {
+    const m = ui.menu;
+    const n = m.options.length;
+    if (k === 'up' || k === 'down') m.at = (m.at + (k === 'up' ? n - 1 : 1)) % n;
+    else if (k === 'home') m.at = 0;
+    else if (k === 'end') m.at = n - 1;
+    else if (k === 'enter') menuChoose(m.at);
+    else if (k === 'esc') ui.menu = null;
+    return undefined;
   }
 
   function needsKey(k) {
@@ -1446,6 +1508,7 @@ export function startTui(app, actions, io = {}) {
       return undefined;
     }
     if (ui.edit) return editKey(k);
+    if (ui.menu) return menuKey(k);
     if (ui.keys) {
       if (moved !== undefined) { ui.keys.scroll = Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, ui.keys.scroll + moved)); return undefined; }
       ui.keys = null;
@@ -1497,6 +1560,7 @@ export function startTui(app, actions, io = {}) {
   function onMouse({ mouse: b, x, y, release }) {
     if (b & 64) { // the wheel: 3 lines a notch of the pane under the pointer (in the Log, anywhere); elsewhere it moves the selection
       if (release || ui.edit) return undefined;
+      if (ui.menu) return menuKey(b & 1 ? 'down' : 'up');
       const same = ui.sig === frontSig() && !ui.confirm; // the frame is still what's on screen
       const id = same ? ui.frame[y]?.pane || (ui.front?.arrows ? ui.front.id : null) : null;
       if (id) { scrollPane(id, b & 1 ? 3 : -3); return undefined; }
@@ -1534,7 +1598,7 @@ export function startTui(app, actions, io = {}) {
       for (const [part, st] of [[text.slice(0, a), style], [text.slice(a, b), `${style}${ST.cursor}`], [text.slice(b), style]]) if (part) segs.push([st, part, url, hit, hover]);
       at += text.length;
     }
-    return Object.assign(segs, { bg: row.bg, hit: row.hit, footer: row.footer, pane: row.pane, main: row.main });
+    return Object.assign(segs, { bg: row.bg, hit: row.hit, footer: row.footer, pane: row.pane, main: row.main, menu: row.menu });
   }
 
   /** Copies the text a drag selected, as Claude Code does: each row's text, without its trailing spaces. */
@@ -1553,6 +1617,7 @@ export function startTui(app, actions, io = {}) {
     if (ui.edit && !ui.edit.form && !row?.footer) return undefined; // while typing, only the bar's buttons (a form's rows too)
     if (ui.notes) { ui.notes = null; return undefined; }
     if (!row || (ui.confirm && !row.footer)) return undefined;
+    if (ui.menu && !row.menu && !row.footer) { ui.menu = null; return undefined; } // a click elsewhere closes the list, nothing changed
     return hitAt(row, x)?.();
   }
   const input = k => (typeof k === 'object' ? (k.paste != null ? onPaste(k.paste) : onMouse(k)) : onKey(k));
