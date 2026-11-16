@@ -326,7 +326,7 @@ export function startTui(app, actions, io = {}) {
       }
       const stopping = r.status === 'stopping';
       const left = [cursor(i === at), [stopping ? ST.red : acc().fg, `${stopping ? '■' : spin()} `], [ST.bold, `${r.ticket}  `]];
-      const right = [[ST.grey, `  ${plural(r.prs.length, 'PR')} · ${r.reviewNo > 1 ? `re-review #${r.reviewNo}` : 'first review'} · ${dur(Date.now() - r.startedAt)} `]];
+      const right = [[ST.grey, `  ${plural(r.prs.length, 'PR')} · ${r.phase === 'checks' ? 'building and testing' : r.reviewNo > 1 ? `re-review #${r.reviewNo}` : 'first review'} · ${dur(Date.now() - r.startedAt)} `]];
       const title = trunc(stopping ? `stopping… ${r.title}` : r.title, W - width(left) - width(right) - 1);
       return onClick(spread([...left, ['', title]], right, W), pick(RUNNING, i));
     });

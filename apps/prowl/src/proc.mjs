@@ -98,17 +98,19 @@ export function lockHolder(file) {
   }
 }
 
-/** Stops a detached review and everything it started. */
-export function killTree(pid) {
+/** Stops a detached process and everything it started: asked to end (SIGTERM), or with `force` killed outright. */
+export function killTree(pid, { force = false } = {}) {
   if (!pid) return;
   if (WIN) {
     spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }).on('error', () => {});
     return;
   }
+  const sig = force ? 'SIGKILL' : 'SIGTERM';
   try {
-    process.kill(-pid, 'SIGTERM'); // detached children lead their own process group
+    process.kill(-pid, sig); // detached children lead their own process group
+    if (force) try { process.kill(pid, sig); } catch { /* already gone */ }
   } catch {
-    try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
+    try { process.kill(pid, sig); } catch { /* already gone */ }
   }
 }
 

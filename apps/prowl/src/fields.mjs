@@ -84,6 +84,7 @@ export const CONFIG_FIELDS = [
   { key: 'claude.verifierModel', label: 'Verifier model', type: 'enum', values: [...AGENT_MODELS, ''], empty: true, emptyShows: 'Claude Code default', help: "Model for the subagents that check each finding before it's posted. Claude Code default: no model is set for them, so they run on the review session's model unless your Claude Code settings name a default subagent model. A finding no reviewer investigated is always checked by a verifier launched as reviewers are. enter cycles." },
   { key: 'claude.verifierEffort', label: 'Verifier effort', type: 'enum', values: [...EFFORTS, ''], empty: true, emptyShows: 'Claude Code default', help: "Reasoning effort for the verifier subagents. Claude Code default: none is set for them, and they run at Claude Code's usual effort for subagents. enter cycles." },
   { key: 'ticketContext', label: 'Ticket text in reviews', type: 'bool', help: "on: the ticket's description (and, on Azure DevOps, its acceptance criteria) is added to the review's brief, so reviewers know the goal without signing in to the tracker. Up to about 6 KB." },
+  { key: 'reviewChecks', label: 'Build and test before reviews', type: 'bool', help: 'on: before a review, Prowl runs checks.json\'s steps for each PR (its review block, or its run commands) in a worktree of the repo, reruns a failed step at the merge base, and gives the review the results. A repo checks.json doesn\'t match, or marks "review": false, isn\'t built.' },
 
   { heading: 'Reviewer · Caps' },
   { key: 'claude.maxBudgetUsd', label: 'Spend cap per review ($)', type: 'int', min: 0, max: 100000, help: `Stops a review once it has spent this much. ${capped} 0 = no cap.` },
@@ -102,7 +103,7 @@ export const CONFIG_FIELDS = [
 
   { heading: 'Builder · Files' },
   { file: path.join(CONFIG_DIR, 'build.md'), label: 'Build rules', help: `How build sessions investigate, plan, build and work through review feedback. Your projects' CLAUDE.md files win over it. ${opens}` },
-  { file: CHECKS_PATH, label: 'Checks before push', help: 'Commands the Builder runs in a worktree before it pushes, per repo. The file has commented examples (a linter, pytest) to copy. Nothing matches: no checks. Never overwritten once edited. enter opens it.' },
+  { file: CHECKS_PATH, label: 'Checks', help: 'Commands Prowl runs in a worktree, per repo: the Builder before it pushes, and the Reviewer before a review (Build and test before reviews). The file has commented examples to copy. Nothing matches: no checks. Never overwritten once edited. enter opens it.' },
 
   { heading: 'Builder · Sessions' },
   { key: 'builder.assignedToMe', label: 'Only my tickets', type: 'bool', help: 'on: only tickets assigned to you are built. off: any ticket with the build start tag on your boards.' },

@@ -135,7 +135,7 @@ A quick build starts at once, whether the Builder is on or not, and outside `bui
 
 - **Which repos**: the GitHub links and `repo: owner/name` lines in the ticket and its linked items, and the repos of PRs that mention the key.
 - **Clones**: each is cloned into the Projects Directory if it's missing, otherwise fetched. Your checked-out branch, working tree and local branches are never touched. Each repo gets a detached worktree at `<Projects Directory>/.prowl-worktrees/work-<id>/<repo>`.
-- **Git hooks are off** in every worktree Prowl makes, and for every git command a review session runs: a repo's hook scripts (husky's, or a `post-checkout` a PR adds) don't run because Prowl checked a commit out. Hooks point at an empty folder, `~/.prowl/no-hooks`, emptied each time. A Builder session's own commits still run the repo's commit hooks. If a repo's build needs something its post-checkout hook made, add that step to the repo's commands in Checks before push.
+- **Git hooks are off** in every worktree Prowl makes, and for every git command a review session runs: a repo's hook scripts (husky's, or a `post-checkout` a PR adds) don't run because Prowl checked a commit out. Hooks point at an empty folder, `~/.prowl/no-hooks`, emptied each time. A Builder session's own commits still run the repo's commit hooks. If a repo's build needs something its post-checkout hook made, add that step to the repo's commands in Checks.
 - **More repos**: the session may ask for more (`needs-repos`). Only repos under `githubOwner` or `builder.extraOwners` are checked out, at most `builder.maxRepos` (6) per ticket. Anything else goes to Needs you, and your answer tells the session what to do instead.
 - **Base branch**: the first `builder.base` rule whose repo glob matches, naming a branch or a branch glob (the highest version-sorted match wins: `release/1.10` over `release/1.9`, and `release/2.0` over `release/2.0-rc1`). Without a rule, the base the plan names, if the remote has it; otherwise the repo's default branch.
 
@@ -273,6 +273,7 @@ Edit the file by hand whenever you like: Prowl reads it again within a second of
 | `claude.maxBudgetUsd` / `maxTurns` | `0` / `0` | **Spend cap** (USD) and **turn cap** per review, passed to Claude Code as `--max-budget-usd` and `--max-turns`. `0` = no cap |
 | `reviewTimeoutMinutes` | `0` | **Time cap per review**: stops a review running longer than this, counted from its start. `0` = no limit. A review stopped by any cap fails with the cap named (e.g. "stopped: spend cap $50") and isn't retried automatically |
 | `ticketContext` | `false` | **Ticket text in reviews**: adds the ticket's description to the review's brief (on Azure DevOps, its acceptance criteria too), trimmed to about 6 KB, so reviewers know the goal without signing in to the tracker. It is read with Prowl's own sign-in, only for a ticket about to be reviewed; if that fails, the review runs without it |
+| `reviewChecks` | `false` | **Build and test before reviews**: before a review's session starts, run `checks.json`'s steps on each PR in a worktree of its repo, rerun a failed step at the merge base, and give the review the results (see [checks.json](#checksjson)). A fork's PR is never built |
 | `quickLabels` | `true` | **Quick reviews: GitHub labels**: a quick review labels its PRs and waits on them for a re-review (see the Reviewer). `false`: no labels; a quick review runs once |
 | `reviewOwnPrs` | `false` | **Review my own PRs** (see the Reviewer, step 4) |
 | `approvals` | `true` | Approve PRs with no blocking findings. Off: comment that nothing is blocking (the *No blocking issues* template in `output.md`) and leave approving to a human. Blocking findings still request changes |
@@ -319,7 +320,7 @@ The list settings (`builder.base`, the globs, owners and MCP tools) are edited i
 
 ### checks.json
 
-Your checks before the Builder pushes, in `~/.prowl/config/checks.json` (Config, **Checks before push**). Prowl creates it with two commented-out examples, a linter and pytest, to copy, and never overwrites it once you've edited it. Comments and trailing commas are fine. If the file doesn't parse, the build waits in Needs you rather than push without checks. Keys are repos as `owner/name`, with `*` wildcards; the first match wins, and a repo nothing matches gets no checks from Prowl (the session still runs the repo's own). Each command runs in the worktree through your shell, without the tracker's tokens in its environment (it runs code a session wrote):
+Commands Prowl runs in a worktree, per repo, in `~/.prowl/config/checks.json` (Config, **Checks**): the Builder before it pushes, and the Reviewer before a review (see *Checks before a review*, below). Prowl creates it with commented-out examples to copy, and never overwrites it once you've edited it. Comments and trailing commas are fine. If the file doesn't parse, the build waits in Needs you rather than push without checks. Keys are repos as `owner/name`, with `*` wildcards; the first match wins, and a repo nothing matches gets no checks from Prowl (the session still runs the repo's own). Each command runs in the worktree through your shell, without the tracker's tokens in its environment (it runs code a session wrote):
 
 ```json
 {
@@ -329,6 +330,34 @@ Your checks before the Builder pushes, in `~/.prowl/config/checks.json` (Config,
 ```
 
 Keep team-specific steps in your own scripts and have `checks.json` call them, so the file stays a list of commands.
+
+An entry's keys: `setup` (commands run first, for both), `run` (the Builder's checks before a push; a review's too when the entry has no `review`), `review` (named steps for a review, or `false`), `env` and `timeoutMinutes` (per command, 20 by default). Every command gets `PROWL_NOTHING_TO_RUN_FILE`, a path that doesn't exist: a command that finds nothing of its kind to do creates that file and exits 0 (`[ -n "$PROWL_NOTHING_TO_RUN_FILE" ] && : > "$PROWL_NOTHING_TO_RUN_FILE"; exit 0`). It is a file and not an exit code so that no tool's own exit code can pass for it. Before a push, nothing to run is a pass.
+
+#### Checks before a review
+
+With `reviewChecks` on (Config, **Build and test before reviews**; off by default), Prowl builds and tests each PR on your machine before its review's session starts, and puts the results in the review's brief. Reviewers then know whether the PR builds and passes its tests, and a failure the PR introduced becomes a lead they must trace to code.
+
+```jsonc
+{
+  // Named review steps, run in the order written; the Builder still runs "run" before a push.
+  "my-org/service-*": {
+    "setup": ["npm ci"],
+    "review": { "build": ["npm run build"], "test": ["npm test -- --ci"], "lint": ["npx eslint ."] },
+    "run": ["npm test"]
+  },
+  // No review block: a review runs "run" as one step named "checks".
+  "my-org/tools": { "run": ["make test"] },
+  // Checked before a push, never built for a review.
+  "my-org/*": { "run": ["make test"], "review": false }
+}
+```
+
+- **Which PRs**: the PRs under review whose repo's entry gives at least one step. A repo nothing matches, or one marked `"review": false`, isn't built. **A fork's PR is never built**: the steps run the PR's own build scripts on your machine, as you. A PR whose checks can't run (a fork, a head force-pushed away, a folder that is a clone of another repo) is reviewed without results, and the brief and the Log say why.
+- **Where**: one worktree per repo, `<Projects Directory>/.prowl-worktrees/review/<repo>`, kept between reviews so a build reuses what the last one left (restored packages, build output). Two reviews of the same repo take turns. Git hooks are off for the checkout.
+- **How**: the PRs are built one at a time. Within a step the first failing command ends the step. A failed step named `setup` or `build` skips the steps after it; any other doesn't. If a step failed, Prowl checks out the PR's merge base and runs every step up to the last failed one again there, so the review can tell a failure the PR introduced from one that was already there.
+- **Environment**: your own without the trackers' tokens, the entry's `env`, and `PROWL_REPO`, `PROWL_PR`, `PROWL_HEAD_SHA`, `PROWL_BASE_SHA` (the merge base), `PROWL_CHANGED_FILES` (a file listing the PR's changed files, one per line) and, in the rerun at the merge base, `PROWL_AT_BASE=1`. A script can use them to build only the projects the PR touches.
+- **Output**: every command's whole output goes to `~/.prowl/logs/<review id>.<repo>-<n>.checks.log`, and the changed files to `…changed.txt`; both go with the review's logs (`logRetentionDays`). The brief gets each step's outcome and the end of each failed command's output, marked as data.
+- **While it runs**: Running shows the review as `building and testing`, its Activity lists each step, and the Log has a line per PR (`test failed (passes at the merge base)`). `s` stops the running command and no session starts. The time cap per review counts the checks. Quitting Prowl kills the running command; the checks run again from the start at the next launch.
 
 ## Review and build config
 

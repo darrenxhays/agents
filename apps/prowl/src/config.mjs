@@ -5,7 +5,7 @@ import path from 'node:path';
 export const HOME = process.env.PROWL_HOME || path.join(os.homedir(), '.prowl');
 export const CONFIG_PATH = path.join(HOME, 'config.json');
 export const CONFIG_DIR = path.join(HOME, 'config'); // the user's copies of the skills' config files
-export const CHECKS_PATH = path.join(CONFIG_DIR, 'checks.json'); // the user's own checks to run before Prowl pushes
+export const CHECKS_PATH = path.join(CONFIG_DIR, 'checks.json'); // the user's own checks: run before Prowl pushes, and before a review (reviewChecks)
 
 export const MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1'];
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -39,6 +39,7 @@ const DEFAULTS = {
   caffeinate: false,
   logRetentionDays: 0,
   ticketContext: false,
+  reviewChecks: false,
   quickName: 'auto',
   quickLabels: true,
   builder: {
@@ -122,6 +123,7 @@ const NOTES = {
   caffeinate: 'macOS: true keeps the Mac from idle-sleeping while a session runs.',
   logRetentionDays: 'Delete session logs older than this, and roll poller.log over past 5 MB. Reports are always kept. 0 = keep everything.',
   ticketContext: 'true: add the ticket\'s description (and Azure DevOps acceptance criteria) to each review\'s brief.',
+  reviewChecks: "true: build and test each PR with checks.json before its review, and give the review the results. A fork's PR is never built.",
   quickName: 'How a quick review or quick build without a ticket is named: "auto" (a short model call names it from the paste), "ask" (you type the name), or "number" (QUICK#n only).',
   quickLabels: 'true: a quick review labels its PRs In Review, then Reviewed, on GitHub, and re-reviews them once they are labelled Ready for Review. false: no labels; a quick review runs once.',
   builder: 'The Builder: builds tickets tagged to start, opens their PRs, then follows them through review. How it builds is in config/build.md.',
@@ -270,11 +272,22 @@ export function parseJsonc(text) {
   return JSON.parse(out);
 }
 
-const CHECKS_TEMPLATE = `// Checks before push: commands the Builder runs in a repo's worktree before Prowl pushes its commits.
+const CHECKS_TEMPLATE = `// Checks: commands Prowl runs in a worktree of a repo. The Builder runs them before Prowl pushes its commits; with
+// Build and test before reviews on, the Reviewer runs them on each PR before its review and gives the review the results.
 // Each key is a repo glob (owner/name, * wildcards); the first one that matches a repo is used, and a repo
-// nothing matches gets no checks. "setup" runs first, then "run"; the first command that fails stops the push
-// and gives the session one more turn with its output. Optional: "env" (extra environment variables) and
-// "timeoutMinutes" per command (20 by default). Prowl never changes this file once you have edited it.
+// nothing matches gets no checks.
+//   "setup": commands run first, for both.
+//   "run": the Builder's checks before a push. The first command that fails stops the push and gives the session
+//     one more turn with its output. A review runs them too, as one step named "checks", unless there is a "review".
+//   "review": named steps for a review, each a list of commands, run in the order written (build, test, lint, or
+//     any names). A failed setup or build step skips the steps after it; a failed step is run again at the PR's
+//     merge base. false: the repo is checked before a push, never built for a review. A fork's PR is never built.
+//   "env": extra environment variables. "timeoutMinutes": per command (20 by default).
+// Every command also gets PROWL_NOTHING_TO_RUN_FILE: a command that finds nothing of its kind to do creates that
+// file and exits 0 ([ -n "$PROWL_NOTHING_TO_RUN_FILE" ] && : > "$PROWL_NOTHING_TO_RUN_FILE"; exit 0). A review's
+// commands get PROWL_REPO, PROWL_PR, PROWL_HEAD_SHA, PROWL_BASE_SHA (the merge base), PROWL_CHANGED_FILES (a file
+// listing the PR's changed files, one per line) and, in the rerun at the merge base, PROWL_AT_BASE=1.
+// Prowl never changes this file once you have edited it.
 // To use an example, remove the // in front of its lines and change the glob to match your repos.
 {
   // A linter, for JavaScript repos:
@@ -289,7 +302,18 @@ const CHECKS_TEMPLATE = `// Checks before push: commands the Builder runs in a r
   //   "run": ["python -m pytest -q"],
   //   "env": { "PYTHONDONTWRITEBYTECODE": "1" },
   //   "timeoutMinutes": 30
-  // }
+  // },
+
+  // Named steps for reviews; the Builder still runs "run" before a push:
+  // "my-org/service-*": {
+  //   "setup": ["npm install"],
+  //   "review": { "build": ["npm run build"], "test": ["npm test -- --ci"], "lint": ["npx eslint ."] },
+  //   "run": ["npm test"],
+  //   "env": { "CI": "1" }
+  // },
+
+  // Checked before a push, never built for a review:
+  // "my-org/*": { "run": ["make test"], "review": false }
 }
 `;
 

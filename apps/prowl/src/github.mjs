@@ -102,6 +102,11 @@ export async function headSha(pr) {
   return (await run('gh', ['api', `repos/${pr.repo}/pulls/${pr.number}`, '--jq', '.head.sha'])).trim();
 }
 
+/** A PR's base branch, and whether its head is in a fork: { base, fork }. */
+export async function prBase(pr) {
+  return JSON.parse(await run('gh', ['api', `repos/${pr.repo}/pulls/${pr.number}`, '--jq', '{base: .base.ref, fork: (.head.repo.full_name != .base.repo.full_name)}']));
+}
+
 /**
  * True once the PR needs no approval from you: someone approved the commit Prowl stamped or the head now, or it
  * was merged or closed. Prowl itself never approves with Approve PRs off or on your own PR, so any approval is a human's.

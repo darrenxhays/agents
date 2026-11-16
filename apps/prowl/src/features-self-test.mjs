@@ -4,9 +4,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { CONFIG_PATH, HOME, loadConfig, newSettings } from './config.mjs';
+import { killChecks, reviewSteps, runChecks, runCommand, runSteps } from './checks.mjs';
 import { addWorktree, noHooks, noHooksEnv } from './git.mjs';
+import { baseSteps, checkPlan, checksLine, prChecks } from './reviewer/checks.mjs';
+import { createReviewer } from './reviewer/reviewer.mjs';
 import { MODELS } from './config.mjs';
-import { agentModel, buildPrompt, createReview, finalize, reviewArgs, reviewRoles, rolesWarning } from './reviewer/reviews.mjs';
+import { agentModel, buildPrompt, CHECKS_SLOT, createReview, fenced, fillChecks, finalize, reviewArgs, reviewRoles, rolesWarning } from './reviewer/reviews.mjs';
 import { readActivity, sessionEnded } from './sessions.mjs';
 
 const WIN = process.platform === 'win32';
@@ -104,6 +107,246 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
     return createReview({ ...base, ...cfgOver, claude: { ...base.claude, ...cfgOver.claude } },
       { tracker: 'ado', ticket: { key: 'AB#42', title: 'Thing', url: 'https://dev.azure.com/o/p/_workitems/edit/42', ref: null }, prs: [{ url: 'https://github.com/o/a/pull/1', repo: 'o/a', number: 1 }], ...opts });
   };
+
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const prOf = (n, extra = {}) => ({ url: `https://github.com/octo-org/r${n}/pull/${n}`, title: `PR ${n}`, number: n, repo: `octo-org/r${n}`, author: 'teammate', draft: false, state: 'open', headSha: `sha${n}`, labels: [], ...extra });
+  /**
+   * A Reviewer over fakes: `open` are the open PRs GitHub's search finds, `tickets` what the board search returns.
+   * Resolves with { side, seen: { claims, retags, started, launched, logs }, app, gh, tracker }.
+   */
+  function reviewerOver({ open = [], tickets = null, cfgOver = {}, runs = [], dry = false, deps = {}, ghOver = {}, trackerOver = {}, board = 'ado' } = {}) {
+    const cfg = { ...loadConfig(), githubOwner: 'octo-org', workDir: tmp, taskBoard: board, ...cfgOver };
+    const seen = { claims: [], retags: [], started: [], launched: [], logs: [], warns: [] };
+    const ticket = { key: 'AB#42', title: 'Thing', url: 'https://dev.azure.com/o/Shop/_workitems/edit/42', tags: [cfg.tags.trigger], rev: 3, ref: { org: 'https://dev.azure.com/o', project: 'Shop', id: 42 } };
+    const app = { cfg, me: 'octocat', on: true, sideOn() { return this.on; }, tracker: () => tracker, boards: () => [{ project: 'Shop', team: 'Web' }], dryRun: () => dry };
+    const tracker = {
+      name: 'Azure DevOps', boardLabel: b => `${b.project} / ${b.team}`,
+      findTickets: async () => ({ tickets: tickets || [ticket], variants: [cfg.tags.trigger] }),
+      claim: async (c, t, drop, add) => { seen.claims.push(add); },
+      retag: async (c, ref, drop, add) => { seen.retags.push(add); },
+      ticketText: async () => '', lookup: async (c, key) => ({ ...ticket, key }), current: async (c, t) => t,
+      ...trackerOver,
+    };
+    const gh = { me: async () => 'octocat', openPrs: async () => open, headSha: async pr => `sha${pr.number}`, postComment: async () => '', humanApproved: async () => false, cloneMissing: async () => [],
+      prByRef: async ref => open.find(p => p.repo === ref.repo && p.number === ref.number) || (() => { throw new Error('HTTP 404'); })(), reviewedSince: async () => true, isOpen: async () => true, ...ghOver };
+    const labelCalls = [];
+    const labels = { own() {}, set: (...a) => labelCalls.push(a), refused: () => '', pending: () => false };
+    const side = createReviewer(app, { log: (level, msg) => { if (seen.logs.at(-1) === msg) return false; seen.logs.push(msg); if (level === 'warn' || level === 'error') seen.warns.push(msg); return true; }, forget() {}, hoot() {}, appDir, trackers: { ado: tracker, jira: tracker }, github: gh, labels, autoName: async () => 'Named', ...deps });
+    side.state = { runs: structuredClone(runs), failures: {} };
+    let n = 0;
+    const fake = (c, opts) => ({ id: `AB42-${++n}`, tracker: opts.tracker, ref: opts.ticket.ref, ticket: opts.ticket.key, title: opts.ticket.title, ticketUrl: opts.ticket.url, prs: opts.prs, contextPrs: opts.approvedPrs || [], reviewNo: (opts.prior?.reviewNo || 0) + 1, priorId: opts.prior?.id || null,
+      status: 'running', startedAt: Date.now(), pid: null, logPath: path.join(tmp, `fake-${n}.ndjson`), reportPath: path.join(tmp, `fake-${n}.md`), reviewedHeads: opts.heads || {}, approved: {}, ...(opts.quick && { quick: true }), ...(opts.checking && { phase: 'checks' }) });
+    side.startReview = (c, dir, opts) => { seen.started.push(opts); return fake(c, opts); };
+    side.createReview = (c, opts) => { seen.started.push(opts); return fake(c, opts); };
+    side.launchReview = (c, dir, run) => { seen.launched.push(structuredClone(run.checks || [])); delete run.phase; };
+    return { side, seen, app, gh, tracker, ticket, labelCalls };
+  }
+
+  // ---- C-08: build and test before reviews ----
+  {
+    assert.deepEqual(reviewSteps({ setup: ['s'], run: ['r'], review: { build: ['b'], test: ['t1', 't2'], lint: [] } }), [['setup', ['s']], ['build', ['b']], ['test', ['t1', 't2']]]);
+    assert.deepEqual(reviewSteps({ setup: ['s'], run: ['make test'] }), [['setup', ['s']], ['checks', ['make test']]]);
+    assert.deepEqual([reviewSteps({ run: ['x'], review: false }), reviewSteps({ setup: ['s'] }), reviewSteps(null)], [[], [], []]);
+    const all = [['setup', ['s']], ['build', ['b']], ['test', ['t']], ['lint', ['l']]];
+    const failedAt = name => all.map(([n2]) => ({ name: n2, status: n2 === name ? 'failed' : 'passed' }));
+    assert.deepEqual(baseSteps(all, failedAt('test')).map(x => x[0]), ['setup', 'build', 'test']);
+    assert.deepEqual(baseSteps(all, failedAt('lint')).map(x => x[0]), ['setup', 'build', 'test', 'lint']);
+    assert.deepEqual(baseSteps([['compile', ['c']], ['test', ['t']]], [{ name: 'compile', status: 'passed' }, { name: 'test', status: 'failed' }]).map(x => x[0]), ['compile', 'test'], 'a passed step before a failed one is rerun');
+    const checks = { 'octo-org/r1': { review: { build: ['b'] } }, 'octo-org/r2': { run: ['x'], review: false } };
+    assert.deepEqual(checkPlan(checks, [prOf(1), prOf(2), prOf(3)]).map(x => x.pr.number), [1], 'a review block: planned; "review": false and an unmatched repo: not');
+    if (!WIN) {
+      const idle = '[ -n "$PROWL_NOTHING_TO_RUN_FILE" ] && : > "$PROWL_NOTHING_TO_RUN_FILE"; exit 0';
+      let out = '';
+      let r = await runSteps([['build', ['echo built']], ['test', ['echo "env=$MY_VAR"; exit 3', 'echo never']], ['lint', ['true']]], tmp, { MY_VAR: 'yes' }, 20, undefined, t => { out += t; });
+      assert.deepEqual(r.map(x => x.status), ['passed', 'failed', 'passed']);
+      assert.ok(r[1].command === 'echo "env=$MY_VAR"; exit 3' && r[1].tail.includes('env=yes') && !out.includes('never'), 'the failed command and a tail that shows the env');
+      assert.ok(out.includes('\n[build] $ echo built\nbuilt\n[build] passed\n') && out.includes('env=yes\n[test] failed\n'), `the step log: ${JSON.stringify(out)}`);
+      r = await runSteps([['setup', ['true']], ['build', ['false']], ['test', ['true']], ['lint', ['true']]], tmp, {});
+      assert.deepEqual(r.map(x => [x.status, x.after]), [['passed', undefined], ['failed', undefined], ['skipped', 'build'], ['skipped', 'build']]);
+      const gone = new AbortController();
+      gone.abort();
+      assert.deepEqual(await runSteps([['build', ['true']]], tmp, {}, 20, gone.signal), [{ name: 'build', status: 'skipped', after: 'stopped' }]);
+      assert.deepEqual(await runCommand('true', tmp, {}, 1000, { signal: gone.signal }), { ok: false, tail: '(stopped)' });
+      // Nothing to run: a file, not an exit code.
+      const one = await runCommand(idle, tmp, {}, 10_000);
+      assert.ok(one.ok && one.nothing && !fs.readdirSync(os.tmpdir()).some(f => f.startsWith(`prowl-nothing-${process.pid}-`)), 'nothing to run, and the temp file is removed');
+      assert.ok(!(await runCommand('exit 78', tmp, {}, 10_000)).ok, 'exit 78 is a failure like any other');
+      const wroteThenFailed = await runCommand(': > "$PROWL_NOTHING_TO_RUN_FILE"; exit 1', tmp, {}, 10_000);
+      assert.ok(!wroteThenFailed.ok && !wroteThenFailed.nothing);
+      out = '';
+      r = await runSteps([['build', [idle]], ['test', [idle, 'true']], ['lint', [idle]]], tmp, {}, 20, undefined, t => { out += t; });
+      assert.deepEqual(r.map(x => x.status), ['nothing', 'passed', 'nothing'], 'a build with nothing to run skips nothing');
+      assert.ok(out.includes(`[build] $ ${idle}\n[build] nothing to run`) && out.includes('\n[test] passed'));
+      assert.deepEqual(await runChecks({ run: [idle] }, tmp), { ok: true }, "the Builder's checks count nothing to run as a pass");
+      // Stopping: asked to end, then killed.
+      let ac = new AbortController();
+      let t0 = Date.now();
+      let pending = runCommand('sleep 30', tmp, {}, 60_000, { signal: ac.signal });
+      await sleep(150);
+      ac.abort();
+      assert.ok(!(await pending).ok && Date.now() - t0 < 5000, 'aborting stops a sleeping command within seconds');
+      ac = new AbortController();
+      t0 = Date.now();
+      pending = runCommand("trap '' TERM; sleep 30 & wait; sleep 30", tmp, {}, 60_000, { signal: ac.signal, graceMs: 300 });
+      await sleep(300);
+      ac.abort();
+      assert.ok(!(await pending).ok && Date.now() - t0 < 8000, 'a command that ignores SIGTERM is killed after the grace period');
+      t0 = Date.now();
+      const late = await runCommand("trap '' TERM; sleep 30 & wait; sleep 30", tmp, {}, 300, { graceMs: 300 });
+      assert.ok(late.timedOut && !late.ok && Date.now() - t0 < 8000, 'and on a timeout too');
+      t0 = Date.now();
+      pending = runCommand("trap '' TERM; while :; do sleep 1; done", tmp, {}, 60_000, { graceMs: 60_000 });
+      await sleep(300);
+      killChecks();
+      assert.ok(!(await pending).ok && Date.now() - t0 < 8000, 'killChecks() kills a running check outright');
+      // A redirected child that ignores SIGTERM holds none of Prowl's pipes: it is gone after the stop.
+      const pidFile = path.join(tmp, 'child.pid');
+      ac = new AbortController();
+      pending = runCommand(`(trap '' TERM; exec sh -c 'echo $$ > "${pidFile}"; exec sleep 30' > /dev/null 2>&1) & wait`, tmp, {}, 60_000, { signal: ac.signal, graceMs: 200 });
+      for (let i = 0; i < 50 && !fs.existsSync(pidFile); i++) await sleep(50);
+      ac.abort();
+      await pending;
+      await sleep(300);
+      const childPid = Number(fs.readFileSync(pidFile, 'utf8'));
+      let childAlive = true;
+      try { process.kill(childPid, 0); } catch { childAlive = false; }
+      assert.ok(childPid > 0 && !childAlive, 'a redirected child that ignored the stop is gone');
+    }
+    // One PR's checks, with fake git, GitHub and step runner.
+    const calls = [];
+    const stepRuns = [];
+    const head = 'a'.repeat(40);
+    const mb = 'b'.repeat(40);
+    const fakes = (over = {}) => ({
+      git: async (dir, ...a) => { calls.push(a.join(' ')); return a[0] === 'merge-base' ? `${mb}\n` : a[0] === 'diff' ? 'src/a.js\n' : ''; },
+      serial: (key, fn) => { calls.push(`lock ${path.basename(key)}`); return fn(); },
+      succeeds: async (dir, ...a) => { calls.push(a.join(' ')); return true; },
+      addWorktree: async (clone, wt, sha) => { calls.push(`worktree ${sha}`); },
+      prBase: async () => ({ base: 'main', fork: false }),
+      clone: async repo => path.join(tmp, repo.split('/')[1]),
+      runSteps: async (steps, cwd, env, minutes) => {
+        stepRuns.push({ steps: steps.map(x => x[0]), cwd, env, minutes });
+        return steps.map(([name]) => (name === 'test' ? (env.PROWL_AT_BASE ? { name, status: 'nothing' } : { name, status: 'failed', command: 't', tail: 'boom' }) : { name, status: 'passed' }));
+      },
+      ...over,
+    });
+    const spec = { setup: ['s'], review: { build: ['b'], test: ['t'], lint: ['l'] }, env: { CI: '1' }, timeoutMinutes: 7 };
+    const pr7 = prOf(7, { repo: 'octo-org/web' });
+    const prefix = path.join(tmp, 'run-1');
+    const res = await prChecks({ workDir: tmp }, { pr: pr7, spec }, head, prefix, { deps: fakes() });
+    assert.deepEqual(calls, ['lock web', 'lock web', 'fetch origin pull/7/head main', `cat-file -e ${head}^{commit}`, `worktree ${head}`, `merge-base ${head} origin/main`, `diff --name-only ${mb} ${head}`, `worktree ${mb}`], 'the git calls, in order');
+    assert.deepEqual(stepRuns.map(x => x.steps), [['setup', 'build', 'test', 'lint'], ['setup', 'build', 'test']], 'the base run: every step up to the last failed one');
+    assert.ok(stepRuns.every(x => x.cwd === path.join(tmp, '.prowl-worktrees', 'review', 'web') && x.minutes === 7));
+    const env0 = stepRuns[0].env;
+    assert.deepEqual([env0.CI, env0.PROWL_REPO, env0.PROWL_PR, env0.PROWL_HEAD_SHA, env0.PROWL_BASE_SHA, env0.PROWL_CHANGED_FILES, env0.PROWL_AT_BASE, stepRuns[1].env.PROWL_AT_BASE],
+      ['1', 'octo-org/web', '7', head, mb, `${prefix}.web-7.changed.txt`, undefined, '1']);
+    assert.equal(res.steps.find(x => x.name === 'test').atBase, 'passed', 'nothing to run at the base: the failure is the PR\'s');
+    assert.ok(fs.readFileSync(`${prefix}.web-7.checks.log`, 'utf8').includes('The failed steps again, at the merge base') && fs.readFileSync(`${prefix}.web-7.changed.txt`, 'utf8') === 'src/a.js\n');
+    assert.equal(checksLine(res), `octo-org/web#7: setup passed, build passed, test failed (passes at the merge base), lint passed · output: ${prefix}.web-7.checks.log`);
+    calls.length = 0;
+    stepRuns.length = 0;
+    await prChecks({ workDir: tmp }, { pr: pr7, spec }, head, prefix, { deps: fakes({ runSteps: async steps => { stepRuns.push(1); return steps.map(([name]) => ({ name, status: 'passed' })); } }) });
+    assert.ok(stepRuns.length === 1 && calls.filter(c => c.startsWith('worktree')).length === 1, 'all green: one step run, no base checkout');
+    calls.length = 0;
+    await assert.rejects(prChecks({ workDir: tmp }, { pr: pr7, spec }, head, prefix, { deps: fakes({ succeeds: async () => false }) }), /isn't on GitHub any more/);
+    assert.ok(!calls.some(c => c.startsWith('worktree')), 'a head that is gone: the kept worktree is not touched');
+    calls.length = 0;
+    await assert.rejects(prChecks({ workDir: tmp }, { pr: pr7, spec }, head, prefix, { deps: fakes({ prBase: async () => ({ base: 'main', fork: true }) }) }), /in a fork/);
+    assert.deepEqual(calls, [], "a fork's PR: nothing runs");
+    assert.equal(checksLine({ label: 'o/r#1', error: 'x' }), "o/r#1: checks couldn't run (x)");
+    // The prompt's slot.
+    const first = promptCases.first;
+    const slotted = buildPrompt({ ...first, checking: true });
+    assert.ok(slotted.includes(`\n\n${CHECKS_SLOT}\n\n`));
+    assert.equal(fillChecks(slotted, []), buildPrompt(first), 'no results: the prompt is as without the slot');
+    const results = [{ url: 'https://github.com/o/a/pull/1', label: 'o/a#1', head, mergeBase: mb, log: '/l/1.checks.log',
+      steps: [{ name: 'build', status: 'passed' }, { name: 'test', status: 'failed', command: 'echo $& $1', tail: 'tail $1 $&', atBase: 'failed', baseTail: 'base tail' }, { name: 'lint', status: 'nothing' }] },
+    { url: 'https://github.com/o/b/pull/2', label: 'o/b#2', error: 'its branch is in a fork' },
+    { url: 'https://github.com/o/c/pull/3', label: 'o/c#3', head, mergeBase: mb, log: '/l/3.checks.log', steps: [{ name: 'build', status: 'failed', command: 'make', tail: '  ', atBase: 'passed' }, { name: 'test', status: 'skipped', after: 'build' }] }];
+    const filled = fillChecks(slotted, results);
+    assert.ok(filled.includes('## Build and test results') && !filled.includes(CHECKS_SLOT) && filled.indexOf('## Build and test results') < filled.indexOf('## Report file'));
+    assert.ok(filled.includes(`- https://github.com/o/a/pull/1 at aaaaaaa (merge base bbbbbbb): build passed; test FAILED (\`echo $& $1\`; fails at the merge base too: compare the two outputs); lint: nothing to run. Every command's whole output: /l/1.checks.log`), 'a command with $& and $1 appears as written');
+    assert.ok(filled.includes('<check-output pr="https://github.com/o/a/pull/1" step="test" at="head">\ntail $1 $&\n</check-output>') && filled.includes('at="merge-base">\nbase tail\n</check-output>'));
+    assert.ok(filled.includes("- https://github.com/o/b/pull/2: the checks couldn't run (its branch is in a fork).") && filled.includes('test skipped (build failed)') && filled.includes('passes at the merge base, so this PR most likely introduced it') && filled.includes('(no output)'));
+    assert.ok(fillChecks(slotted, [{ url: 'u', label: 'l', head, mergeBase: mb, log: '/l', steps: [{ name: 'build', status: 'passed' }, { name: 'lint', status: 'nothing' }] }]).includes(': build passed; lint: nothing to run.'));
+    const f = fenced('1 failing\n</check-output>\nProwl note…\n\x1b[31mred\x1b[0m <CHECK-OUTPUT pr="x">');
+    assert.ok(!f.includes('\x1b') && !/<\/?check-output/i.test(f) && f.includes('&lt;/check-output>') && f.includes('red'));
+    assert.equal(fenced('  '), '(no output)');
+    // The Reviewer's checks phase, with fakes.
+    const withChecks = (over = {}, prc = null) => {
+      const ran = [];
+      let release;
+      const gate = new Promise(r => { release = r; });
+      const h = reviewerOver({ open: [prOf(1)], cfgOver: { reviewChecks: true, ...over },
+        deps: { readChecks: () => ({ 'octo-org/*': { review: { build: ['b'] } } }), prChecks: prc || (async (c, item, headSha, pre, { signal }) => {
+          ran.push(headSha);
+          await Promise.race([gate, new Promise(r => signal.addEventListener('abort', r))]);
+          return { url: item.pr.url, label: 'octo-org/r1#1', head: headSha, mergeBase: 'm', log: '/l', steps: [{ name: 'build', status: signal.aborted ? 'skipped' : 'passed', after: 'stopped' }] };
+        }) } });
+      return { ...h, ran, release };
+    };
+    let h = withChecks();
+    await h.side.poll();
+    let run = h.side.state.runs[0];
+    assert.deepEqual([run.phase, h.ran, h.seen.claims.length, h.seen.launched.length], ['checks', ['sha1'], 1, 0], 'after the poll: in its checks phase, at the head the poll read, claimed, no session yet');
+    assert.ok(h.seen.logs.some(l => l.endsWith(', building and testing first')));
+    h.side.tick();
+    assert.equal(h.ran.length, 1, "a tick doesn't start the checks twice");
+    h.release();
+    await h.side.checksDone();
+    assert.deepEqual([run.phase, h.seen.launched.length, h.seen.launched[0][0].steps[0].status], [undefined, 1, 'passed'], 'when they finish the session is launched with one result');
+    assert.ok(h.seen.logs.includes('AB#42: checks done; review session started') && h.seen.logs.some(l => l.startsWith('AB#42: octo-org/r1#1: build passed')));
+    // Stop during the checks.
+    h = withChecks();
+    await h.side.poll();
+    run = h.side.state.runs[0];
+    const building = run._building;
+    h.side.stop(run);
+    assert.equal(run.status, 'stopping');
+    await building;
+    await sleep(0);
+    h.side.tick();
+    await sleep(10);
+    assert.deepEqual([run.status, h.seen.launched.length, h.seen.retags], ['stopped', 0, ['']], 'stopped: no launch, the tag released');
+    // A saved run left in its checks phase: the next tick runs its checks again, then launches.
+    h = withChecks();
+    h.side.state.runs.push({ id: 'saved', ticket: 'AB#42', title: 'Thing', prs: [prOf(1)], phase: 'checks', status: 'running', startedAt: Date.now(), pid: null, logPath: path.join(tmp, 'saved.ndjson'), reviewedHeads: {} });
+    h.side.tick();
+    h.release();
+    await h.side.checksDone();
+    assert.deepEqual([h.ran, h.seen.launched.length], [['sha1'], 1]);
+    // The setting off: straight to the session.
+    h = withChecks({ reviewChecks: false });
+    await h.side.poll();
+    assert.deepEqual([h.side.state.runs[0].phase, h.ran.length, h.seen.started.length], [undefined, 0, 1]);
+    // A restored run already past the time cap: failed with the cap named, no check and no launch.
+    h = withChecks({ reviewTimeoutMinutes: 5 });
+    h.side.state.runs.push({ id: 'late', tracker: 'ado', ticket: 'AB#42', title: 'Thing', prs: [prOf(1)], phase: 'checks', status: 'running', startedAt: Date.now() - 6 * 60_000, pid: null, logPath: path.join(tmp, 'late.ndjson'), reportPath: path.join(tmp, 'late.md'), reviewedHeads: {} });
+    await h.side.settle();
+    await h.side.checksDone();
+    run = h.side.state.runs[0];
+    assert.deepEqual([run.status, run.error, h.ran.length, h.seen.launched.length], ['failed', 'stopped: time cap 5 min', 0, 0]);
+    // A cap that runs out during the checks, with no tick: stopping, then failed, no launch.
+    h = withChecks({ reviewTimeoutMinutes: 5 });
+    h.side.state.runs.push({ id: 'soon', tracker: 'ado', ticket: 'AB#42', title: 'Thing', prs: [prOf(1)], phase: 'checks', status: 'running', startedAt: Date.now() - 5 * 60_000 + 60, pid: null, logPath: path.join(tmp, 'soon.ndjson'), reportPath: path.join(tmp, 'soon.md'), reviewedHeads: {} });
+    await h.side.settle();
+    await h.side.checksDone();
+    run = h.side.state.runs[0];
+    assert.deepEqual([run.status, run.error, h.ran.length, h.seen.launched.length], ['failed', 'stopped: time cap 5 min', 1, 0]);
+    // A cap turned off during the checks: not stopped.
+    h = withChecks({ reviewTimeoutMinutes: 5 });
+    h.side.state.runs.push({ id: 'off', tracker: 'ado', ticket: 'AB#42', title: 'Thing', prs: [prOf(1)], phase: 'checks', status: 'running', startedAt: Date.now() - 5 * 60_000 + 60, pid: null, logPath: path.join(tmp, 'off.ndjson'), reportPath: path.join(tmp, 'off.md'), reviewedHeads: {} });
+    await h.side.settle();
+    h.app.cfg.reviewTimeoutMinutes = 0;
+    await sleep(120);
+    h.release();
+    await h.side.checksDone();
+    assert.deepEqual([h.side.state.runs[0].status, h.seen.launched.length], ['running', 1]);
+    // A checks.json that doesn't parse: a warning, and the review starts without checks.
+    h = reviewerOver({ open: [prOf(1)], cfgOver: { reviewChecks: true }, deps: { readChecks: () => { throw new Error("checks.json isn't valid JSON (x)"); } } });
+    await h.side.poll();
+    assert.ok(!h.side.state.runs[0].phase && h.seen.warns.some(l => l.includes("isn't valid JSON")));
+  }
 
   // ---- C-06: verifier model and effort ----
   {

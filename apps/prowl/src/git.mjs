@@ -17,6 +17,22 @@ export const sameRepo = (url, repo) => {
   return u.endsWith(`/${repo.toLowerCase()}`) || u.endsWith(`:${repo.toLowerCase()}`);
 };
 
+/**
+ * The user's clone of `repo` (owner/name) in `workDir`, cloned first when it is missing (`onClone(repo, target)` is
+ * told before). Throws when that folder is a clone of another repo. For reading: the Builder's ensureClone() also
+ * checks where the clone pushes.
+ */
+export async function cloneFor(repo, workDir, onClone = () => {}) {
+  const target = path.join(workDir, repo.split('/')[1]);
+  if (!fs.existsSync(target)) {
+    onClone(repo, target);
+    await run('gh', ['repo', 'clone', repo, target], { timeoutMs: 3_600_000 }); // a big repo on a slow line: an hour, not the usual 10 minutes
+  }
+  const origin = (await git(target, 'remote', 'get-url', 'origin')).trim();
+  if (!sameRepo(origin, repo)) throw new Error(`${target} is a clone of ${origin}, not ${repo}`);
+  return target;
+}
+
 const locks = new Map(); // clone folder -> the promise of its last fetch or worktree change
 /** Runs `fn` after every earlier call for the same clone has finished: git can't fetch or add worktrees in parallel. */
 export function serial(clone, fn) {

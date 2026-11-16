@@ -43,6 +43,7 @@ const { HOME, configChanged, loadConfig, saveConfig, seedChecks } = await import
 const TRACKERS = { ado: await import('./src/ado.mjs'), jira: await import('./src/jira.mjs') };
 const secrets = await import('./src/secrets.mjs');
 const { lockHolder } = await import('./src/proc.mjs');
+const { killChecks } = await import('./src/checks.mjs');
 const { createReviewer } = await import('./src/reviewer/reviewer.mjs');
 const { saveState } = await import('./src/reviewer/reviews.mjs');
 const { createBuilder } = await import('./src/builder/builder.mjs');
@@ -168,6 +169,8 @@ if (app.cfg.autoUpdate && !process.env.PROWL_UPDATED) {
 }
 fs.writeFileSync(LOCK, String(process.pid));
 process.on('exit', () => { try { if (Number(fs.readFileSync(LOCK, 'utf8')) === process.pid) fs.unlinkSync(LOCK); } catch { /* gone */ } });
+// A build left running would collide with the same checks run again next launch: every check command is killed outright.
+process.on('exit', () => { reviewer.abortChecks(); killChecks(); });
 
 // Fix my PRs was removed in 2.12.0: stop its sessions and move its settings aside, once.
 let migrated = [];
@@ -230,6 +233,7 @@ if (ONCE) {
   if (app.notes) console.log(`${update.notesText(app.notes)}\n`);
   if (app.sideOn('reviewer')) await reviewer.settle();
   await shell.pollOnce();
+  await reviewer.checksDone(); // Build and test before reviews: the checks this poll started, then their sessions
   await builder.drain(); // the Builder's due steps; sessions it starts keep running in the background
   await labels.drain(); // label writes due on GitHub; one that fails is retried on the next launch
   process.exit(0);

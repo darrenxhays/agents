@@ -837,7 +837,7 @@ export function createBuilder(app, deps) {
     try {
       checks = readChecks();
     } catch (e) {
-      throw new NeedsYou('checks', `${e.message}. Fix it (Config, Checks before push), then enter checks again.`, { retry: w.step }); // never push unchecked: enter runs this step again
+      throw new NeedsYou('checks', `${e.message}. Fix it (Config, Checks), then enter checks again.`, { retry: w.step }); // never push unchecked: enter runs this step again
     }
     for (const rec of recs) {
       const spec = matchChecks(checks, rec.repo);

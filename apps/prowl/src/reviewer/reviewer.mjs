@@ -1,7 +1,7 @@
 // The Reviewer: polls the boards for tickets tagged for review and runs Claude Code's prowl-review skill on their open,
 // non-draft GitHub PRs. src/shell.mjs drives poll() and tick(); the Builder never reads its state (state.json).
 import path from 'node:path';
-import { saveConfig, writeJson } from '../config.mjs';
+import { CHECKS_PATH, readChecks, saveConfig, writeJson } from '../config.mjs';
 import * as github from '../github.mjs';
 import { createLabels, matching, refusal } from '../labels.mjs';
 import { norm, tagMatches } from '../match.mjs';
@@ -9,6 +9,7 @@ import { acceptOffer, offerFor } from '../offers.mjs';
 import { autoName, cleanName, notARef, parsePaste, ticketKey } from '../paste.mjs';
 import { fill, outputTemplate } from '../templates.mjs';
 import * as rv from './reviews.mjs';
+import { checkPlan, checksFiles, checksLine, prChecks } from './checks.mjs';
 
 /**
  * The Reviewer side. `deps`: { log(level, msg, key), forget(key), hoot(text, mood), appDir, trackers, github, labels (the
@@ -43,6 +44,101 @@ export function createReviewer(app, deps) {
   // Tags this side sets itself are matched exactly; only the trigger tag is matched loosely.
   const ours = t => [cfg().tags.inProgress, cfg().tags.done].some(x => norm(x) === norm(t));
   const isTrigger = t => !ours(t) && tagMatches(t, cfg().tags.trigger, cfg().tagMatchMaxTypos);
+
+  // ---- Build and test before reviews: a review's checks phase, run here before its session starts ----
+
+  /** The PRs of `prs` to build and test before their review (Build and test before reviews, and a checks.json entry with a step). */
+  function checksFor(prs) {
+    if (!cfg().reviewChecks) return [];
+    try {
+      return checkPlan((deps.readChecks || readChecks)(), prs);
+    } catch (e) { // a checks.json that doesn't parse: the review runs without checks
+      log('warn', `${e.message}: reviews start without building and testing their PRs until ${CHECKS_PATH} is fixed`, 'checks-file');
+      return [];
+    }
+  }
+
+  /**
+   * Starts a review of `opts.prs`: straight to its session, or, when its PRs are to be built and tested first, as a
+   * run in its checks phase (no session yet), which runChecks() takes on once the run is recorded.
+   */
+  function begin(c, opts) {
+    if (!checksFor(opts.prs).length) return (side.startReview || rv.startReview)(c, appDir, opts);
+    return (side.createReview || rv.createReview)(c, { ...opts, checking: true });
+  }
+  const note = (run, text) => { (run._activity ??= []).push({ text }); };
+
+  /**
+   * A review's checks phase: builds and tests its PRs one at a time, in this process, then starts its session with
+   * the results. The plan is read again now, so the setting turned off while a review waits just starts its session.
+   * Stopped (by you, or the time cap), no session starts: tick() settles the review once the running check has ended.
+   */
+  function runChecks(run) {
+    if (run._building) return run._building;
+    run._abort = new AbortController();
+    let capTimer;
+    // The time cap counts the checks, and must hold with no once-a-second tick too (--once): the limit is read
+    // again when the timer fires, as it can be raised or turned off meanwhile.
+    const armCap = () => {
+      const minutes = cfg().reviewTimeoutMinutes;
+      if (!(minutes > 0)) return;
+      capTimer = setTimeout(() => {
+        if (run.phase !== 'checks' || run.status !== 'running') return;
+        if (rv.overdue(run, cfg())) stopOverdue(run);
+        else armCap();
+      }, Math.max(0, run.startedAt + minutes * 60_000 - Date.now()) + 1);
+    };
+    run._building = (async () => {
+      if (rv.overdue(run, cfg())) return stopOverdue(run); // restored after its time ran out: no check runs
+      armCap();
+      const c = cfg();
+      const results = [];
+      for (const item of checksFor(run.prs)) {
+        if (run.status !== 'running') break;
+        const { pr } = item;
+        const name = `${pr.repo}#${pr.number}`;
+        note(run, `Building and testing ${name}`);
+        let r;
+        try {
+          const head = run.reviewedHeads?.[pr.url] || await gh.headSha(pr);
+          r = await (deps.prChecks || prChecks)(c, item, head, run.logPath.replace(/\.ndjson$/, ''), { signal: run._abort.signal, progress: text => note(run, text) });
+        } catch (e) {
+          r = { url: pr.url, label: name, error: e.message };
+        }
+        results.push(r);
+        const line = `${run.ticket}: ${checksLine(r)}`;
+        log(r.error ? 'warn' : 'info', line);
+        note(run, line);
+      }
+      if (run.status !== 'running') return undefined; // stopped: no session starts
+      run.checks = results;
+      note(run, 'Checks done: starting the review session');
+      try {
+        (side.launchReview || rv.launchReview)(cfg(), appDir, run);
+        log('info', `${run.ticket}: checks done; review session started`);
+      } catch (e) {
+        delete run.phase;
+        run.spawnError = `could not start the review: ${e.message}`; // fails, and is retried once, like any failed start
+      }
+      save();
+      return undefined;
+    })().catch(e => { delete run.phase; run.spawnError = `could not start the review: ${e.message}`; })
+      .finally(() => { clearTimeout(capTimer); run._building = null; });
+    return run._building;
+  }
+
+  /** On quit: every checks phase is aborted; a run left in its checks phase has them run again from the start next launch. */
+  side.abortChecks = () => { for (const run of side.running()) run._abort?.abort(); };
+
+  /** --once: waits for the checks a poll started to finish and their sessions to start, and settles a review stopped during them. */
+  side.checksDone = async function checksDone() {
+    for (;;) {
+      const building = side.running().filter(r => r._building);
+      if (!building.length) break;
+      await Promise.all(building.map(r => r._building));
+    }
+    for (const run of side.running().filter(r => r.phase === 'checks' && r.status === 'stopping')) await finish(run);
+  };
 
   side.poll = async function poll() {
     side.lastError = '';
@@ -194,7 +290,7 @@ export function createReviewer(app, deps) {
     let run;
     try {
       if (prior && c.reReviewScope === 'delta' && !prior.reviewedHeads) log('info', `${ticket.key}: re-reviewing in full, as the last review is from before Prowl recorded the commits it reviewed`, `scope:${ticket.key}`);
-      run = (side.startReview || rv.startReview)(c, appDir, { tracker: c.taskBoard, ticket, prs: toReview, approvedPrs: approved, leftOut: prior ? leftOut : [], prior, me: app.me, heads, ticketText });
+      run = begin(c, { tracker: c.taskBoard, ticket, prs: toReview, approvedPrs: approved, leftOut: prior ? leftOut : [], prior, me: app.me, heads, ticketText });
     } catch (e) {
       log('error', `${ticket.key}: could not start the review: ${e.message}`);
       return release();
@@ -206,8 +302,10 @@ export function createReviewer(app, deps) {
     if (state.capped) delete state.capped[ticket.key]; // the cap was raised or turned off, or a new PR came in
     save();
     forget(key);
-    hoot(toReview.length > 1 ? `Starting a batch review of ${toReview.length} PRs` : `Starting a review of ${toReview[0].title}`);
-    log('ok', `${ticket.key}: ${prior ? `re-review #${run.reviewNo}` : 'review'} started on ${toReview.length} PR${toReview.length > 1 ? 's' : ''}${skipped}`);
+    const checking = run.phase === 'checks';
+    hoot(checking ? `Building and testing the PRs for ${ticket.title} before reviewing them` : toReview.length > 1 ? `Starting a batch review of ${toReview.length} PRs` : `Starting a review of ${toReview[0].title}`);
+    log('ok', `${ticket.key}: ${prior ? `re-review #${run.reviewNo}` : 'review'} started on ${toReview.length} PR${toReview.length > 1 ? 's' : ''}${skipped}${checking ? ', building and testing first' : ''}`);
+    if (checking) runChecks(run);
     return announce(run);
   }
 
@@ -352,7 +450,7 @@ export function createReviewer(app, deps) {
       log('warn', `${spec.key}: ${e.message}; reviewing from GitHub without a local clone`);
     }
     if (!on()) throw new Error('the Reviewer was switched off before the review started');
-    const run = (side.startReview || rv.startReview)(c, appDir, { tracker: null, ticket, prs: toReview.map(strip), approvedPrs: approved.map(strip), leftOut: prior ? leftOut.map(strip) : [], prior, me: app.me, heads, quick: true });
+    const run = begin(c, { tracker: null, ticket, prs: toReview.map(strip), approvedPrs: approved.map(strip), leftOut: prior ? leftOut.map(strip) : [], prior, me: app.me, heads, quick: true });
     Object.assign(run, { paste: spec.paste, ...(labelsOn() && { labels: true }) });
     side.state.runs.push(run);
     if (run.rolesNote) log('warn', rv.rolesWarning(run), 'roles');
@@ -366,8 +464,10 @@ export function createReviewer(app, deps) {
       for (const p of toReview) labels.set('reviewer', run.id, p, c.tags.inProgress, [c.tags.trigger, c.tags.done], c.tagMatchMaxTypos, [c.tags.trigger]);
       for (const p of approved) labels.set('reviewer', run.id, p, '', [c.tags.trigger], c.tagMatchMaxTypos, [c.tags.trigger]); // context: Ready for Review comes off
     }
-    hoot(toReview.length > 1 ? `Starting a quick review of ${toReview.length} PRs` : `Starting a quick review of ${toReview[0].title}`);
-    log('ok', `${spec.key}: quick ${prior ? `re-review #${run.reviewNo}` : 'review'} started on ${names(toReview)}${approved.length ? ` (already approved, unchanged: ${names(approved)})` : ''}`);
+    const checking = run.phase === 'checks';
+    hoot(checking ? `Building and testing the PRs for ${spec.title} before reviewing them` : toReview.length > 1 ? `Starting a quick review of ${toReview.length} PRs` : `Starting a quick review of ${toReview[0].title}`);
+    log('ok', `${spec.key}: quick ${prior ? `re-review #${run.reviewNo}` : 'review'} started on ${names(toReview)}${approved.length ? ` (already approved, unchanged: ${names(approved)})` : ''}${checking ? ', building and testing first' : ''}`);
+    if (checking) runChecks(run);
     await announce(run);
     return run;
   }
@@ -635,6 +735,16 @@ export function createReviewer(app, deps) {
   side.tick = function tick() {
     for (const run of side.running()) {
       if (run._finishing) continue;
+      if (run.phase === 'checks') { // no session yet, so no process to have exited: its checks run in this process
+        if (run.status === 'running') {
+          if (rv.overdue(run, cfg())) stopOverdue(run);
+          else if (!run._building) runChecks(run); // left in its checks phase by an earlier launch: they run again, from the start
+        } else if (!run._building) { // stopped, and the running check has really ended
+          run._finishing = true;
+          finish(run).catch(e => log('error', `${run.ticket}: ${e.message}`));
+        }
+        continue;
+      }
       rv.readActivity(run);
       if (rv.sessionEnded(run)) { // its process has exited: a `result` event alone is only a turn's
         rv.readActivity(run); // pick up the last lines written before exit
@@ -660,6 +770,11 @@ export function createReviewer(app, deps) {
   /** --once: settles reviews whose sessions have ended before the poll. */
   side.settle = async function settle() {
     for (const run of side.running()) {
+      if (run.phase === 'checks') { // its checks run again from the start; checksDone() waits for them
+        if (run.status === 'running') runChecks(run);
+        else if (!run._building) await finish(run);
+        continue;
+      }
       rv.readActivity(run);
       if (rv.sessionEnded(run)) { rv.readActivity(run); await finish(run); }
       else if (rv.overdue(run, cfg())) stopOverdue(run); // settled by the next launch, once it has exited
