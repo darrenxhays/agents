@@ -200,6 +200,7 @@ export function createReviewer(app, deps) {
       return release();
     }
     state.runs.push(run);
+    if (run.rolesNote) log('warn', rv.rolesWarning(run), 'roles');
     free(); // the run counts itself from here
     endWaits(ticket.key, 'its tagged review started');
     if (state.capped) delete state.capped[ticket.key]; // the cap was raised or turned off, or a new PR came in
@@ -354,6 +355,7 @@ export function createReviewer(app, deps) {
     const run = (side.startReview || rv.startReview)(c, appDir, { tracker: null, ticket, prs: toReview.map(strip), approvedPrs: approved.map(strip), leftOut: prior ? leftOut.map(strip) : [], prior, me: app.me, heads, quick: true });
     Object.assign(run, { paste: spec.paste, ...(labelsOn() && { labels: true }) });
     side.state.runs.push(run);
+    if (run.rolesNote) log('warn', rv.rolesWarning(run), 'roles');
     free(); // the run counts itself from here
     if (spec.fromWait) side.state.waits = side.waits().filter(x => x.key !== spec.key); // its own re-review: it waits again once this one ends
     else endWaits(spec.key, 'a new review of it started');

@@ -983,7 +983,7 @@ saveConfig({ ...loadConfig(), reviewer: { enabled: true }, builder: { ...loadCon
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(file));
   assert.ok(!('command' in loadConfig().builder));
   const text = fs.readFileSync(CONFIG_PATH, 'utf8');
-  assert.ok(!text.includes('/my-build') && /\n    \/\/ Model: "claude-opus-5-5"/.test(text) && /\/\/ MCP tools a build session may use.*e\.g\. \["mcp__/.test(text), 'rewritten with comments');
+  assert.ok(!text.includes('/my-build') && /\n    \/\/ The reviewers' model .*: "claude-opus-5-5"/.test(text) && /\/\/ MCP tools a build session may use.*e\.g\. \["mcp__/.test(text), 'rewritten with comments');
   assert.deepEqual(parseJsonc(text), JSON.parse(JSON.stringify(loadConfig())), 'the commented file holds every setting');
   // checks.json: seeded with commented examples, which parse to no checks, and to a check once uncommented.
   const { CHECKS_PATH, readChecks, seedChecks } = await import('./config.mjs');

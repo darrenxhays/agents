@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { AGENT_MODELS, CONFIG_DIR, EFFORTS, HOME, writeJson } from '../config.mjs';
+import { AGENT_MODELS, CONFIG_DIR, EFFORTS, HOME, MODELS, writeJson } from '../config.mjs';
 import { frontMatter } from '../match.mjs';
 import { noHooksEnv } from '../git.mjs';
 import { spawnCli, killTree } from '../proc.mjs';
@@ -52,6 +52,30 @@ export const runId = (key, reviewNo, at = new Date()) => `${key.replace(/[^A-Za-
 /** A subagent's model and effort as the Agent tool takes them: any other value (a full model id, an unknown effort) is ''. */
 const agentChoice = (model, effort) => ({ model: AGENT_MODELS.includes(model) ? model : '', effort: EFFORTS.includes(effort) ? effort : '' });
 
+/** The Agent tool's name for session model `m`, or '' when it has none. */
+export const agentModel = m => (AGENT_MODELS.includes(m) ? m
+  : (MODELS.includes(m) && AGENT_MODELS.find(a => String(m).startsWith(`claude-${a}-`))) || '');
+
+/**
+ * Who runs on what in a review: { session: { model, effort }, reviewers, why }. `reviewers` is null when the session
+ * and its reviewers share model and effort (nothing is named anywhere), else what each reviewer is launched with
+ * (model '' = the session's own: only the effort is named). A reviewer is launched by a short name, so when the
+ * models differ and the Reviewer model has none (an older pinned id, one with a suffix, another provider's name), both
+ * orchestrator settings are ignored and `why` says so: launching by family name would swap the model unnoticed.
+ */
+export function reviewRoles(cfg) {
+  const { model, effort, orchestratorModel: om = '', orchestratorEffort: oe = '' } = cfg.claude;
+  const session = { model: om || model, effort: EFFORTS.includes(oe) ? oe : effort };
+  if (session.model === model && session.effort === effort) return { session, reviewers: null };
+  if (session.model === model) return { session, reviewers: { model: '', effort } }; // same model: only the effort is named
+  const name = agentModel(model);
+  if (!name) return { session: { model, effort }, reviewers: null, why: `Orchestrator model and effort aren't used: the Reviewer model '${model}' has no short name for its reviewers to be launched under, so they would run on the orchestrator's model` };
+  return { session, reviewers: { model: name, effort } };
+}
+
+/** The Log's warning for a review whose orchestrator settings were ignored (run.rolesNote). */
+export const rolesWarning = run => `${run.ticket}: ${run.rolesNote}. Pick one of ${AGENT_MODELS.join(', ')}, or one of the full IDs Config lists (${MODELS.join(', ')}) as Reviewer model, or clear Orchestrator model (an Orchestrator effort alone works with any model)`;
+
 /**
  * Starts a detached headless Claude Code session running prowl-review on the PRs. It outlives this
  * process; output goes to a log file this app tails, so a restart picks running reviews back up.
@@ -90,13 +114,18 @@ export function createReview(cfg, { tracker, ticket, prs, approvedPrs = [], left
   };
   const { maxBudgetUsd, maxTurns } = cfg.claude;
   if (maxBudgetUsd > 0 || maxTurns > 0) run.caps = { maxBudgetUsd, maxTurns }; // to name the cap if the session hits one
+  // The session's own model and effort, when they aren't its reviewers': kept on the run, so the session is launched
+  // as the prompt (which names the reviewers') was written, whatever Config says by then.
+  const roles = reviewRoles(cfg);
+  if (roles.reviewers) run.orchestrator = { ...roles.session, reviewers: { model: cfg.claude.model, effort: cfg.claude.effort } };
+  if (roles.why) run.rolesNote = roles.why;
   let priorReport = '';
   if (prior) {
     try { priorReport = fs.readFileSync(prior.reportPath, 'utf8'); } catch { priorReport = '(the previous report file is missing)'; }
   }
   fs.writeFileSync(run.promptPath, buildPrompt({ ...run, prior, priorReport, approvals: cfg.approvals, reReviewScope: cfg.reReviewScope, heads, parkHumanOnly: cfg.parkHumanOnly, ticketText,
     verifierModel: cfg.claude.verifierModel, verifierEffort: cfg.claude.verifierEffort,
-    smallReReview: { lines: cfg.smallReReviewLines, model: cfg.smallReReviewModel, effort: cfg.smallReReviewEffort } }));
+    smallReReview: { lines: cfg.smallReReviewLines, model: cfg.smallReReviewModel, effort: cfg.smallReReviewEffort }, reviewers: roles.reviewers }));
   return run;
 }
 
@@ -104,7 +133,9 @@ export function createReview(cfg, { tracker, ticket, prs, approvedPrs = [], left
 export function launchReview(cfg, pluginDir, run) {
   const stdin = fs.openSync(run.promptPath, 'r');
   const log = fs.openSync(run.logPath, 'a');
-  const child = spawnCli('claude', reviewArgs(cfg, pluginDir), {
+  // What the reviewers run on, for History and Stats: the session's own, unless it orchestrates on another.
+  Object.assign(run, run.orchestrator?.reviewers || { model: cfg.claude.model, effort: cfg.claude.effort });
+  const child = spawnCli('claude', reviewArgs(cfg, pluginDir, run.orchestrator), {
     cwd: cfg.workDir, detached: true, stdio: [stdin, log, log], env: reviewEnv(cfg),
   });
   fs.closeSync(stdin);
@@ -116,9 +147,10 @@ export function launchReview(cfg, pluginDir, run) {
 /** The hidden line that ends the body of each review a session posts. */
 export const postMarker = id => `<!-- prowl-review ${id} review -->`;
 
-/** The `claude` arguments for a review session. */
-export function reviewArgs(cfg, pluginDir) {
-  const { model, effort, permissionMode, maxBudgetUsd, maxTurns } = cfg.claude;
+/** The `claude` arguments for a review session. `orchestrator`: the run's own { model, effort }, when it has one. */
+export function reviewArgs(cfg, pluginDir, orchestrator = null) {
+  const { permissionMode, maxBudgetUsd, maxTurns } = cfg.claude;
+  const { model, effort } = orchestrator || cfg.claude;
   return [
     '-p', '--plugin-dir', pluginDir, '--add-dir', REPORTS_DIR, '--add-dir', CONFIG_DIR,
     '--model', model, '--effort', effort, '--permission-mode', permissionMode,
@@ -231,7 +263,7 @@ export function finalize(run) {
 }
 
 /** The prompt (the agent's brief): the PR list for prowl-review, the ticket, the re-review brief and the report spec. */
-export function buildPrompt({ ticket, title: rawTitle, ticketUrl, prs, contextPrs = [], leftOut = [], reviewNo, reportPath, prior, priorReport, approvals = true, reReviewScope = 'full', heads = {}, parkHumanOnly = false, ticketText = '', marker = '', quick = false, verifierModel = '', verifierEffort = '', smallReReview = null }) {
+export function buildPrompt({ ticket, title: rawTitle, ticketUrl, prs, contextPrs = [], leftOut = [], reviewNo, reportPath, prior, priorReport, approvals = true, reReviewScope = 'full', heads = {}, parkHumanOnly = false, ticketText = '', marker = '', quick = false, verifierModel = '', verifierEffort = '', smallReReview = null, reviewers = null }) {
   const title = String(rawTitle ?? '').replace(/"/g, "'"); // someone else's words, shown in quotes: they can't close the quotes themselves
   const lines = [
     `/prowl:prowl-review ${[...prs, ...contextPrs].map(p => p.url).join(' ')}`,
@@ -251,8 +283,15 @@ export function buildPrompt({ ticket, title: rawTitle, ticketUrl, prs, contextPr
   ];
   if (marker) lines.push(`- End the body of each review you post with this line: ${marker}`);
   if (!approvals) lines.push("- Approvals off (Prowl's Approve PRs setting): never post an APPROVE review; see approvals-off mode in the skill.");
-  // A value the Agent tool would refuse counts as not set: one bad value must not fail every verifier.
-  const v = agentChoice(verifierModel, verifierEffort);
+  if (reviewers) {
+    lines.push(reviewers.model
+      ? `- Reviewer model and effort (the skill's Step 4): \`model\` \`${reviewers.model}\`, \`effort\` \`${reviewers.effort}\`. This session orchestrates on another model or effort: launch every reviewer with both.`
+      : `- Reviewer model and effort (the skill's Step 4): \`effort\` \`${reviewers.effort}\`. This session orchestrates on another model or effort: launch every reviewer with that effort (its model is this session's: name none).`);
+  }
+  // A value the Agent tool would refuse counts as not set: one bad value must not fail every verifier. A half left
+  // empty follows the reviewers' when they are named, so "Claude Code default" keeps meaning "as the reviewers".
+  const set = agentChoice(verifierModel, verifierEffort);
+  const v = { model: set.model || reviewers?.model || '', effort: set.effort || reviewers?.effort || '' };
   const verifier = [v.model && `\`model\` \`${v.model}\``, v.effort && `\`effort\` \`${v.effort}\``].filter(Boolean);
   if (verifier.length) lines.push(`- Verifier model and effort (the skill's Step 6): ${verifier.join(', ')}.`);
   if (ticketText) lines.push('', ...ticketSection(ticketText));
@@ -268,7 +307,7 @@ export function buildPrompt({ ticket, title: rawTitle, ticketUrl, prs, contextPr
   }
   // A delta re-review needs the commits the last review saw; reviews from before 2.8.0 didn't record them.
   const steps = parkHumanOnly ? [...PRIOR_STEPS, PARK_STEP] : PRIOR_STEPS;
-  if (prior && reReviewScope === 'delta' && prior.reviewedHeads) lines.push('', ...deltaBrief(prior, priorReport, prs, heads, steps, smallStep(smallReReview)));
+  if (prior && reReviewScope === 'delta' && prior.reviewedHeads) lines.push('', ...deltaBrief(prior, priorReport, prs, heads, steps, smallStep(smallReReview, reviewers)));
   else if (prior) lines.push('', ...reReviewBrief(prior, priorReport, steps));
   lines.push('', ...reportSpec(ticket, reviewNo, reportPath));
   return `${lines.join('\n')}\n`;
@@ -315,10 +354,10 @@ const reReviewBrief = (prior, report, steps) => [
  * The delta brief's step that puts a small change's reviewer on a cheaper model (Small re-review lines, model and
  * effort), or '' when it is off: 0 lines, or a model the Agent tool doesn't take. The session counts the lines, per PR.
  */
-function smallStep(small) {
+function smallStep(small, reviewers = null) {
   const { lines, model, effort } = small || {};
   if (!(Number.isInteger(lines) && lines > 0 && AGENT_MODELS.includes(model))) return '';
-  const e = EFFORTS.includes(effort) ? effort : '';
+  const e = EFFORTS.includes(effort) ? effort : reviewers?.effort || ''; // never left on the orchestrator's effort
   return `A small change gets the small re-review model. First check each PR's range for a force-push, as in step 1. Then count the lines each range above changes (added plus deleted, only in files the PR itself changes, as in step 2; \`git diff --numstat <last>..<head>\`, or the compare API's \`files[].changes\`). The compare API lists at most 300 files: when its list is at that cap the count is incomplete, so count with \`git diff --numstat\` instead, and if you can't, launch that PR's reviewer as usual and give its count as unknown. A PR with no new commits counts as 0 lines. A PR whose range changes at most ${lines} lines gets its reviewer launched with \`model\` \`${model}\`${e && ` and \`effort\` \`${e}\``} on the Agent tool. Every other reviewer is launched as usual: one over ${lines} lines, one reviewed in full (not reviewed at a known commit before, or force-pushed since), and verifiers, which follow the skill's Step 6. In the report's Summary, give each PR's line count and its reviewer's model${e && ' and effort'}, one line per PR.`;
 }
 

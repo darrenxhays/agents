@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { CONFIG_PATH, HOME, loadConfig, newSettings } from './config.mjs';
 import { addWorktree, noHooks, noHooksEnv } from './git.mjs';
-import { buildPrompt, createReview, finalize } from './reviewer/reviews.mjs';
+import { MODELS } from './config.mjs';
+import { agentModel, buildPrompt, createReview, finalize, reviewArgs, reviewRoles, rolesWarning } from './reviewer/reviews.mjs';
 import { readActivity, sessionEnded } from './sessions.mjs';
 
 const WIN = process.platform === 'win32';
@@ -145,6 +146,49 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
     const low = buildPrompt({ ...deltaCase, smallReReview: { lines: 50, model: 'sonnet', effort: 'low' } });
     assert.ok(low.includes('with `model` `sonnet` and `effort` `low` on the Agent tool') && low.includes("its reviewer's model and effort"));
     assert.deepEqual([loadConfig().smallReReviewLines, loadConfig().smallReReviewModel, loadConfig().smallReReviewEffort], [50, 'sonnet', '']);
+  }
+
+  // ---- C-34: orchestrator model and effort ----
+  {
+    const roles = claude => reviewRoles({ claude: { model: 'claude-opus-5-5', effort: 'xhigh', ...claude } });
+    assert.equal(roles({}).reviewers, null, 'defaults: nothing changes');
+    assert.deepEqual(roles({ orchestratorEffort: 'medium' }), { session: { model: 'claude-opus-5-5', effort: 'medium' }, reviewers: { model: '', effort: 'xhigh' } });
+    assert.deepEqual(roles({ orchestratorModel: 'claude-sonnet-5-5' }), { session: { model: 'claude-sonnet-5-5', effort: 'xhigh' }, reviewers: { model: 'opus', effort: 'xhigh' } });
+    for (const model of ['claude-opus-4-1', 'claude-opus-5-5[1m]']) {
+      const r = roles({ model, orchestratorModel: 'claude-sonnet-5-5', orchestratorEffort: 'low' });
+      assert.ok(r.why.includes(`the Reviewer model '${model}' has no short name`) && r.reviewers === null, 'no safe name: ignored');
+      assert.deepEqual(r.session, { model, effort: 'xhigh' }, 'the session is back on the Reviewer model and effort, an orchestrator effort included');
+    }
+    assert.equal(roles({ orchestratorModel: 'claude-opus-5-5' }).reviewers, null, 'the same model, no effort: nothing changes');
+    assert.equal(roles({ orchestratorEffort: 'ultra' }).reviewers, null, 'an unknown orchestrator effort is ignored');
+    assert.equal(roles({ model: 'opus', orchestratorModel: 'claude-haiku-5-5' }).reviewers.model, 'opus', 'a short name maps to itself');
+    assert.deepEqual([agentModel('opus'), agentModel('claude-opus-4-1'), agentModel('gpt-x'), ...MODELS.map(agentModel)], ['opus', '', '', ...MODELS.map(m => m.split('-')[1])]);
+    const claude = { model: 'm', effort: 'xhigh', permissionMode: 'auto', maxBudgetUsd: 0, maxTurns: 0 };
+    const args = reviewArgs({ claude }, '/plugin', { model: 'claude-sonnet-5-5', effort: 'high' });
+    assert.deepEqual([args[args.indexOf('--model') + 1], args[args.indexOf('--effort') + 1]], ['claude-sonnet-5-5', 'high']);
+    const plain = reviewArgs({ claude }, '/plugin');
+    assert.deepEqual([plain[plain.indexOf('--model') + 1], plain[plain.indexOf('--effort') + 1]], ['m', 'xhigh']);
+    const first = promptCases.first;
+    const lineOf = (c, start) => buildPrompt(c).split('\n').find(l => l.startsWith(start)) || '';
+    const both = { ...first, reviewers: { model: 'opus', effort: 'xhigh' } };
+    assert.ok(lineOf(both, '- Reviewer model').endsWith('`model` `opus`, `effort` `xhigh`. This session orchestrates on another model or effort: launch every reviewer with both.'));
+    assert.equal(lineOf(both, '- Verifier model'), "- Verifier model and effort (the skill's Step 6): `model` `opus`, `effort` `xhigh`.", "verifier settings left empty follow the reviewers'");
+    assert.ok(buildPrompt(both).indexOf('- Reviewer model') < buildPrompt(both).indexOf('- Verifier model'));
+    const effortOnly = lineOf({ ...first, reviewers: { model: '', effort: 'xhigh' } }, '- Reviewer model');
+    assert.ok(!effortOnly.includes('`model`') && effortOnly.endsWith("(its model is this session's: name none)."));
+    assert.equal(buildPrompt({ ...first, reviewers: null }), fixture('first.prompt.md'));
+    assert.equal(lineOf({ ...first, reviewers: null, verifierModel: 'sonnet' }, '- Verifier model'), "- Verifier model and effort (the skill's Step 6): `model` `sonnet`.");
+    const re = promptCases.reReview;
+    const [u1, u2] = re.prs.map(x => x.url);
+    const smallDelta = buildPrompt({ ...re, prior: { ...re.prior, reviewedHeads: { [u1]: 'a', [u2]: 'b' } }, reReviewScope: 'delta', heads: { [u1]: 'a', [u2]: 'c' }, smallReReview: { lines: 50, model: 'sonnet' }, reviewers: { model: 'opus', effort: 'xhigh' } });
+    assert.ok(smallDelta.includes('with `model` `sonnet` and `effort` `xhigh` on the Agent tool'), "a small PR's reviewer isn't left on the orchestrator's effort");
+    // What a run records.
+    const split = made({ claude: { orchestratorModel: 'claude-sonnet-5-5', orchestratorEffort: 'high' } });
+    assert.deepEqual(split.orchestrator, { model: 'claude-sonnet-5-5', effort: 'high', reviewers: { model: 'claude-opus-5-5', effort: 'xhigh' } });
+    assert.ok(fs.readFileSync(split.promptPath, 'utf8').includes('- Reviewer model and effort'));
+    const ignored = made({ claude: { model: 'claude-opus-4-1', orchestratorModel: 'claude-sonnet-5-5' } });
+    assert.ok(!ignored.orchestrator && rolesWarning(ignored).startsWith("AB#42: Orchestrator model and effort aren't used: the Reviewer model 'claude-opus-4-1'") && rolesWarning(ignored).includes('or clear Orchestrator model'));
+    assert.ok(!made().orchestrator && !made().rolesNote);
   }
 
   fs.rmSync(tmp, { recursive: true, force: true });
