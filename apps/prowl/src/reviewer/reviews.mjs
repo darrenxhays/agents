@@ -5,7 +5,7 @@ import { AGENT_MODELS, CONFIG_DIR, EFFORTS, HOME, MODELS, writeJson } from '../c
 import { frontMatter } from '../match.mjs';
 import { noHooksEnv } from '../git.mjs';
 import { spawnCli, killTree } from '../proc.mjs';
-import { alive, capHit, readActivity, sessionEnded, sessionEnv, track } from '../sessions.mjs';
+import { alive, capHit, idleDone, readActivity, sessionEnded, sessionEnv, track } from '../sessions.mjs';
 import { findingsIndex, withBlocking, writeHandover } from './handover.mjs';
 import { tickPath } from './prep.mjs';
 import { checkResult, isParked, isProwlReview, reviewIdOf } from './result.mjs';
@@ -103,6 +103,29 @@ export function newBatchId(key, reviewNo, at = new Date()) {
 export function checkerCommand(appDir, resultPath, batchId, urls, node = process.execPath) {
   const q = p => `"${String(p).replace(/\\/g, '/')}"`;
   return `${q(node)} ${q(path.join(appDir, 'prowl.mjs'))} --check-result ${q(resultPath)} --batch ${batchId} --prs "${urls.join(',')}"`;
+}
+
+/** True for a running review that has written its result and whose session is done but hasn't exited. */
+export const doneIdle = (run, now = Date.now()) => Boolean(run.resultMode && run.status === 'running' && idleDone(run, now) && fs.existsSync(run.resultPath));
+
+/**
+ * Ends the session of a review that is done but idle: asked first (SIGTERM), forced from IDLE_KILL_MS later while it
+ * is still alive, at most once every IDLE_KILL_MS, and only while the pid is still the session's. A run that arrives
+ * with `settledOn` was asked by an earlier launch: it is forced at once. True the first time: save and log.
+ */
+export const IDLE_KILL_MS = 10_000;
+export function endIdle(run, now = Date.now(), kill = killTree, isAlive = alive) {
+  const first = !run._settled;
+  if (!first && now - run._settled < IDLE_KILL_MS) return false;
+  const force = !first || Boolean(run.settledOn);
+  if (force) {
+    if (!run._spawned) run._ours = undefined; // a pid from an earlier launch: its start time is read again first
+    if (!isAlive(run)) return false;
+  }
+  run.settledOn ??= run._result?.uuid || 'unknown';
+  kill(run.pid, { force });
+  run._settled = now;
+  return first;
 }
 
 /** A review's result with Prowl's own reading of each PR's blocking reviews merged in (what its setup read): never judged on the session's list alone. */

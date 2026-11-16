@@ -1033,6 +1033,13 @@ export function createReviewer(app, deps) {
   }
 
   /** Once a second, on or off: tail running reviews, settle finished ones, retry tag writes. */
+  /** A review that is done, with a session that hasn't exited (a wake-up it scheduled is pending): the session is ended rather than waited for. */
+  function endIdleSession(run) {
+    if (!(deps.endIdle || rv.endIdle)(run)) return;
+    save();
+    log('info', `${run.ticket}: the review is done but its session hasn't exited (a wake-up it scheduled is pending); ending the session`);
+  }
+
   let swept = false;
   /** Once, at launch: worktree folders no running review owns (left by a crash, or a quit during a setup) are removed. */
   const sweep = () => {
@@ -1065,6 +1072,8 @@ export function createReviewer(app, deps) {
         rv.readActivity(run); // pick up the last lines written before exit
         run._finishing = true;
         finish(run).catch(e => log('error', `${run.ticket}: ${e.message}`));
+      } else if (run._settled || run.settledOn || rv.doneIdle(run)) {
+        endIdleSession(run); // done, so never failed by the time cap for idling
       } else if (rv.overdue(run, cfg())) {
         stopOverdue(run);
       } else if (!run.resultMode && app.me && !run._checking && Date.now() - (run._checkedAt || 0) > 60_000) { // a review from before results posts its own reviews
@@ -1094,6 +1103,7 @@ export function createReviewer(app, deps) {
       }
       rv.readActivity(run);
       if (rv.sessionEnded(run)) { rv.readActivity(run); await finish(run); }
+      else if (run.settledOn || rv.doneIdle(run)) endIdleSession(run); // asked now; settled by the next launch, once it has exited
       else if (rv.overdue(run, cfg())) stopOverdue(run); // settled by the next launch, once it has exited
     }
   };

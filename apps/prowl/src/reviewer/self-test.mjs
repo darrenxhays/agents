@@ -1,6 +1,6 @@
 // Part of node prowl.mjs --self-test: a review's result, what Prowl posts from it, and how a review settles.
 // GitHub is a fake throughout: nothing here reaches a real PR.
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -15,7 +15,8 @@ import { checkResult, counts, eventFor, isCounted, isParked, isProwlReview, notC
 import { fillSkeleton, findingsIndex, inParked, resultSkeleton, startingEntry, withBlocking, withKeys, writeHandover } from './handover.mjs';
 import { blockingReviews, carriedOver, detailsSections, heldSections, latestTrusted, nothingHidden, parkedParts, prepDir, renderPrior } from './prep.mjs';
 import { createReviewer } from './reviewer.mjs';
-import { heldResult, prepSection } from './reviews.mjs';
+import { doneIdle, endIdle, heldResult, IDLE_KILL_MS, prepSection } from './reviews.mjs';
+import { alive, IDLE_DONE_MS, idleDone, readActivity, resetActivity, track } from '../sessions.mjs';
 import { buildPrompt, checkerCommand, createReview, dismissalMessage, dismissBlocker, newBatchId, ownReview, postMarker, priorFindings, reviewsToDismiss, sameCommit } from './reviews.mjs';
 
 const SHA = 'a'.repeat(40);
@@ -871,6 +872,112 @@ export async function run(assert, { appDir }) {
     assert.notEqual(path.dirname(withFiles.skeletonPath), path.dirname(withFiles.resultPath), 'the skeleton is never written where Prowl reads results');
     const without = made(false);
     assert.ok(!without.skeletonPath && !without.handover && fs.readFileSync(without.promptPath, 'utf8').includes('json\n['));
+  }
+
+  // ---- C-37: a review that is done is ended rather than waited for ----
+  {
+    const ev = e => `${JSON.stringify(e)}\n`;
+    const ok = (uuid = 'u1') => ev({ type: 'result', subtype: 'success', is_error: false, uuid });
+    const logOf = name => { const f = path.join(tmp, `${name}.ndjson`); fs.writeFileSync(f, ''); return f; };
+    const feed = (r, text) => { fs.appendFileSync(r.logPath, text); readActivity(r); return r._lastOutputAt; };
+    let r = { logPath: logOf('idle-1') };
+    readActivity(r); // an empty log, read once: what follows counts from when it is read
+    let at = feed(r, ev({ type: 'system', subtype: 'task_started', task_id: 't1' }) + ok());
+    assert.deepEqual([idleDone(r, at + IDLE_DONE_MS), [...r._tasks]], [false, ['t1']], 'a clean result while a task is running: not done');
+    at = feed(r, ev({ type: 'system', subtype: 'task_notification', task_id: 't1' }) + ev({ type: 'assistant', message: { content: [{ type: 'text', text: 'Reading the report.' }] } }));
+    assert.deepEqual([idleDone(r, at + IDLE_DONE_MS), r._resultLast, r._tasks.size], [false, false, 0], 'after the notification, a turn is running: not done');
+    at = feed(r, ok('u2'));
+    assert.deepEqual([idleDone(r, at + IDLE_DONE_MS - 1), idleDone(r, at + IDLE_DONE_MS)], [false, true], 'after the next clean result: done at 60 s of quiet, not before');
+    for (const bad of [{ subtype: 'error_max_turns', is_error: false }, { subtype: 'success', is_error: true }]) {
+      r = { logPath: logOf('idle-bad') };
+      readActivity(r);
+      at = feed(r, ev({ type: 'result', ...bad }));
+      assert.equal(idleDone(r, at + 10 * IDLE_DONE_MS), false, 'a turn that failed or hit a cap is left to end on its own');
+    }
+    r = { logPath: logOf('idle-2') };
+    readActivity(r);
+    at = feed(r, ev({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'a' }, { task_id: 'b' }] }) + ok());
+    assert.equal(idleDone(r, at + IDLE_DONE_MS), false);
+    at = feed(r, ev({ type: 'system', subtype: 'background_tasks_changed', tasks: [] }) + ok());
+    assert.equal(idleDone(r, at + IDLE_DONE_MS), true, 'tasks tracked by background_tasks_changed alone');
+    resetActivity(r);
+    assert.deepEqual([r._resultLast, r._tasks, r._lastOutputAt], [undefined, undefined, undefined]);
+
+    // A log read for the first time: quiet since it was last written, not since now.
+    r = { logPath: logOf('idle-old') };
+    fs.writeFileSync(r.logPath, ok());
+    const old = new Date(Date.now() - 5 * 60_000);
+    fs.utimesSync(r.logPath, old, old);
+    readActivity(r);
+    assert.equal(idleDone(r), true, 'a log older than a minute, read for the first time: done at once');
+    at = feed(r, ok('u9'));
+    assert.deepEqual([idleDone(r), Date.now() - at < 5000], [false, true], 'lines appended after that count from when they are read');
+
+    // The result a review settles on is frozen once its session is asked to end.
+    r = { logPath: logOf('idle-frozen'), settledOn: 'u1' };
+    fs.writeFileSync(r.logPath, ok('u0') + ok('u1') + ok('u2'));
+    readActivity(r);
+    assert.equal(r._result.uuid, 'u1', 'a later launch stops taking results after the one it settled on');
+    r = { logPath: logOf('idle-frozen-2') };
+    readActivity(r);
+    feed(r, ok('u1'));
+    r._settled = Date.now();
+    feed(r, ok('u2'));
+    assert.equal(r._result.uuid, 'u1', 'and in this process, after it asked');
+
+    // doneIdle: only a running review that has written its result.
+    const idle = over => ({ resultMode: 1, status: 'running', resultPath: path.join(tmp, 'idle.result.json'), _resultLast: true, _result: { subtype: 'success', is_error: false }, _lastOutputAt: 0, ...over });
+    assert.equal(doneIdle(idle()), false, 'no result file');
+    fs.writeFileSync(path.join(tmp, 'idle.result.json'), '{}');
+    assert.deepEqual([doneIdle(idle()), doneIdle(idle({ resultMode: undefined })), doneIdle(idle({ status: 'stopping' }))], [true, false, false]);
+
+    // endIdle: asked first, forced from 10 seconds later, only while the pid is still the session's.
+    const kills = [];
+    const kill = (pid, o) => kills.push([pid, o.force]);
+    let mine = true;
+    const seenOurs = [];
+    const isAlive = x => { seenOurs.push(x._ours); return mine; };
+    r = idle({ pid: 77, _ours: true, _result: { subtype: 'success', is_error: false, uuid: 'u7' } });
+    assert.deepEqual([endIdle(r, 1000, kill, isAlive), r.settledOn, kills], [true, 'u7', [[77, false]]], 'the first time: asked, not forced');
+    assert.deepEqual([endIdle(r, 1000 + IDLE_KILL_MS - 1, kill, isAlive), kills.length], [false, 1], 'nothing within 10 s');
+    assert.deepEqual([endIdle(r, 1000 + IDLE_KILL_MS, kill, isAlive), kills[1], seenOurs], [false, [77, true], [undefined]], 'forced at 10 s, its start time read again first');
+    mine = false;
+    assert.deepEqual([endIdle(r, 1000 + 3 * IDLE_KILL_MS, kill, isAlive), kills.length], [false, 2], "not forced once the pid is no longer the session's");
+    r = idle({ pid: 78, settledOn: 'u1', _spawned: true, _ours: true });
+    mine = true;
+    assert.deepEqual([endIdle(r, 5000, kill, isAlive), kills.at(-1), r._ours], [true, [78, true], true], 'asked by an earlier launch: forced on first sight');
+    mine = false;
+    assert.deepEqual([endIdle(idle({ pid: 79, settledOn: 'u1' }), 5000, kill, isAlive), kills.length], [false, 3], "and not at all when it isn't alive");
+    assert.equal(endIdle(idle({ pid: 80, _result: { subtype: 'success' } }), 1, kill, () => true) && kills.at(-1)[0] === 80, true);
+
+    // End to end: a real process that has written its result and a clean result event, then idles.
+    if (process.platform !== 'win32') {
+      const cfg = { ...loadConfig(), githubOwner: 'acme', workDir: tmp, reviewTimeoutMinutes: 1 };
+      const logs = [];
+      const tracker = { name: 'Azure DevOps', retag: async () => {} };
+      const app = { cfg, me: 'octocat', sideOn: () => true, tracker: () => tracker, boards: () => [], dryRun: () => false };
+      let posted = 0;
+      const side = createReviewer(app, { log: (level, msg) => { logs.push(msg); return true; }, forget() {}, hoot() {}, appDir, trackers: { ado: tracker }, github: fakeGh(), labels: { own() {}, set() {}, refused: () => '', pending: () => false },
+        sweepWorktrees: async () => [], publishReview: async (rn, result) => { posted++; rn.published = { [`review:${A}`]: `${A}#pullrequestreview-1` }; return { ...plan(result), info: {} }; } });
+      const id = 'AB42-idle-e2e';
+      const run = { ...baseRun({ id, logPath: path.join(tmp, `${id}.ndjson`), reportPath: path.join(tmp, `${id}.md`) }), tracker: 'ado', ref: { id: 42 }, status: 'running', resultMode: 1, batchId: BATCH, resultPath: path.join(tmp, `${id}.result.json`), resultPrs: [A],
+        startedAt: Date.now() - 10 * 60_000 }; // long past its 1-minute time cap
+      fs.writeFileSync(run.resultPath, JSON.stringify(resultOf([])));
+      fs.writeFileSync(run.logPath, ok('done-1'));
+      fs.utimesSync(run.logPath, old, old);
+      const child = spawn('sh', ['-c', 'sleep 60'], { detached: true, stdio: 'ignore' });
+      track(run, child, { caffeinate: false });
+      side.state = { runs: [run], failures: {} };
+      side.tick();
+      assert.ok(logs.includes("AB#42: the review is done but its session hasn't exited (a wake-up it scheduled is pending); ending the session"), logs.join('\n'));
+      assert.deepEqual([run.settledOn, run.status], ['done-1', 'running'], 'asked to end, and not failed by the time cap for idling');
+      for (let i = 0; i < 100 && alive(run); i++) await new Promise(res => setTimeout(res, 50));
+      assert.equal(alive(run), false, 'the process is gone');
+      side.tick();
+      for (let i = 0; i < 100 && run.status === 'running'; i++) await new Promise(res => setTimeout(res, 50));
+      for (let i = 0; i < 100 && run.phase === 'publishing'; i++) await new Promise(res => setTimeout(res, 50));
+      assert.deepEqual([run.status, posted, logs.filter(l => l.includes('ending the session')).length], ['done', 1, 1], `${run.error}\n${logs.join('\n')}`);
+    }
   }
 
   fs.rmSync(tmp, { recursive: true, force: true });

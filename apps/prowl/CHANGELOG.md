@@ -41,6 +41,7 @@ Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z`
 - A re-review that Prowl sets up is handed its earlier findings as files: its brief lists them a line each, with the write-ups in `priors.json`, so the brief of a long-running PR shrinks to a fraction. Findings the previous review's list lacks (a teammate's open PR-Owl threads, parked ones, a review still requesting changes) are read from the PRs and carried over too.
 - Prowl starts a re-review's result itself, with everything it already knows (the commit checked out, the blocking reviews, each earlier finding's thread and whether it is parked now), and the result check refuses one with any of that start left unfilled, so an unfinished result can't pass as done.
 - Before a result is judged, Prowl merges in its own reading of each PR's earlier PR-Owl reviews still requesting changes: one it couldn't read in full withholds the approval, and is never dismissed, until a person has looked.
+- A finished review frees its slot within about a minute: when a review has written its result and its session then sits idle (a wake-up it scheduled, or a background command left hanging), Prowl ends the session instead of waiting up to an hour for it to exit. The Log says so once, and the review is posted as usual.
 
 ## 2.23.6
 - An answer pasted into a Needs-you form is now what Submit sends. Before, pasting into **Other**, **Send it back with a note** or **Ask about this** and pressing enter sent the option that was already picked: the recommended answer, or an approval of the plan.
