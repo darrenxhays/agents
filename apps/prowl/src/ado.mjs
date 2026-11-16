@@ -80,8 +80,19 @@ export async function findTickets(cfg, board, isTrigger, { assignedToMe = false 
   const [scope, tags] = await Promise.all([boardScope(org, board.project, board.team), projectTags(org, board.project)]);
   const variants = tags.filter(isTrigger);
   const items = variants.length ? await findTagged(org, board.project, scope, variants, assignedToMe) : [];
-  return { tickets: items.map(item => ticketOf(org, board.project, item)), variants };
+  return { tickets: ticketsFrom(org, board.project, items, isTrigger), variants };
 }
+
+/**
+ * The search's hits as tickets to claim: only those that still carry a tag `isTrigger` accepts. The search runs on an
+ * index that lags, while the hits are read by id, which is current: a ticket claimed a moment ago comes back without
+ * its trigger tag, at the revision the claim made, and would otherwise be claimed a second time. Pure.
+ */
+export const ticketsFrom = (org, project, items, isTrigger) =>
+  items.filter(item => item.tags.some(isTrigger)).map(item => ticketOf(org, project, item));
+
+/** A found ticket as it is now: the search's hits are read by id already, so it is current. */
+export const current = (cfg, ticket) => ticket;
 
 /** The work item for a key (AB#123 or 123), for prowl --work and --follow. */
 export async function lookup(cfg, key) {

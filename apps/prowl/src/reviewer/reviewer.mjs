@@ -197,6 +197,10 @@ export function createReviewer(app, deps) {
       log('info', `${ticket.key}: waiting, ${c.maxConcurrentReviews} reviews already running`, key);
       return;
     }
+    // The board search can be a few seconds behind the ticket: read as it is now, one that no longer carries the
+    // trigger tag is someone else's (claimed, or moved on), and is left out quietly.
+    ticket = await tracker.current(c, ticket);
+    if (!(ticket.tags || []).some(isTrigger)) return;
     const free = hold();
     try {
       await prepareTicket(tracker, ticket, key, free);

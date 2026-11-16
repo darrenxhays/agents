@@ -144,6 +144,12 @@ export async function readItem(cfg, ref) {
 }
 
 /**
+ * A found ticket as it is now. The search returns the labels with the hit, from an index that can lag, so a stale hit
+ * still shows the trigger label: the issue is read again just before it is prepared and claimed. Its `rev` comes with it.
+ */
+export const current = (cfg, ticket) => readItem(cfg, ticket.ref);
+
+/**
  * The board holding the issue: of its project's boards whose filter takes it in, one the config watches already, named
  * as config.json names it (by name or id), else the first. { board } (its name, or its id when names repeat), or null.
  */

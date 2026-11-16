@@ -191,8 +191,11 @@ export function createBuilder(app, deps) {
     await follow();
   };
 
-  async function consider(tracker, ticket) {
-    const key = `pick:${ticket.key}`;
+  async function consider(tracker, found) {
+    const key = `pick:${found.key}`;
+    // The board search can lag: read as it is now, a ticket that no longer carries the start tag is someone else's.
+    const ticket = await tracker.current(cfg(), found);
+    if (!(ticket.tags || []).some(tags().isStart)) return;
     const back = side.state.handedBack[ticket.key];
     if (back) {
       // Handed back: not reclaimed until someone takes the start tag off and puts it back on.

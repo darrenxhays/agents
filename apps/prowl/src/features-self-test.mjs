@@ -7,6 +7,7 @@ import { CONFIG_PATH, HOME, loadConfig, newSettings } from './config.mjs';
 import { killChecks, reviewSteps, runChecks, runCommand, runSteps } from './checks.mjs';
 import { addWorktree, noHooks, noHooksEnv } from './git.mjs';
 import { otherKeys, titleNamesOnly } from './github.mjs';
+import { ticketsFrom } from './ado.mjs';
 import { norm, tagMatches } from './match.mjs';
 import { baseSteps, checkPlan, checksLine, prChecks } from './reviewer/checks.mjs';
 import { createReviewer } from './reviewer/reviewer.mjs';
@@ -372,6 +373,27 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
     h = reviewerOver({ open: three, ghOver: {} });
     const quick = await h.side.quickReview('AB#42');
     assert.deepEqual((quick.offer ? (await h.side.answerOffer(quick.offer, 'review')) : quick).prs.map(p => p.number), [1, 2, 3], 'a quick review of the ticket still takes all three');
+  }
+
+  // ---- C-12: a found ticket that no longer carries the tag is skipped ----
+  {
+    const item = (id, tags) => ({ id, rev: 7, title: `T${id}`, tags, assignee: '' });
+    const ours = t => ['prowl: in review', 'prowl: approved', 'prowl: changes requested', 'In Review', 'Reviewed'].some(x => norm(x) === norm(t));
+    const isTrigger = t => !ours(t) && (tagMatches(t, 'prowl: review', 2) || tagMatches(t, 'Ready for Review', 2));
+    const kept = ticketsFrom('https://dev.azure.com/o', 'Shop', [item(1, ['backend', 'prowl: review']), item(2, ['prowl: in review', 'backend']), item(3, ['prowl: approved', 'backend'])], isTrigger);
+    assert.deepEqual(kept.map(t => [t.ref.id, t.rev]), [[1, 7]], 'only the hit that still carries a trigger tag, with its rev and ref');
+    const mine = t => norm(t) === norm('prowl: building');
+    const isStart = t => !mine(t) && tagMatches(t, 'prowl: build', 2);
+    assert.deepEqual(ticketsFrom('o', 'Shop', [item(1, ['prowl: building', 'API']), item(2, ['Prowl: Build', 'API'])], isStart).map(t => t.ref.id), [2]);
+    // The Reviewer reads a found ticket again before it prepares and claims it (Jira's search returns stale labels).
+    let reads = 0;
+    let h = reviewerOver({ open: [prOf(1)], trackerOver: { current: async (c, t) => { reads++; return { ...t, tags: ['backend'] }; } } });
+    await h.side.poll();
+    assert.deepEqual([reads, h.seen.claims, h.seen.started.length, h.seen.logs.filter(l => l.includes('AB#42')).length], [1, [], 0, 0], 'read again without the label: no claim, no Log line');
+    let claimedWith = null;
+    h = reviewerOver({ open: [prOf(1)], trackerOver: { current: async (c, t) => ({ ...t, tags: [...t.tags, 'fresh'], rev: 9 }), claim: async (c, t) => { claimedWith = t; } } });
+    await h.side.poll();
+    assert.deepEqual([claimedWith?.rev, claimedWith?.tags.includes('fresh')], [9, true], 'with the label still on: the claim is made with the fresh read');
   }
 
   // ---- C-06: verifier model and effort ----

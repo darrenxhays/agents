@@ -324,6 +324,7 @@ export async function run(assert) {
     await feedback(assert);
     await pickups(assert);
     await quickBuilds(assert);
+    await staleHits(assert);
   } finally {
     globalThis.fetch = realFetch;
     for (const k of Object.keys(process.env)) if (!(k in envBefore)) delete process.env[k];
@@ -334,6 +335,20 @@ export async function run(assert) {
 }
 
 // ---- Pure rules: repos, bases, branches, the result contract, caps, follow-up ----
+
+// A found ticket that no longer carries the start tag when read again (the board search lags) is someone else's: not claimed.
+async function staleHits(assert) {
+  for (const board of ['ado', 'jira']) {
+    let h = harness(board, twoRepoBuild(), { trackerWrap: t => ({ ...t, current: async (c, ticket) => ({ ...ticket, tags: ['web', 'In-Development'], rev: 99 }) }) });
+    await h.b.poll();
+    assert.deepEqual([h.b.history().length, h.logs.filter(l => !l.startsWith('info')).length], [0, 0], `${board}: a stale hit is skipped: no claim, no Log line`);
+    h.done();
+    h = harness(board, twoRepoBuild());
+    await h.b.poll();
+    assert.equal(h.b.history().length, 1, `${board}: still tagged when read again: claimed`);
+    h.done();
+  }
+}
 
 async function pure(assert) {
   assert.equal(rules.needItem('question', { key: 'AB#1', question: 'Which browsers?', options: ['Chrome', 'Safari'], multiple: true }).multiple, true, 'a question may take several picks');
