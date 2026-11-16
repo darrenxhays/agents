@@ -243,6 +243,9 @@ export function startTui(app, actions, io = {}) {
   const history = name => (name === 'reviewer' ? reviewHistory() : builder.history());
   const needs = name => sides[name].needs();
   const allLive = () => SIDES.reduce((n, s) => n + live(s).length, 0);
+  // The reviews being set up before their sessions start: Running rows too, and they count as running.
+  const settingUp = () => reviewer.preparing?.() || [];
+  const liveCount = name => live(name).length + (name === 'reviewer' ? settingUp().length : 0);
 
   // Hoot sleeps unless something is happening: a poll, a running session, or something he has to say.
   function mood(said) {
@@ -269,7 +272,7 @@ export function startTui(app, actions, io = {}) {
 
   /** A side's tab label, from the fullest that fits `room` columns down to its initial. */
   function sideLabel(name, room) {
-    const [n, k] = [live(name).length, needs(name).length];
+    const [n, k] = [liveCount(name), needs(name).length];
     const full = `${NAMES[name]} · ${isOn(name) ? 'on' : 'off'}${n ? ` · ▶ ${n}` : ''}${k ? ` · ⚑ ${k}` : ''}`;
     const mid = `${NAMES[name]} ${isOn(name) ? 'on' : 'off'}${n ? ` ▶${n}` : ''}${k ? ` ⚑${k}` : ''}`;
     const tiny = `${NAMES[name][0]}${isOn(name) ? '' : ' off'}${n ? ` ▶${n}` : ''}${k ? ` ⚑${k}` : ''}`;
@@ -288,7 +291,7 @@ export function startTui(app, actions, io = {}) {
   }
 
   function tabBar() {
-    const counts = [live(ui.side).length, history(ui.side).length, needs(ui.side).length];
+    const counts = [liveCount(ui.side), history(ui.side).length, needs(ui.side).length];
     const segs = [['', ' ']];
     TABS.forEach((t, i) => hasView(i) && segs.push([i === view() ? acc().view : ST.tabOff, ` ${i + 1} ${t}${counts[i] != null ? ` (${counts[i]})` : ''} `, undefined,
       () => { ui.view[ui.side] = i; }, i === view() ? acc().view : acc().ghost], ['', ' ']));
@@ -328,7 +331,7 @@ export function startTui(app, actions, io = {}) {
       }
       const stopping = r.status === 'stopping';
       const left = [cursor(i === at), [stopping ? ST.red : acc().fg, `${stopping ? '■' : spin()} `], [ST.bold, `${r.ticket}  `]];
-      const right = [[ST.grey, `  ${plural(r.prs.length, 'PR')} · ${r.phase === 'checks' ? 'building and testing' : r.phase === 'publishing' ? 'posting its review' : r.reviewNo > 1 ? `re-review #${r.reviewNo}` : 'first review'} · ${dur(Date.now() - r.startedAt)} `]];
+      const right = [[ST.grey, r.status === 'preparing' ? `  ${plural(r.prs.length, 'PR')} · preparing${r.quick ? ' · quick' : ''} · ${dur(Date.now() - r.startedAt)} ` : `  ${plural(r.prs.length, 'PR')} · ${r.phase === 'checks' ? 'building and testing' : r.phase === 'publishing' ? 'posting its review' : r.reviewNo > 1 ? `re-review #${r.reviewNo}` : 'first review'} · ${dur(Date.now() - r.startedAt)} `]];
       const title = trunc(stopping ? `stopping… ${r.title}` : r.title, W - width(left) - width(right) - 1);
       return onClick(spread([...left, ['', title]], right, W), pick(RUNNING, i));
     });
@@ -346,8 +349,8 @@ export function startTui(app, actions, io = {}) {
     return activity(rows, r, H);
   }
 
-  // The Reviewer's Running list: its reviews, then the quick reviews waiting on their PRs.
-  const runningRows = () => [...live('reviewer'), ...(reviewer.waits?.() || []).map(wt => Object.assign(wt, { _wait: true }))];
+  // The Reviewer's Running list: its reviews, those being set up, then the quick reviews waiting on their PRs.
+  const runningRows = () => [...live('reviewer'), ...settingUp(), ...(reviewer.waits?.() || []).map(wt => Object.assign(wt, { _wait: true }))];
 
   // Where a Builder ticket stands, in a word or two.
   const STEP_NAMES = { claim: 'claiming', adopt: 'looking for work started', finish: 'checking out its work', read: 'reading the ticket', turn: 'starting a turn', session: 'session running', settle: 'reading the result',
@@ -1229,7 +1232,7 @@ export function startTui(app, actions, io = {}) {
       } };
     }
     else if (k === 's' && view() === RUNNING && r.phase === 'publishing') flash(`${r.ticket}: its review is being posted and can't be stopped part-way.`);
-    else if (k === 's' && view() === RUNNING && r.status === 'running') {
+    else if (k === 's' && view() === RUNNING && (r.status === 'running' || r.status === 'preparing')) {
       ui.confirm = { text: reviewer.stopText(r), yes: () => actions.stop('reviewer', r) };
     }
   }
@@ -1299,9 +1302,11 @@ export function startTui(app, actions, io = {}) {
     if (k === 'up') { sel()[view()] = Math.max(0, sel()[view()] - 1); return undefined; }
     if (k === 'down') { sel()[view()]++; return undefined; }
     if (k === 'q') {
-      const n = allLive();
-      if (!n) return actions.quit();
-      ui.confirm = { text: `${plural(n, 'session')} still running. They keep going in the background and reappear next launch. Press q again to quit.`, key: 'q', yes: actions.quit };
+      const [n, setup] = [allLive(), settingUp().length];
+      if (!n && !setup) return actions.quit();
+      const text = [setup && `${plural(setup, 'review')} being set up: quit now and no session starts for them; a tagged ticket stays tagged for the next launch.`,
+        n && `${plural(n, 'session')} still running. They keep going in the background and reappear next launch.`].filter(Boolean).join(' ');
+      ui.confirm = { text: `${text} Press q again to quit.`, key: 'q', yes: actions.quit };
       return undefined;
     }
     if (k === 'e') return toggleSide();

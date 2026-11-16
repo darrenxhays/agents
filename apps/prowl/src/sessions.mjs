@@ -13,7 +13,8 @@ export function alive(run) {
   // sooner on Windows, which reuses pids quickly. It is still the session only if it started with the session.
   if (run._ours === undefined) {
     const started = run._spawned ? null : processStart(run.pid);
-    run._ours = started === null || started < run.startedAt + 10_000; // unreadable: trust the pid
+    // Against when the session was launched: a prepared review's session starts minutes after the review itself.
+    run._ours = started === null || started < (run.launchedAt ?? run.startedAt) + 10_000; // unreadable: trust the pid
   }
   return run._ours;
 }
@@ -22,6 +23,7 @@ export function alive(run) {
 export function track(run, child, cfg) {
   exited.delete(child.pid); // the system hands pids out again, Windows quickly: this one is running now
   run.pid = child.pid;
+  run.launchedAt = Date.now();
   run._spawned = true;
   if (cfg.caffeinate) keepAwake(child.pid); // a sleeping Mac stalls the session's streams and stretches it out
   child.on('error', e => { run.spawnError = e.message; exited.add(child.pid); });

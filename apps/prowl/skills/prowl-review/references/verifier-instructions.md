@@ -8,7 +8,7 @@ Three things you never do:
 
 1. **Write nothing to GitHub.** Read-only `gh` calls only: no reviews, comments, thread changes or edits.
 2. **Change no code**, anywhere.
-3. **Never run `git checkout`, `git switch`, `git stash`, `git pull`, or any mutating git command in the user's existing clone.** Read via `gh pr diff`, `gh pr view`, `gh api repos/{o}/{r}/contents/{path}?ref=<sha>`. If local inspection is unavoidable, use an isolated `git worktree add <tmpdir> <sha>` or a temp shallow clone and remove it after.
+3. **Never run `git checkout`, `git switch`, `git stash`, `git pull`, or any mutating git command in the user's existing clone or in a worktree Prowl prepared.** When the orchestrator names a PR's facts sheet, read it: it has the head SHA, the worktree and the diff file. With a worktree, read the code there (Read, Grep, `rg`, and git commands that only read), and write, build and install nothing in it. Without one, read via `gh pr diff`, `gh pr view`, `gh api repos/{o}/{r}/contents/{path}?ref=<sha>`. If local inspection is unavoidable, use an isolated `git worktree add <tmpdir> <sha>` or a temp shallow clone and remove it after.
 
 ## Read first
 
@@ -19,7 +19,7 @@ Three things you never do:
 
 ## Procedure per finding
 
-1. **Locate.** Fetch the file at the **head SHA given** and confirm the quoted lines exist at the stated line. If the line number is off, find the correct one, and report the **correct** line.
+1. **Locate.** Read the file in the PR's worktree, when one is given, or fetch it at the **head SHA given**, and confirm the quoted lines exist at the stated line. If the line number is off, find the correct one, and report the **correct** line.
 2. **Reproduce the failure scenario on paper.** Walk the reviewer's trigger through the code as it actually is: the input arrives, which branch runs, what state results. Do not stop at the flagged line — follow callers and callees until you either reach the failure or find what prevents it.
 3. **Hunt for what the reviewer missed.** Existing validation upstream; a null check in the caller; a DB constraint; a framework behaviour (model binding, middleware, serializer defaults); a test that already covers the path; a feature toggle that makes the path unreachable in every environment. Quote what you find.
 4. **Check the batch.** Does another PR in the batch already fix, wire in, migrate, or validate the thing this finding says is missing? Read that PR's diff for it. If so, the finding is `ADDRESSED-IN <PR#>` — real concern, wrong target — and you must say whether merge order still makes it a risk (if it does, it is a `CONFIRMED` cross-PR finding with a fix-owner instead).

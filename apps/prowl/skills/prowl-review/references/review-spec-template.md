@@ -1,6 +1,6 @@
 # Review Specification — <owner/repo>#<n> (<batch-id>)
 
-Fill every field. The reviewer sees only this document, the reviewer-instructions file, the review config, and the PRs themselves. Anything you leave out, it does not know. Save the filled copy to `specs/<repo>-<n>.md` and paste it inline in the reviewer prompt.
+Fill every field. The reviewer sees only this document, the reviewer-instructions file, the review config, and the PRs themselves. Anything you leave out, it does not know. Save the filled copy to `specs/<repo>-<n>.md`, and give the reviewer its absolute path when Prowl prepared the review, or paste it inline in the reviewer prompt otherwise.
 
 ---
 
@@ -18,13 +18,18 @@ Fill every field. The reviewer sees only this document, the reviewer-instruction
 **Your PR** (repo, number, title, head SHA):
 - <owner/repo>#<n> — <title> — `<headRefOid>`
 
+**Facts sheet:** <absolute path of the PR's facts.md>. Read it first: it has the head, merge base, worktree, diff, description file, rule files and the review's other PRs. <Leave this line out when Prowl prepared none.>
+**Code at the head:** <absolute path of the PR's worktree, or "not prepared: read it from GitHub">
+
 **Depth expectation:** <e.g. "trace every read and write in the changed path end-to-end for the access check"; "line-by-line on the new function and the data change; skim the generated code">
 
 ## 4. Sibling PRs
 
 Every other open PR in the batch has its own reviewer. Read a sibling's code only where it shares a surface with your PR (the other side of a contract, toggle, migration or registration). If you notice a defect in a sibling's own code, put it in *Out-of-scope observations* with one line of evidence and move on.
 
-- <owner/repo>#<m> — `<headRefOid>` — OPEN/MERGED — shared surfaces: <what it produces or consumes from your PR>
+- <owner/repo>#<m> — `<headRefOid>` — OPEN/MERGED — shared surfaces: <what it produces or consumes from your PR> — code at the head: <its worktree, or "read it from GitHub"> — diff: <its diff file, or "gh pr diff">
+
+<With a facts sheet, a sibling line gives only the PR and its shared surfaces: the sheet has the rest.>
 
 ## 5. Consumers outside the batch
 
@@ -51,4 +56,4 @@ Each came from the orchestrator's mapping pass. **Report an outcome for every on
 
 ## 9. Output
 
-Return the report defined in `<SKILL_DIR>/references/reviewer-instructions.md` as your final message. Local finding IDs `R-<repo>-<n>-<k>`. Write nothing to GitHub. Change nothing. Never mutate the user's clone.
+Return the report defined in `<SKILL_DIR>/references/reviewer-instructions.md` as your final message. Local finding IDs `R-<repo>-<n>-<k>`. Write nothing to GitHub. Change nothing. Never mutate the user's clone or a worktree Prowl prepared.

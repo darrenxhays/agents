@@ -16,7 +16,7 @@ import { builderTags, gateDecision, workState } from './builder/rules.mjs';
 import { baseSteps, checkPlan, checksLine, prChecks } from './reviewer/checks.mjs';
 import { createReviewer } from './reviewer/reviewer.mjs';
 import { MODELS } from './config.mjs';
-import { agentModel, buildPrompt, CHECKS_SLOT, createReview, fenced, fillChecks, finalize, reviewArgs, reviewRoles, rolesWarning } from './reviewer/reviews.mjs';
+import { agentModel, buildPrompt, CHECKS_SLOT, createReview, fenced, fillChecks, fillPrep, finalize, PREP_SLOT, reviewArgs, reviewRoles, rolesWarning } from './reviewer/reviews.mjs';
 import { readActivity, sessionEnded } from './sessions.mjs';
 import { startTui } from './tui.mjs';
 
@@ -126,7 +126,7 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
    * Resolves with { side, seen: { claims, retags, started, launched, logs }, app, gh, tracker }.
    */
   function reviewerOver({ open = [], tickets = null, cfgOver = {}, runs = [], dry = false, deps = {}, ghOver = {}, trackerOver = {}, board = 'ado' } = {}) {
-    const cfg = { ...loadConfig(), githubOwner: 'octo-org', workDir: tmp, taskBoard: board, ...cfgOver };
+    const cfg = { ...loadConfig(), githubOwner: 'octo-org', workDir: tmp, taskBoard: board, reviewPrep: false, ...cfgOver }; // C-32's tests turn the setup on, with a stubbed prepare
     const seen = { claims: [], retags: [], started: [], launched: [], logs: [], warns: [] };
     const ticket = { key: 'AB#42', title: 'Thing', url: 'https://dev.azure.com/o/Shop/_workitems/edit/42', tags: [cfg.tags.trigger], rev: 3, ref: { org: 'https://dev.azure.com/o', project: 'Shop', id: 42 } };
     const app = { cfg, me: 'octocat', on: true, sideOn() { return this.on; }, tracker: () => tracker, boards: () => [{ project: 'Shop', team: 'Web' }], dryRun: () => dry };
@@ -820,6 +820,132 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
     const ignored = made({ claude: { model: 'claude-opus-4-1', orchestratorModel: 'claude-sonnet-5-5' } });
     assert.ok(!ignored.orchestrator && rolesWarning(ignored).startsWith("AB#42: Orchestrator model and effort aren't used: the Reviewer model 'claude-opus-4-1'") && rolesWarning(ignored).includes('or clear Orchestrator model'));
     assert.ok(!made().orchestrator && !made().rolesNote);
+  }
+
+  // ---- C-32: Prowl sets a review up before its session starts ----
+  {
+    const prepOf = (run, over = {}) => ({ dir: path.join(tmp, `${run.id}.prep`), comments: { unread: [], index: {} },
+      prs: run.prs.map(p => ({ url: p.url, repo: p.repo, number: p.number, role: 'review', head: 'sha1', worktree: '/wt', error: '', viewError: '', ...over })) });
+    const prepped = ({ prepare, cfgOver = {}, deps = {}, trackerOver = {}, ...rest } = {}) => {
+      const [order, removed] = [[], []];
+      const h = reviewerOver({ open: [prOf(1)], ...rest, cfgOver: { reviewPrep: true, ...cfgOver },
+        trackerOver: { claim: async (c, t, drop, add) => { order.push('claim'); h.seen.claims.push(add); }, ...trackerOver },
+        deps: { prepareReview: async (c, dir, run, opts) => { order.push('prepare'); opts.progress('Fetching octo-org/r1#1 and main'); return prepare ? prepare(run, h, opts) : prepOf(run); },
+          removePrep: async prep => { if (!prep || prep.dropped) return; prep.dropped = true; removed.push(prep.dir); }, sweepWorktrees: async () => [], ...deps } });
+      const { createReview: create, launchReview: launch } = h.side;
+      h.side.createReview = (...a) => { order.push('create'); return create(...a); };
+      h.side.launchReview = (...a) => { order.push('launch'); return launch(...a); };
+      return { ...h, order, removed };
+    };
+    // Created, prepared, claimed, launched, in that order.
+    let h = prepped();
+    await h.side.poll();
+    let run = h.side.state.runs[0];
+    assert.deepEqual(h.order, ['create', 'prepare', 'claim', 'launch']);
+    assert.deepEqual([h.seen.started[0].prepping, Boolean(run.prep), typeof run.setupMs, run._activity[0].text, h.side.preparing().length], [true, true, 'number', 'Fetching octo-org/r1#1 and main', 0],
+      "its setup's steps stay at the top of its Activity");
+    // Its session ending removes the worktrees, once.
+    await h.side.finish(run);
+    await h.side.finish(run).catch(() => {});
+    assert.equal(h.removed.length, 1, 'removed once, however often it is settled');
+
+    // A gap is a Log warning, and a head force-pushed away is followed.
+    h = prepped({ prepare: r => prepOf(r, { worktree: '', error: 'no clone', viewError: 'HTTP 502', replaced: 'sha1', head: 'newhead' }) });
+    await h.side.poll();
+    run = h.side.state.runs[0];
+    assert.ok(h.seen.logs.includes('AB#42: no worktree for octo-org/r1#1 (no clone); the session reads it from GitHub') && h.seen.logs.includes("AB#42: couldn't read octo-org/r1#1 on GitHub (HTTP 502); the session reads its facts itself"), h.seen.logs.join('\n'));
+    assert.equal(run.reviewedHeads[prOf(1).url], 'newhead', 'the new head is the one reviewed');
+    h = prepped({ prepare: r => ({ ...prepOf(r), comments: { unread: [prOf(1).url], index: {} } }) });
+    await h.side.poll();
+    assert.ok(h.seen.logs.includes(`AB#42: couldn't read the comments on ${prOf(1).url}; the session fetches them itself`));
+
+    // Switched off during the setup: no claim, no session, worktrees removed, the ticket still tagged.
+    h = prepped({ prepare: (r, hh) => { hh.app.on = false; return prepOf(r); } });
+    await h.side.poll();
+    assert.deepEqual([h.order, h.seen.claims, h.seen.retags, h.removed.length, h.side.state.runs.length, h.side.preparing().length], [['create', 'prepare'], [], [], 1, 0, 0]);
+
+    // s during the setup: no claim, the trigger tag removed, the Log line.
+    let stand;
+    const stopping = (r, hh) => {
+      [stand] = hh.side.preparing();
+      assert.deepEqual([stand.status, stand.id, stand.prs.length, stand._activity[0].text], ['preparing', 'preparing:AB#42', 1, 'Fetching octo-org/r1#1 and main']);
+      assert.equal(hh.side.stopText(stand), "Stop the review of AB#42 while it is being set up? Its setup ends first (a clone or a fetch can't be interrupted), then no session starts. Its 'prowl: review' tag is removed; re-tag to run it again.");
+      hh.side.stop(stand);
+      hh.side.stop(stand);
+      return prepOf(r);
+    };
+    h = prepped({ prepare: stopping });
+    await h.side.poll();
+    assert.deepEqual([h.order, h.seen.claims, h.seen.retags, h.removed.length, h.side.state.runs.length], [['create', 'prepare'], [], [''], 1, 0]);
+    for (const line of ['AB#42: stopping the review once its setup ends; no session will start', 'AB#42: already stopping, once its setup ends', "AB#42: review stopped during its setup. Re-tag 'prowl: review' to run it again."]) assert.ok(h.seen.logs.includes(line), `${line}\n${h.seen.logs.join('\n')}`);
+    h = prepped({ prepare: stopping, trackerOver: { retag: async () => { throw new Error('HTTP 500'); } } });
+    await h.side.poll();
+    assert.ok(h.seen.logs.includes("AB#42: review stopped during its setup, but taking 'prowl: review' off failed (HTTP 500); remove it by hand, or the next poll starts it again"));
+
+    // s confirmed after the launch stops the running review; after it ended, nothing is stopped.
+    h = prepped({ prepare: (r, hh) => { [stand] = hh.side.preparing(); return prepOf(r); } });
+    await h.side.poll();
+    run = h.side.state.runs[0];
+    h.side.stop(stand);
+    assert.notEqual(run.status, 'running', 'the running review is the one stopped');
+    h.side.state.runs = [];
+    h.side.stop(stand);
+    assert.ok(h.seen.logs.includes('AB#42: not stopped: it had already ended'));
+
+    // The claim lost after the setup: the worktrees go, no session.
+    h = prepped({ trackerOver: { claim: async () => { throw Object.assign(new Error('rev moved'), { lost: true }); } } });
+    await h.side.poll();
+    assert.deepEqual([h.order, h.removed.length, h.side.state.runs.length, h.side.preparing().length], [['create', 'prepare'], 1, 0, 0]);
+    assert.ok(h.seen.logs.some(l => l.startsWith('AB#42: not claimed (changed or claimed by someone else)')));
+
+    // A setup past its limit: the session sets itself up, and what the setup makes later is removed.
+    h = prepped({ deps: { prepLimitMs: 20 }, prepare: async r => { await sleep(120); return prepOf(r); } });
+    await h.side.poll();
+    run = h.side.state.runs[0];
+    assert.deepEqual([h.order, run.prep, h.removed.length], [['create', 'prepare', 'claim', 'launch'], undefined, 0]);
+    assert.ok(h.seen.logs.includes("AB#42: couldn't prepare its PRs (it took over 10 minutes); the review session sets itself up"));
+    await sleep(200);
+    assert.equal(h.removed.length, 1, 'whatever the abandoned setup checked out is removed when it finishes');
+
+    // Turned off: launched as before. A dry run prepares nothing.
+    h = prepped({ cfgOver: { reviewPrep: false } });
+    await h.side.poll();
+    assert.deepEqual([h.order, h.seen.started[0].prepping, h.side.state.runs.length], [['claim'], undefined, 1]);
+    h = prepped({ dry: true });
+    await h.side.poll();
+    assert.deepEqual([h.order, h.side.state.runs.length], [[], 0]);
+
+    // A quick review stopped during its setup: nothing reviewed, no label touched.
+    h = prepped({ tickets: [], cfgOver: { quickLabels: true }, prepare: (r, hh) => { [stand] = hh.side.preparing(); assert.ok(stand.quick && hh.side.stopText(stand).startsWith(`Stop the quick review ${stand.ticket} while it is being set up?`)); hh.side.stop(stand); return prepOf(r); } });
+    const refused = await h.side.quickReview(prOf(1).url).then(() => null, e => e);
+    assert.ok(refused?.lasting && h.seen.logs.includes(`${stand.ticket}: review stopped during its setup; nothing was reviewed`) && h.removed.length === 1 && !h.labelCalls.length && !h.side.state.runs.length, `${refused?.message}\n${h.seen.logs.join('\n')}`);
+    h = prepped({ tickets: [] });
+    run = await h.side.quickReview(prOf(1).url);
+    assert.deepEqual([h.order, Boolean(run.prep), h.side.preparing().length], [['create', 'prepare', 'launch'], true, 0]);
+
+    // The prompt's slot: after the context list, before the ticket; gone when nothing was prepared.
+    const first = promptCases.first;
+    const slotted = buildPrompt({ ...first, prepping: true, ticketText: 'The ticket.' });
+    assert.ok(slotted.includes(`\n\n${PREP_SLOT}\n\n`) && slotted.indexOf(PREP_SLOT) < slotted.indexOf('The ticket.') && !buildPrompt(first).includes(PREP_SLOT));
+    assert.equal(fillPrep(slotted, null), buildPrompt({ ...first, ticketText: 'The ticket.' }), 'nothing prepared: the prompt is as without the setup');
+    const re = promptCases.reReview;
+    const [u1, u2] = re.prs.map(x => x.url);
+    const delta = { ...re, prior: { ...re.prior, reviewedHeads: { [u1]: 'a', [u2]: 'b' } }, reReviewScope: 'delta', heads: { [u1]: 'a', [u2]: 'c' } };
+    assert.ok(buildPrompt({ ...delta, prepping: true }).includes("For each PR whose line under *Prepared by Prowl* has *Since the previous review*") && !buildPrompt(delta).includes('*Since the previous review*'));
+    assert.deepEqual(reviewArgs({ claude: { model: 'm', effort: '', permissionMode: 'auto', maxBudgetUsd: 0, maxTurns: 0 } }, '/plugin', null, ['/prep']).filter((a, i, all) => all[i - 1] === '--add-dir').at(-1), '/prep');
+    assert.equal(loadConfig().reviewPrep, true);
+
+    // Running: a row for a review being set up, s on it, and quitting.
+    const standIn = { id: 'preparing:AB#42', ticket: 'AB#42', title: 'Thing', prs: [prOf(1), prOf(2)], status: 'preparing', startedAt: Date.now() - 65_000, _activity: [{ text: 'Fetching octo-org/r1#1 and main' }] };
+    const t = tuiOver({ reviewer: { preparing: () => [standIn], stopText: () => 'Stop the review of AB#42 while it is being set up?' } });
+    assert.ok(/AB#42\s+Thing\s+2 PRs · preparing · 1m/.test(t.text(120)) && t.text(120).includes('Fetching octo-org/r1#1 and main'), t.text(120));
+    assert.ok(tuiOver({ reviewer: { preparing: () => [{ ...standIn, quick: true }] } }).text(120).includes('2 PRs · preparing · quick · '));
+    t.tui.key('s');
+    assert.ok(t.text(120).includes('Stop the review of AB#42 while it is being set up?'));
+    t.tui.key('y');
+    assert.deepEqual(t.calls.find(c => c[0] === 'stop')?.slice(1), ['reviewer', standIn]);
+    t.tui.key('q');
+    assert.ok(t.text(160, 40).replace(/\s+/g, ' ').includes('1 review being set up: quit now and no session starts for them; a tagged ticket stays tagged for the next launch. Press q again to quit.'), t.text(160, 40));
   }
 
   fs.rmSync(tmp, { recursive: true, force: true });

@@ -87,6 +87,7 @@ export function addWorktree(clone, wt, sha) {
       fs.rmSync(wt, { recursive: true, force: true });
       await git(clone, 'worktree', 'prune');
     }
+    fs.mkdirSync(path.dirname(wt), { recursive: true });
     await git(clone, ...quiet, 'worktree', 'add', '--detach', wt, sha);
   });
 }
@@ -94,11 +95,21 @@ export function addWorktree(clone, wt, sha) {
 /** Removes a worktree Prowl made, and with `branch`, the local branch it made there (never one the user made). */
 export function removeWorktree(clone, wt, branch = '') {
   return serial(clone, async () => {
+    if (!fs.existsSync(clone)) return fs.rmSync(wt, { recursive: true, force: true }); // the clone is gone: only the folder is left to delete
     if (fs.existsSync(wt)) await git(clone, 'worktree', 'remove', '--force', wt).catch(() => fs.rmSync(wt, { recursive: true, force: true }));
     await git(clone, 'worktree', 'prune').catch(() => {});
     if (branch) await git(clone, 'branch', '-D', branch).catch(() => {});
   });
 }
+
+/**
+ * Fetches `refs` from origin into `clone`, as one fetch. The refs go after `--`, so a branch name starting with a dash
+ * is a ref, never an option, and each is named in full (refs/pull/7/head, +refs/heads/main:refs/remotes/origin/main).
+ */
+export const fetchRefs = (clone, refs, { timeoutMs = 300_000 } = {}) => serial(clone, () => run('git', ['-C', clone, 'fetch', 'origin', '--', ...refs], { timeoutMs }));
+
+/** True when commit `a` is `b` or one of its ancestors, in `dir`. */
+export const isAncestor = (dir, a, b) => succeeds(dir, 'merge-base', '--is-ancestor', a, b);
 
 /** The commit `branch` is at on origin, or '' when origin has no such branch. */
 export const remoteSha = async (dir, branch) => (await git(dir, 'ls-remote', 'origin', `refs/heads/${branch}`)).split(/\s/)[0] || '';

@@ -6,7 +6,11 @@ Three things you never do:
 
 1. **Write nothing to GitHub.** Read-only `gh` calls only: no reviews, comments, thread changes or edits. Your findings go to the orchestrator, who has them verified.
 2. **You change no code.** No edits, commits, or pushes, anywhere.
-3. **You never run `git checkout`, `git switch`, `git stash`, `git pull`, or any other mutating git command in the user's existing clone.** It may hold uncommitted work and is shared with other reviewers running in parallel. Read via `gh pr diff`, `gh pr view`, and `gh api` (`repos/{o}/{r}/contents/{path}?ref=<sha>`). If local inspection is genuinely needed (running a linter, grepping a large tree), use an isolated `git worktree add <tmpdir> <sha>` or a temp shallow clone, and remove it when done.
+3. **You never run `git checkout`, `git switch`, `git stash`, `git pull`, or any other mutating git command in the user's existing clone or in a worktree Prowl prepared.** The clone may hold uncommitted work, and a worktree is shared with other reviewers running in parallel.
+
+   **With a worktree** (the spec or the PR's facts sheet names one): read the code there with Read, Grep and `rg`, the diff file for what the PR changes, and git commands that only read (`git -C <worktree> log`, `show`, `diff`, `blame`, `grep`). Don't clone the repo, download its files, run `git fetch`, or call `gh pr diff` or `gh api …/contents` for it; only a commit the worktree doesn't have is read through the API. A sibling's side of a shared surface is in the sibling's worktree. Build and install nothing.
+
+   **Without one:** read via `gh pr diff`, `gh pr view`, and `gh api` (`repos/{o}/{r}/contents/{path}?ref=<sha>`). If local inspection is genuinely needed (running a linter, grepping a large tree), use an isolated `git worktree add <tmpdir> <sha>` or a temp shallow clone, and remove it when done.
 
 ## Read first
 

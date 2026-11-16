@@ -12,6 +12,7 @@ import { frontMatter } from '../match.mjs';
 import { fill, loadOutputTemplates, outputTemplate } from '../templates.mjs';
 import * as rv from './reviews.mjs';
 import { checkPlan, checksLine, prChecks } from './checks.mjs';
+import { prepareReview, removePrep, sweepWorktrees } from './prep.mjs';
 import { planPublish } from './publish-plan.mjs';
 import { publishReview } from './publish.mjs';
 import { prName, reportMd } from './render.mjs';
@@ -117,7 +118,7 @@ export function createReviewer(app, deps) {
         if (run.phase !== 'checks' || run.status !== 'running') return;
         if (rv.overdue(run, cfg())) stopOverdue(run);
         else armCap();
-      }, Math.max(0, run.startedAt + minutes * 60_000 - Date.now()) + 1);
+      }, Math.max(0, rv.timedFrom(run) + minutes * 60_000 - Date.now()) + 1);
     };
     run._building = (async () => {
       if (rv.overdue(run, cfg())) return stopOverdue(run); // restored after its time ran out: no check runs
@@ -156,6 +157,60 @@ export function createReviewer(app, deps) {
     })().catch(e => { delete run.phase; run.spawnError = `could not start the review: ${e.message}`; })
       .finally(() => { clearTimeout(capTimer); run._building = null; });
     return run._building;
+  }
+
+  // ---- Prowl sets a review up before its session starts (Prepare PRs before reviews) ----
+
+  const preparing = new Map(); // ticket key -> its stand-in, a Running row while the review is being set up
+  /** The reviews being set up: each a stand-in for Running, { id: 'preparing:<key>', ticket, title, prs, status: 'preparing', startedAt, _activity }. */
+  side.preparing = () => [...preparing.values()];
+  const prepping = () => cfg().reviewPrep !== false;
+
+  /** Removes what a review's setup checked out (its worktrees; the prepared files stay). A failure is only a warning. */
+  async function dropPrep(run) {
+    try {
+      await (deps.removePrep || removePrep)(run.prep);
+    } catch (e) {
+      log('warn', `${run.ticket}: couldn't remove its worktrees (${e.message})`);
+    }
+  }
+
+  /**
+   * Creates a review and does its setup, with a stand-in in Running meanwhile: its PRs checked out in worktrees, and
+   * their facts, diffs and comments written to files. Nothing is claimed or saved yet. The whole setup has a
+   * 10-minute limit (a step can't be interrupted): past it the session sets itself up, and whatever the abandoned
+   * setup checks out later is removed as soon as it finishes. Resolves { run, stand }.
+   */
+  async function setUp(c, opts, prior) {
+    const run = (side.createReview || rv.createReview)(c, { ...opts, appDir, prepping: true, checking: checksFor(opts.prs).length > 0 });
+    const stand = { id: `preparing:${run.ticket}`, ticket: run.ticket, ticketUrl: run.ticketUrl, title: run.title, prs: run.prs, status: 'preparing', startedAt: run.startedAt, _activity: [], ...(run.quick && { quick: true }), _run: run };
+    preparing.set(run.ticket, stand);
+    let timer;
+    const work = Promise.resolve().then(() => (deps.prepareReview || prepareReview)(c, appDir, run, { prior, progress: text => note(stand, text) }));
+    const prep = await Promise.race([work.catch(() => null), new Promise(r => { timer = setTimeout(() => r(undefined), deps.prepLimitMs ?? 10 * 60_000); })]);
+    clearTimeout(timer);
+    run.setupMs = Date.now() - run.startedAt; // the time cap doesn't count Prowl's own setup
+    if (prep === undefined) {
+      log('warn', `${run.ticket}: couldn't prepare its PRs (it took over 10 minutes); the review session sets itself up`);
+      work.then(late => (deps.removePrep || removePrep)(late)).catch(() => {});
+      return { run, stand };
+    }
+    if (!prep) return { run, stand };
+    run.prep = prep;
+    const name = p => `${p.repo}#${p.number}`;
+    for (const p of prep.prs) if (p.replaced && p.role === 'review') run.reviewedHeads[p.url] = p.head; // force-pushed since the review started: the new head is the one reviewed
+    const bare = prep.prs.filter(p => !p.worktree);
+    if (bare.length) log('warn', `${run.ticket}: no worktree for ${bare.map(p => `${name(p)} (${p.error})`).join(', ')}; the session reads ${bare.length > 1 ? 'them' : 'it'} from GitHub`);
+    const blind = prep.prs.filter(p => p.viewError);
+    if (blind.length) log('warn', `${run.ticket}: couldn't read ${blind.map(name).join(', ')} on GitHub (${blind[0].viewError}); the session reads ${blind.length > 1 ? 'their' : 'its'} facts itself`);
+    if (prep.comments?.unread?.length) log('warn', `${run.ticket}: couldn't read the comments on ${prep.comments.unread.join(', ')}; the session fetches them itself`);
+    return { run, stand };
+  }
+
+  /** The session of a review that was set up: started now, or after its checks. Its setup's Activity lines stay at the top of its own. */
+  function launchPrepared(c, run, stand) {
+    if (run.phase !== 'checks') (side.launchReview || rv.launchReview)(c, appDir, run);
+    run._activity = [...stand._activity, ...(run._activity || [])];
   }
 
   /** On quit: every checks phase is aborted; a run left in its checks phase has them run again from the start next launch. */
@@ -219,6 +274,7 @@ export function createReviewer(app, deps) {
     const c = cfg();
     const key = `ticket:${ticket.key}`;
     if (side.running().some(r => r.ticket === ticket.key)) return; // re-tagged mid-review: re-reviewed once this one ends
+    if (preparing.has(ticket.key)) return; // its review is being set up
     // ...and so is a ticket someone else's Prowl is reviewing: claiming it now would review its PRs twice at once.
     const busyTag = (ticket.tags || []).find(inReview);
     if (busyTag) {
@@ -309,10 +365,36 @@ export function createReviewer(app, deps) {
       }
       if (!on()) return undefined; // switched off meanwhile: nothing is claimed yet
     }
+    // Prowl's own setup comes before the claim too: a quit or crash during it leaves the ticket tagged, with nothing to give back.
+    const opts = { tracker: c.taskBoard, ticket, prs: toReview, approvedPrs: approved, leftOut: prior ? leftOut : [], prior, me: app.me, heads, ticketText };
+    let set = null;
+    if (toReview.length && prepping()) {
+      try {
+        set = await setUp(c, opts, prior);
+      } catch (e) {
+        preparing.delete(ticket.key);
+        return log('error', `${ticket.key}: could not start the review: ${e.message}`);
+      }
+      if (set.stand.stopped || !on()) {
+        await dropPrep(set.run);
+        preparing.delete(ticket.key);
+        if (!set.stand.stopped) return undefined; // switched off during the setup: nothing claimed, the ticket stays tagged for the next poll
+        // Nothing was claimed, so there is no in-progress tag to remove: the trigger tag comes off, or the next poll would start it again.
+        try {
+          await tracker.retag(c, ticket.ref, isTrigger, '');
+          return log('warn', `${ticket.key}: review stopped during its setup. Re-tag '${c.tags.trigger}' to run it again.`);
+        } catch (e) {
+          return log('error', `${ticket.key}: review stopped during its setup, but taking '${c.tags.trigger}' off failed (${e.message}); remove it by hand, or the next poll starts it again`);
+        }
+      }
+    }
+    /** The setup's worktrees go when the review doesn't start after all. */
+    const unset = async () => { if (set) { await dropPrep(set.run); preparing.delete(ticket.key); } };
     const to = toReview.length ? c.tags.inProgress : tagsNow().approved; // nothing to re-review: straight to approved, in one write a teammate's poller can't race
     try {
       await tracker.claim(c, ticket, t => isTrigger(t) || ours(t), to);
     } catch (e) {
+      await unset();
       if (e.lost) return log('warn', `${ticket.key}: not claimed (changed or claimed by someone else): ${e.message}`, key);
       // Any other failure may have come after the write landed: the ticket may carry the tag with nobody reviewing it.
       return log('error', `${ticket.key}: the claim failed (${e.message}) and may still have reached the ticket: if it is '${to}' now, put '${c.tags.trigger}' back`, key);
@@ -329,18 +411,21 @@ export function createReviewer(app, deps) {
     }
     if (!on()) {
       log('info', `${ticket.key}: the Reviewer was switched off as it claimed this ticket; putting '${c.tags.trigger}' back`);
+      await unset();
       return release();
     }
     hoot(`Starting reviews for ${ticket.title}, marking as '${c.tags.inProgress}'`);
     let run;
     try {
       if (prior && c.reReviewScope === 'delta' && !prior.reviewedHeads) log('info', `${ticket.key}: re-reviewing in full, as the last review is from before Prowl recorded the commits it reviewed`, `scope:${ticket.key}`);
-      run = begin(c, { tracker: c.taskBoard, ticket, prs: toReview, approvedPrs: approved, leftOut: prior ? leftOut : [], prior, me: app.me, heads, ticketText });
+      if (set) { ({ run } = set); launchPrepared(c, run, set.stand); } else run = begin(c, opts);
     } catch (e) {
       log('error', `${ticket.key}: could not start the review: ${e.message}`);
+      await unset();
       return release();
     }
     state.runs.push(run);
+    preparing.delete(ticket.key);
     if (run.rolesNote) log('warn', rv.rolesWarning(run), 'roles');
     free(); // the run counts itself from here
     endWaits(ticket.key, 'its tagged review started');
@@ -543,7 +628,21 @@ export function createReviewer(app, deps) {
       log('warn', `${spec.key}: ${e.message}; reviewing from GitHub without a local clone`);
     }
     if (!on()) throw new Error('the Reviewer was switched off before the review started');
-    const run = begin(c, { tracker: null, ticket, prs: toReview.map(strip), approvedPrs: approved.map(strip), leftOut: prior ? leftOut.map(strip) : [], prior, me: app.me, heads, quick: true });
+    const opts = { tracker: null, ticket, prs: toReview.map(strip), approvedPrs: approved.map(strip), leftOut: prior ? leftOut.map(strip) : [], prior, me: app.me, heads, quick: true };
+    let run;
+    if (prepping()) {
+      // No claim here: its labels are written after the launch, as always.
+      const set = await setUp(c, opts, prior).catch(e => { preparing.delete(spec.key); throw e; });
+      const dropped = async () => { await dropPrep(set.run); preparing.delete(spec.key); };
+      if (set.stand.stopped) {
+        await dropped();
+        log('warn', `${spec.key}: review stopped during its setup; nothing was reviewed`);
+        throw lasting('it was stopped while it was being set up');
+      }
+      if (!on()) { await dropped(); throw new Error('the Reviewer was switched off before the review started'); }
+      try { ({ run } = set); launchPrepared(c, run, set.stand); } catch (e) { await dropped(); throw e; }
+      preparing.delete(spec.key);
+    } else run = begin(c, opts);
     Object.assign(run, { paste: spec.paste, ...(labelsOn() && { labels: true }) });
     side.state.runs.push(run);
     if (run.rolesNote) log('warn', rv.rolesWarning(run), 'roles');
@@ -763,6 +862,7 @@ export function createReviewer(app, deps) {
   async function finish(run) {
     // A review left half-posted by an earlier launch: its session was settled then, and its posting carries on.
     const resumed = run.phase === 'publishing';
+    if (run.prep && !run.prep.dropped) { await dropPrep(run); save(); } // its worktrees go as soon as its session has ended; the prepared files stay
     if (!resumed) rv.finalize(run);
     const { tags } = cfg();
     const failures = run.quick ? (side.state.quickFailures ??= {}) : side.state.failures; // a quick review's apart from the ticket's
@@ -931,7 +1031,16 @@ export function createReviewer(app, deps) {
   }
 
   /** Once a second, on or off: tail running reviews, settle finished ones, retry tag writes. */
+  let swept = false;
+  /** Once, at launch: worktree folders no running review owns (left by a crash, or a quit during a setup) are removed. */
+  const sweep = () => {
+    if (swept) return;
+    swept = true;
+    (deps.sweepWorktrees || sweepWorktrees)(cfg().workDir, side.running().map(r => r.id)).catch(() => {});
+  };
+
   side.tick = function tick() {
+    sweep();
     for (const run of side.running()) {
       if (run._finishing) continue;
       if (run.phase === 'publishing') { // left half-posted by an earlier launch: its posting carries on, and nothing is posted twice
@@ -973,6 +1082,7 @@ export function createReviewer(app, deps) {
 
   /** --once: settles reviews whose sessions have ended before the poll. */
   side.settle = async function settle() {
+    sweep();
     for (const run of side.running()) {
       if (run.phase === 'publishing') { await finish(run); continue; }
       if (run.phase === 'checks') { // its checks run again from the start; checksDone() waits for them
@@ -988,6 +1098,10 @@ export function createReviewer(app, deps) {
 
   /** The question s asks before stopping `run`: a review that has written its report counts as done all the same. */
   side.stopText = run => {
+    if (run.status === 'preparing') {
+      return run.quick ? `Stop the quick review ${run.ticket} while it is being set up? Its setup ends first (a clone or a fetch can't be interrupted), then no session starts.`
+        : `Stop the review of ${run.ticket} while it is being set up? Its setup ends first (a clone or a fetch can't be interrupted), then no session starts. Its '${cfg().tags.trigger}' tag is removed; re-tag to run it again.`;
+    }
     const done = rv.reportWritten(run);
     const wrote = run.resultMode ? 'review result, so it counts as done: Prowl posts it' : 'report, so it counts as done';
     if (run.quick) return `Stop the quick review ${run.ticket}?${done ? ` It has written its ${wrote}${labelsOn() ? ' and its PRs are labelled as usual' : ''}.` : ''}`;
@@ -996,6 +1110,16 @@ export function createReviewer(app, deps) {
   };
 
   side.stop = run => {
+    if (run.status === 'preparing') { // a review being set up: its setup ends first (a clone or a fetch can't be interrupted), then no session starts
+      if (preparing.get(run.ticket) === run) {
+        if (run.stopped) return log('info', `${run.ticket}: already stopping, once its setup ends`);
+        run.stopped = true;
+        return log('warn', `${run.ticket}: stopping the review once its setup ends; no session will start`);
+      }
+      const started = side.running().find(r => r === run._run); // its session had started by the time this was confirmed
+      if (!started) return log('info', `${run.ticket}: not stopped: it had already ended`);
+      return side.stop(started);
+    }
     if (run.phase === 'publishing') return log('warn', `${run.ticket}: its review is being posted on GitHub and can't be stopped part-way`);
     rv.stopReview(run);
     save();

@@ -365,7 +365,7 @@ async function reviews(assert, appDir) {
   };
   const tagged = [];
   const logs = [];
-  const cfg = { ...loadConfig(), githubOwner: 'octo-org', workDir: tmp, quickName: 'number', maxConcurrentReviews: 3, maxReviewRounds: 0 };
+  const cfg = { ...loadConfig(), githubOwner: 'octo-org', workDir: tmp, quickName: 'number', maxConcurrentReviews: 3, maxReviewRounds: 0, reviewPrep: false };
   const app = { cfg, me: '', on: true, sideOn() { return this.on; }, tracker: () => tracker, boards: () => [{ project: 'Shop', team: 'Web' }], dryRun: () => false };
   const labels = createLabels({ gh, log: (s, l, m) => logs.push(m), file: path.join(tmp, 'labels.json') });
   const names = [];

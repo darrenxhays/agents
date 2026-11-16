@@ -156,11 +156,12 @@ export async function isOpen(pr) {
 }
 
 /** Clones each PR's repo into `dir` unless a folder of that name is already there. Resolves with the repos cloned. */
-export async function cloneMissing(prs, dir) {
+export async function cloneMissing(prs, dir, onClone = () => {}) {
   const cloned = [];
   for (const repo of new Set(prs.map(p => p.repo))) {
     const target = path.join(dir, repo.split('/')[1]);
     if (fs.existsSync(target)) continue;
+    onClone(repo, target);
     await run('gh', ['repo', 'clone', repo, target], { timeoutMs: 3_600_000 }); // a big repo on a slow line: an hour, not the usual 10 minutes
     cloned.push(repo);
   }
@@ -213,18 +214,33 @@ export async function prFacts(pr) {
  * conversation comments ([{ body }]): the collapsed block whose summary names prowl-review-…-<repo>-<n>.md,
  * joined with its part 2 comment when there is one. '' when there is none or it can't be parsed.
  */
+/**
+ * The details file collapsed in one body (a review's, or a part 2 comment's): { file (its name), text, part2 }, or
+ * null. `name`: only the file of that PR (`<repo name>-<n>`); '' takes any PR-Owl details file.
+ */
+export function detailsBlock(body, name = '') {
+  const file = new RegExp(`<summary>[^<]*(prowl-review-[^<\\s]*${name ? `-${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}` : ''}\\.md)[^<]*</summary>`, 'i');
+  const text = String(body || '').replace(/\r\n/g, '\n'); // a body edited on GitHub is saved with CRLF
+  const m = file.exec(text);
+  if (!m) return null;
+  const after = text.slice(m.index + m[0].length);
+  const open = /^[ \t]*(`{3,}|~{3,})[^\n]*\n/m.exec(after);
+  if (!open) return null;
+  const rest = after.slice(open.index + open[0].length);
+  const close = new RegExp(`^[ \\t]*${open[1]}[ \\t]*$`, 'm').exec(rest);
+  return { file: m[1], text: (close ? rest.slice(0, close.index) : rest).trim(), part2: /part 2/i.test(m[0]), closed: Boolean(close) };
+}
+
+/** One review's details file, joined with its part 2 conversation comment when it has one ('' when it has none). `comments`: [{ body }]. */
+export function reviewDetails(review, comments) {
+  const d = detailsBlock(review?.body);
+  if (!d || d.part2) return '';
+  const part2 = (comments || []).map(c => detailsBlock(c.body)).find(x => x?.part2 && x.file === d.file);
+  return part2 ? `${d.text}\n\n${part2.text}` : d.text;
+}
+
 export function detailsFromBodies(reviews, comments, name) {
-  const file = new RegExp(`<summary>[^<]*(prowl-review-[^<\\s]*-${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.md)[^<]*</summary>`, 'i');
-  const block = body => {
-    const m = file.exec(body || '');
-    if (!m) return null;
-    const after = body.slice(m.index + m[0].length);
-    const open = /^[ \t]*(`{3,}|~{3,})[^\n]*\n/m.exec(after);
-    if (!open) return null;
-    const rest = after.slice(open.index + open[0].length);
-    const close = new RegExp(`^[ \\t]*${open[1]}[ \\t]*$`, 'm').exec(rest);
-    return { file: m[1], text: (close ? rest.slice(0, close.index) : rest).trim(), part2: /part 2/i.test(m[0]) };
-  };
+  const block = body => detailsBlock(body, name);
   const latest = reviews.map(r => ({ ...r, d: block(r.body) })).filter(r => r.d && !r.d.part2).sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0];
   if (!latest) return '';
   const part2 = comments.map(c => block(c.body)).find(d => d?.part2 && d.file === latest.d.file);
@@ -416,4 +432,39 @@ export const allReviews = pr => apiLines([`repos/${pr.repo}/pulls/${pr.number}/r
 /** Dismisses review `id` on the PR, from `file` ({ message, event: "DISMISS" }). It needs write access, and branch protection can restrict who may. */
 export async function dismissReview(pr, id, file) {
   await ghApi(['-X', 'PUT', `repos/${pr.repo}/pulls/${pr.number}/reviews/${id}/dismissals`, '--input', file, '--jq', '.state']);
+}
+
+// ---- What Prowl reads to set a review up before its session starts (src/reviewer/prep.mjs) ----
+
+/** A PR's facts: { state (lowercased), draft, title, body, author, base, branch, head, fork, additions, deletions, files }. */
+export async function prView(pr) {
+  const v = JSON.parse(await run('gh', ['pr', 'view', pr.url, '--json', 'number,title,body,state,isDraft,author,baseRefName,headRefName,headRefOid,isCrossRepository,additions,deletions,changedFiles']));
+  return { state: String(v.state || '').toLowerCase(), draft: Boolean(v.isDraft), title: v.title || '', body: v.body || '', author: v.author?.login || '', base: v.baseRefName || '', branch: v.headRefName || '',
+    head: v.headRefOid || '', fork: Boolean(v.isCrossRepository), additions: v.additions || 0, deletions: v.deletions || 0, files: v.changedFiles || 0 };
+}
+
+const DISCUSSION_THREADS = 'query($owner:String!,$repo:String!,$n:Int!,$after:String){repository(owner:$owner,name:$repo){pullRequest(number:$n){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{'
+  + 'id isResolved isOutdated path line originalLine comments(first:1){nodes{databaseId}}}}}}}';
+/**
+ * Everything said on a PR, whole: { threads: [{ id, resolved, outdated, path, line, originalLine, commentId }],
+ * comments: [{ id, inReplyTo, user, body, url, commit, at }] (review comments), reviews: [{ id, user, state, body,
+ * url, commit, at }], issueComments: [{ id, user, body, url, at }] }.
+ */
+export async function prDiscussion(pr) {
+  const [owner, repo] = pr.repo.split('/');
+  const threads = [];
+  let after = null;
+  do {
+    const page = JSON.parse(await run('gh', ['api', 'graphql', '-F', `owner=${owner}`, '-F', `repo=${repo}`, '-F', `n=${pr.number}`, ...(after ? ['-f', `after=${after}`] : []), '-f', `query=${DISCUSSION_THREADS}`]));
+    const list = page?.data?.repository?.pullRequest?.reviewThreads;
+    for (const t of list?.nodes || []) threads.push({ id: t.id, resolved: Boolean(t.isResolved), outdated: Boolean(t.isOutdated), path: t.path || '', line: t.line ?? null, originalLine: t.originalLine ?? null, commentId: t.comments?.nodes?.[0]?.databaseId ?? null });
+    after = list?.pageInfo?.hasNextPage ? list.pageInfo.endCursor : null;
+  } while (after);
+  const lines = async (url, jq) => jsonLines(await run('gh', ['api', url, '--paginate', '--jq', jq]));
+  const [comments, reviews, issueComments] = await Promise.all([
+    lines(`repos/${pr.repo}/pulls/${pr.number}/comments`, '.[] | {id, inReplyTo: .in_reply_to_id, user: .user.login, body, url: .html_url, commit: .original_commit_id, at: .created_at}'),
+    lines(`repos/${pr.repo}/pulls/${pr.number}/reviews`, '.[] | {id, user: .user.login, state, body, url: .html_url, commit: .commit_id, at: .submitted_at}'),
+    lines(`repos/${pr.repo}/issues/${pr.number}/comments`, '.[] | {id, user: .user.login, body, url: .html_url, at: .created_at}'),
+  ]);
+  return { threads, comments, reviews, issueComments };
 }
