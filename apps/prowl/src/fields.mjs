@@ -5,7 +5,7 @@
 // calls tags labels: `jira` replaces the label and help shown when it is the task board.
 import fs from 'node:fs';
 import path from 'node:path';
-import { CHECKS_PATH, CONFIG_DIR, CONFIG_PATH, EFFORTS, MODELS } from './config.mjs';
+import { AGENT_MODELS, CHECKS_PATH, CONFIG_DIR, CONFIG_PATH, EFFORTS, MODELS } from './config.mjs';
 
 const isDir = p => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
 const https = v => /^https:\/\/\S+$/.test(v) || 'must be an https:// URL';
@@ -79,6 +79,8 @@ export const CONFIG_FIELDS = [
   { key: 'maxConcurrentReviews', label: 'Max parallel reviews', type: 'int', min: 1, max: 10, help: "Extra tickets stay tagged until a slot frees, so a teammate's poller can take them." },
   { key: 'claude.model', label: 'Model', type: 'enum', values: MODELS, help: `Model for review sessions, and for build sessions while the Builder's Model is empty. enter cycles; another model id can go in the settings file.` },
   { key: 'claude.effort', label: 'Effort', type: 'enum', values: EFFORTS, help: 'Reasoning effort for review sessions. enter cycles.' },
+  { key: 'claude.verifierModel', label: 'Verifier model', type: 'enum', values: [...AGENT_MODELS, ''], empty: true, emptyShows: 'Claude Code default', help: "Model for the subagents that check each finding before it's posted. Claude Code default: no model is set for them, so they run on the review session's model unless your Claude Code settings name a default subagent model. A finding no reviewer investigated is always checked by a verifier launched as reviewers are. enter cycles." },
+  { key: 'claude.verifierEffort', label: 'Verifier effort', type: 'enum', values: [...EFFORTS, ''], empty: true, emptyShows: 'Claude Code default', help: "Reasoning effort for the verifier subagents. Claude Code default: none is set for them, and they run at Claude Code's usual effort for subagents. enter cycles." },
   { key: 'ticketContext', label: 'Ticket text in reviews', type: 'bool', help: "on: the ticket's description (and, on Azure DevOps, its acceptance criteria) is added to the review's brief, so reviewers know the goal without signing in to the tracker. Up to about 6 KB." },
 
   { heading: 'Reviewer · Caps' },

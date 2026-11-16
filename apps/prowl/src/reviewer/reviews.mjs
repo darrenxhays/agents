@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { CONFIG_DIR, HOME, writeJson } from '../config.mjs';
+import { AGENT_MODELS, CONFIG_DIR, EFFORTS, HOME, writeJson } from '../config.mjs';
 import { frontMatter } from '../match.mjs';
 import { noHooksEnv } from '../git.mjs';
 import { spawnCli, killTree } from '../proc.mjs';
@@ -49,11 +49,19 @@ export const awaitingHuman = (run, approvals) => run?.awaitingHuman ?? (approval
  */
 export const runId = (key, reviewNo, at = new Date()) => `${key.replace(/[^A-Za-z0-9-]/g, '')}-${at.toISOString().slice(0, 19).replace(/[-:]/g, '')}-r${reviewNo}`;
 
+/** A subagent's model and effort as the Agent tool takes them: any other value (a full model id, an unknown effort) is ''. */
+const agentChoice = (model, effort) => ({ model: AGENT_MODELS.includes(model) ? model : '', effort: EFFORTS.includes(effort) ? effort : '' });
+
 /**
  * Starts a detached headless Claude Code session running prowl-review on the PRs. It outlives this
  * process; output goes to a log file this app tails, so a restart picks running reviews back up.
  */
-export function startReview(cfg, pluginDir, { tracker, ticket, prs, approvedPrs = [], leftOut = [], prior, me = '', heads = {}, ticketText = '', quick = false }) {
+export function startReview(cfg, pluginDir, opts) {
+  return launchReview(cfg, pluginDir, createReview(cfg, opts));
+}
+
+/** A review's run, with its prompt written to its prompt file: everything but the session, which launchReview() starts. */
+export function createReview(cfg, { tracker, ticket, prs, approvedPrs = [], leftOut = [], prior, me = '', heads = {}, ticketText = '', quick = false }) {
   const reviewNo = (prior?.reviewNo || 0) + 1;
   const id = runId(ticket.key, reviewNo);
   for (const dir of [REPORTS_DIR, LOGS_DIR, CONFIG_DIR]) fs.mkdirSync(dir, { recursive: true });
@@ -77,6 +85,8 @@ export function startReview(cfg, pluginDir, { tracker, ticket, prs, approvedPrs 
     reportPath: path.join(REPORTS_DIR, `${id}.md`),
     logPath: path.join(LOGS_DIR, `${id}.ndjson`),
     promptPath: path.join(LOGS_DIR, `${id}.prompt.md`),
+    // The verifier subagents' model and effort, as the prompt passes them ('' = Claude Code's default for subagents).
+    verifiers: agentChoice(cfg.claude.verifierModel, cfg.claude.verifierEffort),
   };
   const { maxBudgetUsd, maxTurns } = cfg.claude;
   if (maxBudgetUsd > 0 || maxTurns > 0) run.caps = { maxBudgetUsd, maxTurns }; // to name the cap if the session hits one
@@ -84,8 +94,13 @@ export function startReview(cfg, pluginDir, { tracker, ticket, prs, approvedPrs 
   if (prior) {
     try { priorReport = fs.readFileSync(prior.reportPath, 'utf8'); } catch { priorReport = '(the previous report file is missing)'; }
   }
-  fs.writeFileSync(run.promptPath, buildPrompt({ ...run, prior, priorReport, approvals: cfg.approvals, reReviewScope: cfg.reReviewScope, heads, parkHumanOnly: cfg.parkHumanOnly, ticketText }));
+  fs.writeFileSync(run.promptPath, buildPrompt({ ...run, prior, priorReport, approvals: cfg.approvals, reReviewScope: cfg.reReviewScope, heads, parkHumanOnly: cfg.parkHumanOnly, ticketText,
+    verifierModel: cfg.claude.verifierModel, verifierEffort: cfg.claude.verifierEffort }));
+  return run;
+}
 
+/** Starts the session of a review made by createReview(). */
+export function launchReview(cfg, pluginDir, run) {
   const stdin = fs.openSync(run.promptPath, 'r');
   const log = fs.openSync(run.logPath, 'a');
   const child = spawnCli('claude', reviewArgs(cfg, pluginDir), {
@@ -215,7 +230,7 @@ export function finalize(run) {
 }
 
 /** The prompt (the agent's brief): the PR list for prowl-review, the ticket, the re-review brief and the report spec. */
-export function buildPrompt({ ticket, title: rawTitle, ticketUrl, prs, contextPrs = [], leftOut = [], reviewNo, reportPath, prior, priorReport, approvals = true, reReviewScope = 'full', heads = {}, parkHumanOnly = false, ticketText = '', marker = '', quick = false }) {
+export function buildPrompt({ ticket, title: rawTitle, ticketUrl, prs, contextPrs = [], leftOut = [], reviewNo, reportPath, prior, priorReport, approvals = true, reReviewScope = 'full', heads = {}, parkHumanOnly = false, ticketText = '', marker = '', quick = false, verifierModel = '', verifierEffort = '' }) {
   const title = String(rawTitle ?? '').replace(/"/g, "'"); // someone else's words, shown in quotes: they can't close the quotes themselves
   const lines = [
     `/prowl:prowl-review ${[...prs, ...contextPrs].map(p => p.url).join(' ')}`,
@@ -235,6 +250,10 @@ export function buildPrompt({ ticket, title: rawTitle, ticketUrl, prs, contextPr
   ];
   if (marker) lines.push(`- End the body of each review you post with this line: ${marker}`);
   if (!approvals) lines.push("- Approvals off (Prowl's Approve PRs setting): never post an APPROVE review; see approvals-off mode in the skill.");
+  // A value the Agent tool would refuse counts as not set: one bad value must not fail every verifier.
+  const v = agentChoice(verifierModel, verifierEffort);
+  const verifier = [v.model && `\`model\` \`${v.model}\``, v.effort && `\`effort\` \`${v.effort}\``].filter(Boolean);
+  if (verifier.length) lines.push(`- Verifier model and effort (the skill's Step 6): ${verifier.join(', ')}.`);
   if (ticketText) lines.push('', ...ticketSection(ticketText));
   if (contextPrs.length) {
     lines.push('', '## Already approved: context only', '',

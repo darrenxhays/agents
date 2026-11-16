@@ -9,6 +9,8 @@ export const CHECKS_PATH = path.join(CONFIG_DIR, 'checks.json'); // the user's o
 
 export const MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1'];
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+// The names the Agent tool takes for a subagent's model: each is the latest of its family. Never a full model id.
+export const AGENT_MODELS = ['sonnet', 'opus', 'haiku', 'fable'];
 
 // Every setting and its default. CONFIG_PATH overrides these; the Config view (4) edits that file. NOTES documents
 // each one: saveConfig writes it as a comment above the setting.
@@ -23,7 +25,7 @@ const DEFAULTS = {
   pollSeconds: 300,
   maxConcurrentReviews: 2,
   workDir: process.cwd(),
-  claude: { model: 'claude-opus-5-5', effort: 'xhigh', permissionMode: 'auto', maxBudgetUsd: 0, maxTurns: 0 },
+  claude: { model: 'claude-opus-5-5', effort: 'xhigh', verifierModel: 'sonnet', verifierEffort: 'medium', permissionMode: 'auto', maxBudgetUsd: 0, maxTurns: 0 },
   reReviewScope: 'full',
   maxReviewRounds: 0,
   parkHumanOnly: false,
@@ -97,6 +99,8 @@ const NOTES = {
   claude: 'Review sessions (and build sessions, where the Builder leaves its own setting empty).',
   'claude.model': `Model: ${MODELS.map(m => `"${m}"`).join(', ')}, or any model id Claude Code accepts.`,
   'claude.effort': `Reasoning effort: ${EFFORTS.map(e => `"${e}"`).join(', ')}.`,
+  'claude.verifierModel': 'Model for the subagents that check each finding: "sonnet", "opus", "haiku" or "fable" (short names only, not a full model id). "" = none passed (Claude Code\'s default for subagents).',
+  'claude.verifierEffort': 'Reasoning effort for those subagents: "low", "medium", "high", "xhigh", "max". "" = none passed.',
   'claude.permissionMode': '"auto" lets a safety classifier block risky actions. "bypassPermissions" lets sessions run anything: not recommended.',
   'claude.maxBudgetUsd': 'Spend cap per review in USD. A review that hits it fails and isn\'t retried. 0 = no cap.',
   'claude.maxTurns': 'Turn cap per review. 0 = no cap.',

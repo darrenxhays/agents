@@ -7,6 +7,7 @@ Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z`
 - A review whose session sends its reviewers off in the background is no longer failed and retried while they work: a session counts as ended only once its process has exited, not at the end of its first turn. The same goes for a Builder turn.
 - A review that has posted and written its report counts as done even when Stop or the time cap is what ended its process, and is tagged (or its PRs labelled) as usual. Stop's question says so when the report is already there.
 - Builder: a turn the time cap stopped after it had written a valid result that only asks for something (more repos, a plan's approval, a question, blocked) goes on to that, as nothing was cut short. A finished build's or a round's result still stops at the cap, and Needs you says why.
+- Reviews cost less: the subagents that check each finding (the verifiers) now run on their own model and effort, **Verifier model** (`sonnet`) and **Verifier effort** (`medium`), instead of the review session's. Checking a stated claim against quoted code needs less than finding it. Set either to **Claude Code default** in Config (Reviewer · Sessions) to have them run as before. New settings: `claude.verifierModel`, `claude.verifierEffort`.
 
 ## 2.23.6
 - An answer pasted into a Needs-you form is now what Submit sends. Before, pasting into **Other**, **Send it back with a note** or **Ask about this** and pressing enter sent the option that was already picked: the recommended answer, or an approval of the plan.
