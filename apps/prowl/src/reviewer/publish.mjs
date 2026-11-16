@@ -43,8 +43,7 @@ function landedIn(op, w) {
 }
 
 /**
- * Posts `result` for `run`. `deps`: { gh, log(level, msg), hoot(text, mood), save(), templates, labels, note(result,
- * url), sleep(ms) }. Resolves with the final plan (planPublish()), and { info }: each PR as read. What it did is on
+ * Posts `result` for `run`. `deps`: { gh, log(level, msg), hoot(text, mood), save(), templates, labels, sleep(ms) }. Resolves with the final plan (planPublish()), and { info }: each PR as read. What it did is on
  * the run: published, publishRefused, publishErrors, publishFallback, unreviewed, reviewedPrs, approved, awaitingHuman, split.
  */
 export async function publishReview(run, result, deps) {
@@ -107,7 +106,7 @@ export async function publishReview(run, result, deps) {
   }
   save();
 
-  const ctx = () => ({ run, templates, labels, prs: info, note: deps.note });
+  const ctx = () => ({ run, templates, labels, prs: info });
   const done = key => key in run.published || key in run.publishRefused;
   const warnedLost = new Set();
 

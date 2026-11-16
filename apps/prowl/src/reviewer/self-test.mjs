@@ -10,8 +10,8 @@ import { detailsFromBodies } from '../github.mjs';
 import { outputTemplates, staleHeadings, template } from '../templates.mjs';
 import { commentable, commentableLines, disposition, planPublish, reviewMarker, saidStillOpen, splitAt, withThreads } from './publish-plan.mjs';
 import { attempt, publishReview, retryable, WAITS } from './publish.mjs';
-import { cut, esc, fenceFor, fillTemplate, flat, LIMIT, reportMd } from './render.mjs';
-import { checkResult, counts, eventFor, isCounted, isParked, notCarried, notChecked, NOT_FULLY, TODO, todoPaths, verdictLabels } from './result.mjs';
+import { cut, esc, fenceFor, fillTemplate, flat, LIMIT, reportMd, stateNote } from './render.mjs';
+import { checkResult, counts, eventFor, isCounted, isParked, isProwlReview, notCarried, notChecked, NOT_FULLY, refutedLines, TODO, todoPaths, verdictLabels } from './result.mjs';
 import { createReviewer } from './reviewer.mjs';
 import { buildPrompt, checkerCommand, createReview, newBatchId, priorFindings } from './reviews.mjs';
 
@@ -463,6 +463,26 @@ export async function run(assert, { appDir }) {
     assert.ok(file.includes(`- Title C-03 (rb-20261109-ab42-r1-0910-77aa F-03): create the CI pipeline · ${A}#discussion_r300\n- Title C-02 (rb-20261109-ab42-r1-0910-77aa F-02): answered: ${A}#discussion_r999 · ${A}#discussion_r200`), file.slice(file.indexOf('## Parked'), file.indexOf('## Coverage')));
     assert.deepEqual(parkedUrls(file).filter(u => /r(200|300)$/.test(u)), [`${A}#discussion_r300`, `${A}#discussion_r200`], "the Builder's reader finds the parked threads");
     assert.ok(fs.readFileSync(path.join(appDir, 'skills', 'prowl-review', 'references', 'verifier-instructions.md'), 'utf8').includes('- **ANSWERED** — it still happens at head'));
+  }
+
+  // ---- A hidden note of refuted findings ends each review body ----
+  {
+    const refuted = (over = {}) => finding('F-07', { status: 'refuted', outcome: { note: 'The caller checks it.' }, ...over });
+    assert.equal(stateNote([refuted({ title: 'a `x` | b', location: null, outcome: { note: 'c -- d' } })]), '<!-- prowl-state\nrefuted: no single place | a x / b | c - d\n-->');
+    const body = reviewOp(plan(resultOf([finding('F-01'), refuted(),
+      finding('F-08', { status: 'addressed-elsewhere', location: { path: 'db/schema.sql' }, crossPr: { counterpart: B, fixBelongsTo: B, why: 'it adds the column' }, outcome: { note: 'it adds the column' } }),
+      finding('C-02', { status: 'no-longer-applies', outcome: { note: 'The dispute holds --> see thread', disputeHolds: true } }), finding('C-03', { status: 'no-longer-applies', outcome: { note: 'Code gone.' } }),
+      finding('F-09', { status: 'unverifiable', outcome: { note: 'x' } })])).prs[0]).payload.body;
+    const block = `<!-- prowl-state\nrefuted: src/a.js:3 | Title F-07 | The caller checks it.\nrefuted: db/schema.sql | Title F-08 | handled in ${B}: it adds the column\nrefuted: src/a.js:3 | Title C-02 | The dispute holds - see thread\n-->`;
+    assert.ok(body.endsWith(`${block}\n\n${reviewMarker('AB42-20261110T143200-r1')}`), 'just before the review marker; a no-longer-applies finding only when its dispute holds; nothing for an unverifiable one');
+    assert.ok(!reviewOp(plan(resultOf([finding('F-01')])).prs[0]).payload.body.includes('prowl-state'), 'no such findings: no block');
+    const capped = stateNote(Array.from({ length: 50 }, (_, i) => refuted({ title: `Finding ${i}` })), 300);
+    assert.ok(capped.length <= 300 && capped.endsWith('\n-->') && capped.includes('Finding 0') && !capped.includes('Finding 49'), 'over the cap: the first lines only, and the comment still closes');
+    // Reading them back, from PR-Owl reviews only.
+    assert.ok(isProwlReview(body) && !isProwlReview(`Quoting it:\n\n\`\`\`\`\`\n${body}\n\`\`\`\`\``) && !isProwlReview('```\n```') && !isProwlReview(`${BATCH} looks wrong to me`));
+    const second = body.replace('The caller checks it.', 'Another reason.');
+    assert.deepEqual(refutedLines([{ body, url: 'u1' }, { body: second, url: 'u2' }, { body: `I disagree with this:\n\n> ${block}`, url: 'u3' }]).map(x => [x.url, x.line.split(' | ')[2]]).filter(x => x[1].includes('reason') || x[1].includes('caller')),
+      [['u1', 'The caller checks it.'], ['u2', 'Another reason.']], "the lines of two reviews' blocks; a block quoted in a body that isn't a PR-Owl review is ignored");
   }
 
   // ---- The report ----

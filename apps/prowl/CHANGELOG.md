@@ -33,6 +33,7 @@ Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z`
 - New: `prowl --check-result <file>` checks a review result file and prints `ok` or its problems. Review sessions run it; you can too.
 - A review that leaves a PR without its review (GitHub rejected it, or the session couldn't read the PR) fails, names the PR and why, and keeps every finding in its report. It isn't retried automatically: re-tag the ticket to run it again.
 - An earlier PR-Owl finding that the author or another reviewer answered on its thread (declined it, accepted the risk, deferred it to a ticket) is now parked: it gets no further reply and no longer counts toward the PR's verdict, whatever **Park human-only findings** says. It stays parked until the code is fixed, or someone disputes the answer on the thread. The details file lists it under *Parked* with the answer's link.
+- Each review Prowl posts ends with a hidden note listing the findings its verifiers checked and found not to be defects. A later review of the same PR, from anyone's Prowl, reads those notes before raising the same thing again, which saves cost and noise on re-reviews. The note is an HTML comment: it doesn't show in the rendered review.
 
 ## 2.23.6
 - An answer pasted into a Needs-you form is now what Submit sends. Before, pasting into **Other**, **Send it back with a note** or **Ask about this** and pressing enter sent the option that was already picked: the recommended answer, or an approval of the plan.

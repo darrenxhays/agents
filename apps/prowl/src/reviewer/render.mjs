@@ -57,6 +57,31 @@ export function cut(text, cap) {
   return `${kept}\n${TRIMMED}`;
 }
 
+/** A part of the hidden note, as plain one-line text that can't end the HTML comment it sits in or split its line. */
+const notePart = text => String(text ?? '').replace(/\s+/g, ' ').replace(/`/g, '').replace(/-{2,}/g, '-').replace(/\|/g, '/').replace(/<!|>/g, '').trim();
+
+/**
+ * The hidden note that ends a review body: the findings its verifiers checked and found not to be defects (`findings`,
+ * most severe first), a `refuted: <where> | <title> | <why>` line each, so a later review of the PR, from anyone's
+ * Prowl, reads them before raising the same thing again. '' with nothing to list. Capped at `max` characters: lines
+ * are kept in order until the cap, and the comment is always closed.
+ */
+export function stateNote(findings, max = Math.floor(LIMIT * 0.15)) {
+  const lines = findings.map(f => {
+    const why = f.status === 'addressed-elsewhere' && f.crossPr ? `handled in ${f.crossPr.counterpart}: ${f.outcome?.note || f.crossPr.why}` : f.outcome?.note || f.problem;
+    return `refuted: ${notePart(place(f.location)) || 'no single place'} | ${notePart(f.title)} | ${notePart(why)}`;
+  });
+  const [open, close] = ['<!-- prowl-state', '-->'];
+  let size = open.length + close.length + 1;
+  const kept = [];
+  for (const l of lines) {
+    if (size + l.length + 1 > max) break;
+    kept.push(l);
+    size += l.length + 1;
+  }
+  return kept.length ? [open, ...kept, close].join('\n') : '';
+}
+
 /** `path:line` for a finding's location, or '' when it has no single place. */
 export const place = loc => (loc?.path ? `${loc.path}${loc.line ? `:${loc.line}` : ''}` : '');
 

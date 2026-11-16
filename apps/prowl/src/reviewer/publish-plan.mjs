@@ -1,7 +1,7 @@
 // What Prowl posts on GitHub for a review, worked out from its result: per PR, the replies on earlier threads, the
 // threads to reopen and resolve, the review with its inline comments, and the details file. Pure: publish.mjs makes
 // the calls, and runs planPublish() again before each one, so later posts can link what earlier ones produced.
-import { cut, esc, fenceFor, fillTemplate, flat, LIMIT, place, prName, short, TRIMMED } from './render.mjs';
+import { cut, esc, fenceFor, fillTemplate, flat, LIMIT, place, prName, short, stateNote, TRIMMED } from './render.mjs';
 import { approvable, bySeverity, counts, eventFor, findingsOn, isCounted, isParked, notCarried, notChecked, NOT_FULLY, SEVERITIES, worst } from './result.mjs';
 
 /** The right-side lines of a file's patch that can take a comment (added and context lines), each with its hunk's index. */
@@ -107,7 +107,6 @@ const anchorAt = (lines, { text, nth }) => { let seen = 0; return lines.findInde
  *   templates: outputTemplates() (get(heading)), labels: verdictLabels(),
  *   prs: { [url]: { state ('open' | 'merged' | 'closed'), title, author, files (commentable(), or null when they
  *     couldn't be read), threads ([{ id, commentId, resolved, outdated, lastBody, lastProwlBody }], or null) } },
- *   note(result, url): the hidden note for the end of a review body ('' for none).
  * Returns { prs: [record], reviewed: [urls], verdict, counts }. A record: { url, reviewedAt, severity, verdict, event,
  * approval, withheld, notChecked, notCarried, skip, fallback, anchorLost, split, ops }. An op: { key, kind, … }.
  */
@@ -244,7 +243,8 @@ export function planPublish(given, ctx) {
     };
 
     const banner = fillTemplate(T('Review banner'), { verdict: rec.verdict, 'batch-id': result.batchId });
-    const note = ctx.note?.(result, p.url) || '';
+    // The hidden note: what this review's verifiers found not to be defects, for a later review to read first. Never moved to part 2.
+    const note = stateNote(bySeverity(mine.filter(f => ds.get(f).state)));
     const bodyWith = block => [banner, noBlocking && T('No blocking issues (approvals off)'), fillTemplate(T('Review body'), { summary: clip(esc(flat(entry.summary)), share(0.05)), 'finding lines': lines, 'details block': block }),
       note, reviewMarker(run.id)].filter(Boolean).join('\n\n');
     const block = (heading, text, fence) => fillTemplate(T(heading), { 'details file name': name, 'details fence': fence, 'details file': text });

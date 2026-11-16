@@ -252,3 +252,29 @@ export function counts(result, reviewed, opts = {}) {
   const c = Object.fromEntries(SEVERITIES.map(s => [s, on.filter(f => f.severity === s && isCounted(f, opts)).length]));
   return { ...c, fixed: on.filter(f => f.status === 'fixed').length, stillOpen: on.filter(f => String(f.id).startsWith('C-') && isCounted(f, opts)).length };
 }
+
+// ---- Earlier PR-Owl reviews, as they are on a PR ----
+
+const BANNER_RE = /^\s*(?:`{3,10}|~{3,10})[^\n]*\n(?:(?![ \t]*(?:`{3}|~{3}))[^\n]*\n)*?(?![ \t]*(?:`{3}|~{3}))[^\n]*\brb-\d{8}-/;
+/**
+ * True for a review body PR-Owl wrote: it opens with the review banner's fence, with an rb-<8 digits>- batch id
+ * inside that first fenced block (only its first 4000 characters are searched), and it carries a prowl-review (or
+ * older review-batch) marker. A person quoting a whole review inside a longer fence doesn't match.
+ */
+export const isProwlReview = body => BANNER_RE.test(String(body || '').slice(0, 4000)) && /<!-- (prowl-review|review-batch) /.test(String(body || ''));
+
+/**
+ * The findings earlier PR-Owl reviews checked and found not to be defects, from the hidden notes in their bodies:
+ * [{ line, url }], a `refuted: <where> | <title> | <why>` line each. `reviews`: [{ body, url }]. A block quoted in a
+ * body that isn't a PR-Owl review is ignored. They are leads for a later review, never verdicts.
+ */
+export function refutedLines(reviews) {
+  const out = [];
+  for (const r of reviews || []) {
+    if (!isProwlReview(r.body)) continue;
+    for (const m of String(r.body).matchAll(/<!-- prowl-state\r?\n([\s\S]*?)-->/g)) {
+      for (const line of m[1].split(/\r?\n/).map(l => l.trim()).filter(l => l.startsWith('refuted:'))) out.push({ line, url: r.url || '' });
+    }
+  }
+  return out;
+}
