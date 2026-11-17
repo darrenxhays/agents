@@ -7,6 +7,7 @@ import { noHooksEnv } from '../git.mjs';
 import { spawnCli, killTree } from '../proc.mjs';
 import { alive, capHit, idleDone, readActivity, sessionEnded, sessionEnv, track } from '../sessions.mjs';
 import { findingsIndex, withBlocking, writeHandover } from './handover.mjs';
+import { modelCosts } from '../stats.mjs';
 import { tickPath } from './prep.mjs';
 import { checkResult, isParked, isProwlReview, reviewIdOf } from './result.mjs';
 
@@ -429,6 +430,8 @@ export function finalize(run) {
   const result = run._result;
   run.endedAt = Date.now();
   run.costUsd = result?.total_cost_usd ?? null;
+  run.models = modelCosts(result); // the cost per model, for Stats; null when the result gives none
+  if (run.spawnError && !result) { delete run.model; delete run.effort; } // a session that never started ran on nothing
   const ok = result?.subtype === 'success' && !result.is_error;
   const stderr = run._activity?.filter(a => a.error).at(-1)?.text;
   const approvals = () => {

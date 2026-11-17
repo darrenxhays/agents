@@ -17,6 +17,7 @@ import { offerFor, acceptOffer } from '../offers.mjs';
 import { autoName, cleanName, parsePaste, ticketKey } from '../paste.mjs';
 import { killTree, notifyDesktop } from '../proc.mjs';
 import { alive, capHit, readActivity, sessionEnded } from '../sessions.mjs';
+import { modelCosts } from '../stats.mjs';
 import { fill, outputTemplate } from '../templates.mjs';
 import * as brief from './brief.mjs';
 import { defaultBranchOf, ensureClone, ghClone, prepareRepo, remoteBranches, worktreeRoot } from './repos.mjs';
@@ -87,6 +88,12 @@ export function createBuilder(app, deps) {
   const slotsUsed = (but = null) => building().filter(r => r !== but).length + claiming;
   side.running = () => records().filter(r => r.status === 'active');
   side.history = () => [...records()].sort((x, y) => (y.updatedAt || 0) - (x.updatedAt || 0));
+  /** What Stats shows, one entry per record with a finished turn. A turn whose cost wasn't reported counts as $0 here (the caps count its whole budget). */
+  side.spend = () => records().map(w => {
+    const parts = (w.turns || []).filter(t => t.endedAt).map(t => ({ at: t.endedAt, ms: t.endedAt - t.startedAt, costUsd: t.costUnknown ? 0 : t.costUsd || 0, models: t.models, model: t.model, effort: t.effort }));
+    return { ticket: w.key, title: w.title, ticketUrl: w.url || '', label: `build${w.rounds ? ` · ${w.rounds} round${w.rounds > 1 ? 's' : ''}` : ''}${w.quick ? ' · quick' : ''}`,
+      at: Math.max(0, ...parts.map(p => p.at)), failed: w.status === 'stopped' || (['done', 'ended'].includes(w.status) && !w.prs?.length), parts };
+  }).filter(e => e.parts.length);
   side.needs = () => side.state.needs;
   side.alive = () => records().some(r => (r.step === 'session' && session.alive(r)) || (r.discussion && session.alive(r.discussion)));
   const itemsOf = w => side.state.needs.filter(n => n.recordId === w.uid);
@@ -718,7 +725,7 @@ export function createBuilder(app, deps) {
     if (why) throw new NeedsYou('cap', why, { retry: 'turn' });
     w.turnBudgetUsd = budget;
     session.start(cfg(), appDir, w, w.prompt, budget);
-    w.turns.push({ n: w.turns.length + 1, startedAt: w.startedAt, kind: w.turnKind, logPath: w.logPath, costUsd: 0 });
+    w.turns.push({ n: w.turns.length + 1, startedAt: w.startedAt, kind: w.turnKind, logPath: w.logPath, costUsd: 0, model: b().model || cfg().claude.model, effort: b().effort });
     w.step = 'session';
     touch(w);
     log('ok', `${w.key}: ${w.turnKind === 'round' ? `feedback round ${w.rounds}` : 'build'} session turn ${w.turns.length} started`);
@@ -733,7 +740,7 @@ export function createBuilder(app, deps) {
     const cost = unknown ? w.turnBudgetUsd || 0 : r?.total_cost_usd || 0;
     const t = w.turns.at(-1);
     if (t && t.endedAt == null) { // once per turn, even if this step runs again after a restart
-      Object.assign(t, { endedAt: Date.now(), costUsd: cost, ...(unknown && { costUnknown: true }) });
+      Object.assign(t, { endedAt: Date.now(), costUsd: cost, ...(unknown && { costUnknown: true }), models: modelCosts(r) });
       w.costUsd = (w.costUsd || 0) + cost;
       w.sessionCostUsd = (w.sessionCostUsd || 0) + cost;
     }
@@ -1506,7 +1513,7 @@ export function createBuilder(app, deps) {
     readActivity(d);
     const r = d._result;
     const cost = r?.total_cost_usd || 0;
-    w.turns.push({ n: w.turns.length + 1, startedAt: d.startedAt, endedAt: Date.now(), kind: 'ask', logPath: d.logPath, costUsd: cost });
+    w.turns.push({ n: w.turns.length + 1, startedAt: d.startedAt, endedAt: Date.now(), kind: 'ask', logPath: d.logPath, costUsd: cost, model: b().model || cfg().claude.model, effort: b().effort, models: modelCosts(r) });
     w.costUsd = (w.costUsd || 0) + cost;
     w.sessionCostUsd = (w.sessionCostUsd || 0) + cost;
     const reply = String(r?.result || '').trim() || (r ? `(no reply: the session ended with ${r.subtype || 'an error'})` : '(no reply: the session ended without one; its log has more)');

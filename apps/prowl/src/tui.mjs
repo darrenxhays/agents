@@ -14,6 +14,7 @@ import { findingLinks, findingsFor, findingUrl, prLinks, readResult, SEVERITY_FI
 import { isCounted, isParked, SEVERITIES } from './reviewer/result.mjs';
 import { awaitingHuman, isOwn } from './reviewer/reviews.mjs';
 import { spendText } from './builder/rules.mjs';
+import { bar as spendBar, breakdown, modelEffort, RANGES, rangeName, spendIn, summarize } from './stats.mjs';
 
 const ST = {
   reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m', title: '\x1b[1;38;5;220m', yellow: '\x1b[38;5;220m',
@@ -49,8 +50,8 @@ const sectionColor = s => (s.startsWith('Reviewer') ? ACCENT.reviewer.fg : s.sta
 const SPIN = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
 const SIDES = ['reviewer', 'builder'];
 const NAMES = { reviewer: 'Reviewer', builder: 'Builder' };
-const TABS = ['Running', 'History', 'Needs you', 'Config', 'Log'];
-const [RUNNING, HISTORY, NEEDS, CONFIG, LOG] = [0, 1, 2, 3, 4];
+const TABS = ['Running', 'History', 'Needs you', 'Config', 'Log', 'Stats'];
+const [RUNNING, HISTORY, NEEDS, CONFIG, LOG, STATS] = [0, 1, 2, 3, 4, 5]; // eslint-disable-line no-unused-vars
 
 const LABEL_W = Math.max(...CONFIG_FIELDS.map(f => f.label?.length || 0)) + 2; // the Config view's label column
 
@@ -268,6 +269,7 @@ export function startTui(app, actions, io = {}) {
     panes: new Map(), // the scrolling panes, by id: { at, ops, top, room, total, follow, focus, painted, owner }
     front: null, // the pane the scroll keys go to, as the last frame painted it: { id, arrows, sig }
     bodyH: 0, // the rows the view had in the last frame
+    statsRange: 1, // Stats' time frame, an index into RANGES: it starts on 30 days
     det: { reviewer: null, builder: null }, // the details open on each side, over History's or Running's list
     menu: null, // a setting's values listed under its row, while open: { key, label, options: [{ value, label, current } | { other, label }], at }
     picked: { reviewer: null, builder: null }, // the selected Running row, by id (and ticket): re-found each frame, so rows coming and going don't shift the selection
@@ -665,7 +667,12 @@ export function startTui(app, actions, io = {}) {
     const how = r.status === 'failed' ? [ST.red, `failed: ${r.error}`]
       : r.status === 'stopped' ? [ST.grey, 'stopped by you']
         : [ST.green, `done in ${dur(r.endedAt - r.startedAt)}${r.costUsd != null ? ` · $${r.costUsd.toFixed(2)}` : ''}`];
-    rows.push([label('Status', lw), how, [ST.yellow, r.pendingTag != null ? '  · ticket tag update pending' : '']]);
+    // What it ran on: the reviewers' model and effort, then the verifiers' and the orchestrator's where they have their own.
+    const also = (name, x) => (x && (x.model || x.effort) ? ` · ${name} ${[x.model, x.effort && `${x.effort} effort`].filter(Boolean).join(' · ')}` : '');
+    const ranOn = modelEffort(r) ? ` · ${modelEffort(r)}${also('verifiers', r.verifiers)}${also('orchestrator', r.orchestrator)}` : '';
+    rows.push([label('Status', lw), how, [ST.grey, ranOn], [ST.yellow, r.pendingTag != null ? '  · ticket tag update pending' : '']]);
+    const split = breakdown([r]);
+    if (split) rows.push([label('Models', lw), [ST.grey, split]]);
     return rows;
   }
 
@@ -677,7 +684,11 @@ export function startTui(app, actions, io = {}) {
       ...prs.slice(0, 4).map((p, i) => [label(i ? '' : 'PRs', lw), [ST.link, p.url, p.url], [ST.grey, `  ${p.title || ''}`]]),
       ...(w.plan ? [[label('Plan', lw), [ST.link, w.plan, pathToFileURL(w.plan).href]]] : []),
     ];
-    rows.push([label('Status', lw), workStatus(w), [ST.grey, `  · ${spendText(w)}${w.note ? ` · ${w.note}` : ''}${w.summary ? ` · ${w.summary}` : ''}`]]);
+    const turns = w.turns || [];
+    const ranOn = [...new Set(turns.filter(t => t.model).map(t => modelEffort(t)))].join(', ') || (turns.length ? 'model not recorded' : '');
+    rows.push([label('Status', lw), workStatus(w), [ST.grey, `  · ${spendText(w)}${ranOn ? ` · ${ranOn}` : ''}${w.note ? ` · ${w.note}` : ''}${w.summary ? ` · ${w.summary}` : ''}`]]);
+    const split = breakdown(turns.map(t => ({ ...t, costUsd: t.costUnknown ? 0 : t.costUsd })));
+    if (split) rows.push([label('Models', lw), [ST.grey, split]]);
     return rows;
   }
 
@@ -1604,6 +1615,51 @@ export function startTui(app, actions, io = {}) {
     return rows.slice(ui.notes.scroll);
   }
 
+  /** Stats: what the side's reviews or builds cost in a time frame, in one scrolling pane. */
+  function statsView(W, H) {
+    const days = RANGES[ui.statsRange];
+    const now = Date.now();
+    const build = ui.side === 'builder';
+    const [one, many] = build ? ['build', 'builds'] : ['review', 'reviews'];
+    const s = summarize(side().spend?.() || [], { days, now });
+    const other = spendIn(sides[build ? 'reviewer' : 'builder'].spend?.() || [], { days, now });
+    const money = n => `$${n.toFixed(2)}`;
+    const blocks = [];
+    const add = (segs, hang = 2, wrapIt = true) => blocks.push({ key: blocks.length, segs, hang, wrap: wrapIt });
+    const head = text => { add([]); add([[ST.bold, ` ${text} `], [ST.grey, '─'.repeat(Math.max(0, W - text.length - 3))]], 0, false); };
+    add([[ST.bold, ` Spend · ${NAMES[ui.side]} · ${rangeName(days)}`], [ST.grey, ' · t changes it']]);
+    add([[ST.bold, `  ${money(s.total)}`], ['', ` on ${s.count} ${s.count === 1 ? one : many}`], ...(s.count ? [[ST.grey, ` · ${money(s.avgCost)} a ${one} on average${s.avgMs != null ? `, ${dur(s.avgMs)}` : ''}`]] : []),
+      ...(s.failedCost > 0 ? [[ST.orange, ` · ${money(s.failedCost)} on failed or stopped ${many}`]] : []), [ST.grey, ` · ${build ? 'Reviewer' : 'Builder'} ${money(other)} in the same time`]]);
+    if (!s.buckets.length) { add([]); add([[ST.grey, `  Nothing spent in ${days ? `the ${rangeName(days)}` : 'the history kept'}. t changes the time frame.`]]); }
+    else {
+      const barW = Math.max(6, Math.min(40, W - 48));
+      const table = (rowsOf, nameW) => {
+        const max = Math.max(...rowsOf.map(r => r.cost));
+        for (const r of rowsOf) add([[ST.grey, `  ${r.name.padEnd(nameW)} `], [acc().fg, (spendBar(r.cost, max, barW) || '·').padEnd(barW + 1)], ['', money(r.cost).padStart(9)], [ST.grey, `  ${r.note}`]], 2, false);
+      };
+      head(`SPEND PER ${s.buckets[0].label.startsWith('wk') ? 'WEEK' : 'DAY'}`);
+      table(s.buckets.map(b => ({ name: b.label, cost: b.cost, note: b.n ? `${b.n} ${build ? (b.n === 1 ? 'turn' : 'turns') : b.n === 1 ? one : many}` : '' })), 9);
+      const named = list => list.map(x => ({ name: x.name, cost: x.cost, note: `${x.pct}%` }));
+      head('SPEND PER MODEL');
+      table(named(s.models), Math.max(12, ...s.models.map(x => x.name.length)));
+      head(`SPEND PER ${one.toUpperCase()} EFFORT`);
+      table(named(s.efforts), Math.max(12, ...s.efforts.map(x => x.name.length)));
+      const top = (title, list, row) => {
+        head(title);
+        if (!list.length) add([[ST.grey, '  none']]);
+        list.forEach((x, i) => { const [figure, ticket, url, what, title2] = row(x); add([[ST.grey, `  ${String(i + 1).padEnd(3)}`], [ST.bold, figure.padStart(9)], ['', '  '], [ST.link, ticket.padEnd(11), url || undefined], [ST.grey, `${what}  `], ['', title2 || '']], 2, false); });
+      };
+      top(`TOP ${many.toUpperCase()} BY COST`, s.topCost, x => [money(x.cost), x.entry.ticket, x.entry.ticketUrl, `${x.entry.label}${x.timed ? ` · ${dur(x.ms)}` : ''}`, x.entry.title]);
+      top(`TOP ${many.toUpperCase()} BY TIME`, s.topTime, x => [dur(x.ms), x.entry.ticket, x.entry.ticketUrl, `${x.entry.label} · ${money(x.cost)}`, x.entry.title]);
+      top(`TOP TICKETS BY TOTAL COST, EVERY ${one.toUpperCase()} TOGETHER`, s.topTickets, x => [money(x.cost), x.ticket, x.ticketUrl, `${x.n} ${x.n === 1 ? one : many}${x.ms ? ` · ${dur(x.ms)}` : ''}`, x.title]);
+    }
+    add([]);
+    add([[ST.grey, build
+      ? "  Builds count in the time frame their latest turn ended in, with only their spend inside it: a build's turns before the time frame aren't counted in it; spend per day, model and effort counts each session on the day it ended. Costs are Claude Code's list-price estimates. A turn whose cost wasn't reported counts as $0."
+      : "  Reviews count in the time frame they ended in, with only their spend inside it; spend per day, model and effort counts each session on the day it ended. Costs are Claude Code's list-price estimates. A review that ran before Prowl recorded effort has none, and has its model only while its session log is kept (Keep logs)."]]);
+    return pane(`stats:${ui.side}`, blocks, W, H, { owner: days, front: true, arrows: true, main: true });
+  }
+
   const logLines = () => app.log.filter(l => l.side === ui.side || l.side === 'prowl');
   /** The Log: one following pane over the whole view, each entry wrapped under its message, its status row on top. */
   const logView = (W, H) => pane(`log:${ui.side}`, logLines().map(l => ({ key: keyOf(l), src: l, hang: 15, segs: [[ST.grey, `${time(l.t)} `], [LEVEL[l.level], `${l.level.padEnd(5)} `], ['', l.msg]] })),
@@ -1618,12 +1674,13 @@ export function startTui(app, actions, io = {}) {
     ['f', 'find', 'Find text in what is in front; n and N go to the next and previous match'], ['[ ]', 'reviews', "The ticket's review before or after this one"],
     ['o', 'GitHub', 'Open on GitHub: the finding at the reviewed commit, the PR in front or selected, else all its PRs'],
     ['x', 'outside', "Open outside Prowl: the file in front, the session's log, else the report, the plan or the brief folder"], ['a', 'ticket', 'Open its ticket']];
+  const STATS_KEYS = [['t', 'time frame', 'Step the time frame: the last 7, 30 or 90 days, or all time'], ['PgUp PgDn', 'scroll', 'Scroll a page'], ['↑ ↓', 'line', 'Scroll a line']];
   const LOG_KEYS = [['PgUp PgDn', 'scroll', 'Scroll the Log a page'], ['↑ ↓', 'line', 'Scroll the Log a line'], ['Home End', 'first / latest', 'The first line kept / back to the latest']];
   const VIEW_KEYS = {
     reviewer: [
       [['enter', 'details', 'Open everything Prowl kept about it, in tabs: its summary, PRs, findings and session'], ['s', 'stop', "Stop the selected review (its in-progress tag comes off, so re-tag the ticket to run it again), or stop a quick review waiting on its PRs (◷; its labels stay as they are)"], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser']],
       [['enter', 'details', 'Open everything Prowl kept about it, in tabs: its summary, PRs, findings and session'], ['x', 'report', "Open the review's report outside Prowl"], ['v', 'review again', "Review the selected review's PRs again, as a quick review under the same ticket or name (asks first; no tags change)"], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser']],
-      [], CONFIG_KEYS, LOG_KEYS,
+      [], CONFIG_KEYS, LOG_KEYS, STATS_KEYS,
     ],
     builder: [
       [['enter', 'details', 'Open everything Prowl kept about it, in tabs: its summary, PRs, PRs and turns'], ['x', 'brief', "Open the ticket's brief folder"], ['s', 'stop', 'Stop the selected build before its next push, PR, tag or turn'], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser']],
@@ -1633,14 +1690,14 @@ export function startTui(app, actions, io = {}) {
         ['enter', 'submit', 'Submit what you picked, your own answer, or your question for its session: one at a time'],
         ['[ ]', 'item', 'The previous or next item in Needs you'], ['s', 'skip', 'Skip the question (the session uses its default), or end the work'],
         ['t', 'hand back', 'Hand the ticket back with its start tag; Prowl leaves it until someone re-tags it'], ['o', 'open', 'Open the PR or the ticket in the browser']],
-      CONFIG_KEYS, LOG_KEYS,
+      CONFIG_KEYS, LOG_KEYS, STATS_KEYS,
     ],
   };
   const NEW_REVIEW = ['n', 'quick review', 'On the Reviewer: a quick review of the PRs or tickets you paste, reviewed together as one set. Pasting there opens it too'];
   const NEW_BUILD = ['n', 'quick build', 'On the Builder: a quick build of a ticket, PRs, or what you describe; it starts at once. Pasting there opens it too'];
   const KEY_GROUPS = [
     ['Moving around', [['tab', 'side', 'Switch between the Reviewer and the Builder; R and B go straight to one'],
-      ['←→', 'views', 'The previous or next view; 1–5 go straight to Running, History, Needs you, Config or Log'],
+      ['←→', 'views', 'The previous or next view; 1–6 go straight to Running, History, Needs you, Config, Log or Stats'],
       ['↑↓', 'select', 'Move the selection; scroll this list and the Update Notes'],
       ['PgUp PgDn', 'page', "Scroll a page of the text in view: Activity, details, a setting's help, the Log"], ['Home End', 'ends', 'Its first line / back to its latest']]],
     ['The side in view', [['e', 'on/off', 'Turn the side in view on or off, at once'], ['r', 'poll', 'Poll the side in view now'],
@@ -1656,10 +1713,10 @@ export function startTui(app, actions, io = {}) {
   const pressable = k => (k.length === 1 || ['enter', 'tab', 'esc', 'left', 'right', 'up', 'down', 'pageup', 'pagedown', 'home', 'end'].includes(k) ? () => onKey(k) : undefined);
   // The view's own keys, while it has something selected for them to act on.
   const viewKeys = () => {
-    const list = [live, history, needs, null, logLines][view()];
+    const list = [live, history, needs, null, logLines, null][view()];
     return list && !list(ui.side).length ? [] : VIEW_KEYS[ui.side][view()];
   };
-  const EMPTY = ['nothing running', 'nothing here yet', 'nothing needs you', '', 'newest at the bottom'];
+  const EMPTY = ['nothing running', 'nothing here yet', 'nothing needs you', '', 'newest at the bottom', ''];
 
   /** A bar: every segment on its background, its hover style too. */
   function bar(segs, t) {
@@ -1870,7 +1927,7 @@ export function startTui(app, actions, io = {}) {
     ui.bodyH = bodyH;
     ui.front = null;
     ui.sig = frontSig();
-    const body = (ui.notes ? notesView : ui.keys ? keysView : offerOpen() ? offerView : [runningView, historyView, needsView, configView, logView][view()])(W, bodyH).slice(0, bodyH);
+    const body = (ui.notes ? notesView : ui.keys ? keysView : offerOpen() ? offerView : [runningView, historyView, needsView, configView, logView, statsView][view()])(W, bodyH).slice(0, bodyH);
     while (body.length < bodyH) body.push([]);
     out.push(...body, ...bars);
     ui.frame = out;
@@ -2215,6 +2272,7 @@ export function startTui(app, actions, io = {}) {
     if (k === 'n') return ui.side === 'builder' ? newBuild() : newReview();
     if (k === 'r') { actions.pollNow(ui.side); flash(isOn(ui.side) ? `Polling the ${NAMES[ui.side]} now.` : `The ${NAMES[ui.side]} is off: e turns it on.`); return undefined; }
     if (k === 'p') { actions.togglePause(ui.side); flash(side().paused ? `${NAMES[ui.side]} paused: running sessions carry on, nothing new starts.` : 'Resumed.'); return undefined; }
+    if (view() === STATS) { if (k === 't') ui.statsRange = (ui.statsRange + 1) % RANGES.length; return undefined; }
     if (view() === CONFIG) return configKey(k);
     if (view() === NEEDS) return needsKey(k);
     const r = (view() === RUNNING ? (ui.side === 'reviewer' ? runningRows() : live(ui.side)) : view() === HISTORY ? history(ui.side) : [])[sel()[view()]];

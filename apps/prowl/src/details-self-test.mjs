@@ -7,6 +7,8 @@ import { cached, cacheKeys, dropCache, plain, readLines, readLog } from './detai
 import { findingLinks, findingsFor, findingUrl, prLinks, readResult, webLink } from './reviewer/details.mjs';
 import { checkResult } from './reviewer/result.mjs';
 import { readActivity } from './sessions.mjs';
+import { backfillUsage, bar, breakdown, modelCosts, modelEffort, readLogUsage, scaledModels, spendIn, summarize } from './stats.mjs';
+import { finalize } from './reviewer/reviews.mjs';
 import { branchSeg, shaSeg, startTui } from './tui.mjs';
 
 const SHA = 'a'.repeat(40);
@@ -361,6 +363,99 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
     active = [];
     t.text(120, 40);
     assert.deepEqual([t.tui.ui.view.builder, Boolean(t.det())], [1, true], 'no longer active: its details are found in History');
+
+    // ---- C-27: Stats ----
+    {
+      const DAY = 86_400_000;
+      const now = new Date(2026, 10, 16, 15, 0, 0).getTime(); // a Monday afternoon, local time
+      const part = (ago, over = {}) => ({ at: now - ago * DAY, ms: 600_000, costUsd: 2, models: null, model: 'm1', effort: 'high', ...over });
+      const entry = (ticket, parts, over = {}) => ({ ticket, title: `T ${ticket}`, ticketUrl: `https://example.invalid/${ticket}`, label: 'first review', at: Math.max(...parts.map(x => x.at)), failed: false, parts, ...over });
+      const old = entry('AB#1', [part(8)]);
+      assert.deepEqual([summarize([old], { days: 30, now }).count, summarize([old], { days: 7, now }).count, summarize([old], { days: 7, now }).total], [1, 0, 0], 'ended 8 days ago: in 30 days, not in 7');
+      assert.equal(summarize([entry('AB#1', [part(6.5)])], { days: 7, now }).count, 1, 'a time frame is today and the days before it, from local midnight');
+      const build = entry('AB#2', [part(40, { costUsd: 5 }), part(2, { costUsd: 3, ms: 120_000 })]);
+      let sum = summarize([build], { days: 30, now });
+      assert.deepEqual([sum.total, sum.topCost[0].cost, sum.topCost[0].ms, sum.count], [3, 3, 120_000, 1], 'only the turn inside the time frame counts, for cost and time');
+      sum = summarize([entry('AB#3', [part(1, { costUsd: 2, models: { a: 3, b: 1 } })]), entry('AB#4', [part(1, { costUsd: 4, effort: undefined })])], { days: 30, now });
+      assert.deepEqual(sum.models.map(m => [m.name, m.cost, m.pct]), [['not recorded', 4, 67], ['a', 1.5, 25], ['b', 0.5, 8]], 'models scaled to the cost; a cost with no models is not recorded');
+      assert.deepEqual(sum.efforts.map(m => [m.name, m.cost]), [['not recorded', 4], ['high', 2]]);
+      assert.deepEqual(scaledModels({ a: 3, b: 1 }, 2), { a: 1.5, b: 0.5 });
+      sum = summarize([entry('AB#5', [part(1, { ms: undefined, costUsd: 9 })]), entry('AB#6', [part(1, { ms: 60_000 })]), entry('AB#6', [part(2, { ms: 30_000 })], { failed: true })], { days: 30, now });
+      assert.deepEqual([sum.topTime.map(x => x.entry.ticket), sum.topCost[0].entry.ticket, sum.avgMs, sum.failedCost, sum.topTickets.map(t => [t.ticket, t.cost, t.n, t.ms])],
+        [['AB#6', 'AB#6'], 'AB#5', 45_000, 2, [['AB#5', 9, 1, 0], ['AB#6', 4, 2, 90_000]]], 'the time list leaves out an entry with an untimed part');
+      assert.deepEqual(sum.buckets.map(b => [b.label, b.cost, b.n]), [['Mon 11-16', 0, 0], ['Sun 11-15', 11, 2], ['Sat 11-14', 2, 1]], 'days, newest first, from the first spend to today, empty ones included');
+      const weeks = summarize([entry('AB#7', [part(20), part(3)])], { days: 90, now }).buckets;
+      assert.deepEqual([weeks.map(b => b.label), weeks.every(b => new Date(b.at).getDay() === 1)], [['wk 11-16', 'wk 11-09', 'wk 11-02', 'wk 10-26'], true], '90 days: weekly buckets, starting on Mondays');
+      assert.equal(summarize([entry('AB#7', [part(3)])], { days: 0, now }).buckets[0].label.startsWith('wk'), true);
+      const none = summarize([], { days: 30, now });
+      assert.deepEqual([none.total, none.count, none.avgCost, none.avgMs, none.buckets, none.models, none.topCost], [0, 0, 0, null, [], [], []]);
+      assert.equal(spendIn([build, old], { days: 30, now }), 5);
+      // Across a daylight-saving change each bucket starts at local midnight.
+      const tz = process.env.TZ;
+      process.env.TZ = 'America/New_York';
+      try {
+        const after = new Date(2026, 10, 3, 12).getTime(); // the clocks went back on 1 November 2026
+        const dst = summarize([{ ...entry('AB#8', [{ at: new Date(2026, 9, 30, 12).getTime(), ms: 1, costUsd: 1 }]) }], { days: 30, now: after }).buckets;
+        assert.deepEqual([dst.length, dst.every(b => new Date(b.at).getHours() === 0), dst.map(b => b.label).slice(0, 4)], [5, true, ['Tue 11-03', 'Mon 11-02', 'Sun 11-01', 'Sat 10-31']]);
+      } finally { if (tz === undefined) delete process.env.TZ; else process.env.TZ = tz; }
+      assert.deepEqual([bar(1, 1000, 10), bar(0, 10, 10), bar(10, 10, 4), bar(5, 10, 4), bar(1, 16, 2)], ['▏', '', '████', '██', '▏']);
+      assert.deepEqual([modelCosts({ modelUsage: { a: { costUSD: 1.5 }, b: { costUSD: 0 }, c: {}, d: { costUSD: 'x' } } }), modelCosts({}), modelCosts(null)], [{ a: 1.5 }, null, null]);
+      assert.deepEqual([modelEffort({ model: 'm', effort: 'xhigh' }), modelEffort({ model: 'm' }), modelEffort({ costUsd: 1 }), modelEffort({})], ['m · xhigh effort', 'm · effort not recorded', 'model not recorded', '']);
+      assert.deepEqual([breakdown([{ costUsd: 10.24, models: { 'claude-opus-5-5': 8, 'claude-sonnet-5-5': 1.8 } }]), breakdown([{ costUsd: 3, models: { a: 3 } }])], ['claude-opus-5-5 $8.36 · claude-sonnet-5-5 $1.88', '']);
+      // What a log holds, for reviews from before this was recorded.
+      const usageLog = path.join(tmp, 'usage.ndjson');
+      fs.writeFileSync(usageLog, ev({ type: 'system', subtype: 'init', model: 'claude-opus-5-5' }) + `${'x'.repeat(200_000)}\n` + ev({ type: 'result', subtype: 'success', modelUsage: { 'claude-opus-5-5': { costUSD: 2.5 }, 'claude-haiku-5-5': { costUSD: 0.5 } } }));
+      assert.deepEqual(readLogUsage(usageLog), { model: 'claude-opus-5-5', models: { 'claude-opus-5-5': 2.5, 'claude-haiku-5-5': 0.5 } });
+      const bare = path.join(tmp, 'bare.ndjson');
+      fs.writeFileSync(bare, 'stderr only\n');
+      assert.deepEqual([readLogUsage(bare), readLogUsage(path.join(tmp, 'no.ndjson'))], [{ model: null, models: null }, null]);
+      const olds = [{ logPath: usageLog, endedAt: 1 }, { logPath: bare, endedAt: 1 }, { logPath: usageLog, endedAt: 1, models: null }, { endedAt: 1 }, { logPath: usageLog }];
+      assert.deepEqual([backfillUsage(olds), backfillUsage(olds), olds[0].model, olds[0].models['claude-opus-5-5'], olds[1].models, 'model' in olds[1]], [2, 0, 'claude-opus-5-5', 2.5, null, false], 'each old run is read once');
+      // finalize records the cost per model, and a session that never started ran on nothing.
+      const fin = over => { const r = { id: 'x', prs: [], status: 'running', startedAt: 1, model: 'claude-opus-5-5', effort: 'xhigh', reportPath: path.join(tmp, 'no-report.md'), logPath: path.join(tmp, 'no-log.ndjson'), ...over }; finalize(r); return r; };
+      const ran = fin({ _result: { subtype: 'success', is_error: false, total_cost_usd: 3, modelUsage: { 'claude-opus-5-5': { costUSD: 3 } } } });
+      assert.deepEqual([ran.model, ran.effort, ran.models], ['claude-opus-5-5', 'xhigh', { 'claude-opus-5-5': 3 }]);
+      const never = fin({ spawnError: 'ENOENT' });
+      assert.deepEqual(['model' in never, 'effort' in never, never.models], [false, false, null]);
+
+      // The view, on both sides; History says what each ran on.
+      const today = Date.now();
+      const spend = [entry('AB#42', [{ at: today - 3_600_000, ms: 842_000, costUsd: 14.2, models: { 'claude-opus-5-5': 12, 'claude-sonnet-5-5': 2.2 }, model: 'claude-opus-5-5', effort: 'xhigh' }], { at: today - 3_600_000, label: 're-review #2' }),
+        entry('AB#43', [{ at: today - 2 * DAY, ms: 60_000, costUsd: 1, models: null, model: undefined, effort: undefined }], { at: today - 2 * DAY, failed: true })];
+      const shown = mkRun(8, { model: 'claude-opus-5-5', effort: 'xhigh', models: { 'claude-opus-5-5': 12, 'claude-sonnet-5-5': 2.2 }, costUsd: 14.2, verifiers: { model: 'sonnet', effort: 'medium' } });
+      const before = mkRun(9, { ticket: 'AB#9' });
+      const w = { uid: 'u2', key: 'AB#55', title: 'B', url: '', status: 'done', createdAt: 1, updatedAt: 2, briefDir: tmp, prs: [], turns: [{ n: 1, startedAt: 1, endedAt: 2, costUsd: 1 }] };
+      const t2 = tuiOver({ reviewer: { finished: () => [shown, before], state: { runs: [shown, before] }, spend: () => spend }, builder: { history: () => [w], spend: () => [entry('AB#55', [{ at: today - 1000, ms: 5000, costUsd: 4, model: 'm', effort: 'high' }], { at: today - 1000, label: 'build' })] },
+        cfgOver: { builder: { ...cfg.builder, enabled: true } } });
+      t2.tui.key('6');
+      let g = t2.text(120, 60);
+      assert.ok(g.includes('6 Stats') && g.includes('Spend · Reviewer · last 30 days · t changes it') && /\$15\.20 on 2 reviews · \$7\.60 a review on average, 7m31s · \$1\.00 on failed or stopped reviews · Builder \$4\.00 in the same time/.test(g.replace(/\s+/g, ' ')), g);
+      assert.ok(g.includes('SPEND PER DAY') && /claude-opus-5-5\s+█+\S*\s+\$12\.00\s+79%/.test(g) && /not recorded\s+\S+\s+\$1\.00\s+7%/.test(g) && g.includes('SPEND PER REVIEW EFFORT') && /xhigh\s+█+\s+\$14\.20\s+93%/.test(g)
+        && /1\s+\$14\.20\s+AB#42\s+re-review #2 · 14m02s\s+T AB#42/.test(g) && g.includes('TOP REVIEWS BY TIME') && g.includes('TOP TICKETS BY TOTAL COST, EVERY REVIEW TOGETHER') && g.includes("Costs are Claude Code's list-price estimates."), g);
+      assert.ok(/▌Stats\s+t\s+time frame\s+PgUp\s+PgDn\s+scroll/.test(g), 'the keys bar');
+      t2.tui.key('pagedown');
+      t2.text(120, 20);
+      t2.tui.key('t');
+      g = t2.text(120, 20);
+      assert.ok(g.includes('Spend · Reviewer · last 90 days') && g.includes('SPEND PER WEEK') && g.split('\n').findIndex(l => l.includes('Spend · Reviewer')) === 4, 't changes the heading and starts it at the top');
+      t2.tui.key('t'); t2.tui.key('t');
+      assert.ok(t2.text(120, 20).includes('last 7 days'));
+      t2.tui.key('B');
+      t2.tui.key('6');
+      g = t2.text(120, 60);
+      assert.ok(g.includes('Spend · Builder · last 7 days') && /\$4\.00 on 1 build · .* · Reviewer \$15\.20 in the same time/.test(g.replace(/\s+/g, ' ')) && /1 turn\b/.test(g) && g.includes("A turn whose cost wasn't reported counts as $0."), g);
+      t2.tui.key('2');
+      assert.ok(t2.text(120, 40).includes('model not recorded'), 'a build whose turns recorded no model');
+      t2.tui.key('R');
+      t2.tui.key('2');
+      assert.ok(t2.text(140, 40).includes('$3.41 · model not recorded'), 'an old run, the newest in the list');
+      t2.tui.key('down');
+      g = t2.text(140, 40);
+      assert.ok(g.includes('$14.20 · claude-opus-5-5 · xhigh effort · verifiers sonnet · medium effort') && g.includes('Models  claude-opus-5-5 $12.00 · claude-sonnet-5-5 $2.20'), g);
+      const empty = tuiOver();
+      empty.tui.key('6');
+      assert.ok(empty.text(120, 30).includes('Nothing spent in the last 30 days. t changes the time frame.'));
+    }
   } finally {
     dropCache();
     fs.rmSync(tmp, { recursive: true, force: true });

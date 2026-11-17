@@ -12,6 +12,7 @@ import { frontMatter } from '../match.mjs';
 import { fill, loadOutputTemplates, outputTemplate } from '../templates.mjs';
 import * as rv from './reviews.mjs';
 import { checkPlan, checksLine, prChecks } from './checks.mjs';
+import { backfillUsage } from '../stats.mjs';
 import { fillSkeleton } from './handover.mjs';
 import { prepareReview, removePrep, sweepWorktrees } from './prep.mjs';
 import { planPublish } from './publish-plan.mjs';
@@ -35,6 +36,11 @@ export function createReviewer(app, deps) {
   const save = () => rv.saveState(side.state);
   side.running = () => side.state.runs.filter(r => r.status === 'running' || r.status === 'stopping');
   side.finished = () => side.state.runs.filter(r => r.status !== 'running' && r.status !== 'stopping').sort((a, b) => b.endedAt - a.endedAt);
+  // Reviews finished before Prowl recorded what a session ran on: read once from their logs, at launch.
+  try { if (backfillUsage(side.state.runs.filter(r => !r.pr && r.status !== 'running' && r.status !== 'stopping'), deps.readLogUsage)) rv.saveState(side.state); } catch { /* Stats shows them as not recorded */ }
+  /** What Stats shows, one entry per finished review that has an end time. */
+  side.spend = () => side.finished().filter(r => !r.pr && r.endedAt).map(r => ({ ticket: r.ticket, title: r.title, ticketUrl: r.ticketUrl || '', label: `${r.reviewNo > 1 ? `re-review #${r.reviewNo}` : 'first review'}${r.quick ? ' · quick' : ''}`,
+    at: r.endedAt, costUsd: r.costUsd, failed: ['failed', 'stopped'].includes(r.status), parts: [{ at: r.endedAt, ms: r.endedAt - r.startedAt, costUsd: r.costUsd, models: r.models, model: r.model, effort: r.effort }] }));
   side.needs = () => []; // nothing waits on you: a review either runs, or leaves its ticket tagged for a person
   side.alive = () => side.running().some(rv.alive);
   // Reviews still being prepared (a ticket's, or a quick review) hold a slot from the moment they're admitted; a quick
