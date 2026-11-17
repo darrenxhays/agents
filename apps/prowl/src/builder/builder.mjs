@@ -1267,10 +1267,11 @@ export function createBuilder(app, deps) {
     const pk = pickup();
     const fix = {};
     const unsettled = [];
+    const gone = []; // merged or closed since the round was dropped
     for (const p of w.prs) {
       const was = w.pickupCarried[p.url];
       const facts = await gh.prFacts(p);
-      if (facts.state !== 'OPEN') continue;
+      if (facts.state !== 'OPEN') { gone.push(p); continue; }
       // This is the head looked at now: the survey's record follows it, so finishing doesn't go back to look again.
       const surveyed = w.survey?.prs?.find(x => x.url === p.url);
       if (surveyed && facts.headSha) surveyed.head = facts.headSha;
@@ -1291,6 +1292,19 @@ export function createBuilder(app, deps) {
       if (conflicting) reasons.push(`conflicts with ${facts.base}`);
       else if (pk.conflicts && facts.mergeable === 'UNKNOWN' && was?.reasons.some(r => r.startsWith('conflicts'))) unsettled.push(p);
       if (reasons.length) fix[p.url] = { reasons, failing: failing.map(c => ({ name: c.name, link: c.link || '' })), conflict: conflicting };
+    }
+    if (gone.length) {
+      // No longer work to continue: out of the PRs followed and out of the survey, so a finish session never checks
+      // out a branch that was deleted with its PR.
+      const is = x => gone.some(g => g.url === x.url);
+      w.prs = w.prs.filter(x => !is(x));
+      if (w.survey?.prs) w.survey.prs = w.survey.prs.filter(x => !is(x));
+      log('info', `${w.key}: ${gone.map(prName).join(', ')} ${gone.length > 1 ? 'were' : 'was'} merged or closed meanwhile; left out`);
+      if (!w.prs.length) { // nothing of it left to continue: the work is looked at again, from the start
+        Object.assign(w, { step: 'adopt', survey: null, pickupFix: null, pickupCarried: null, finishAfterRound: false, roundAgain: false, settleSince: null });
+        touch(w);
+        return 'wait';
+      }
     }
     const minutes = b().waitForChecksMinutes;
     if (unsettled.length && minutes > 0) {
