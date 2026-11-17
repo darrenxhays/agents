@@ -718,7 +718,7 @@ export function createBuilder(app, deps) {
     if (why) throw new NeedsYou('cap', why, { retry: 'turn' });
     w.turnBudgetUsd = budget;
     session.start(cfg(), appDir, w, w.prompt, budget);
-    w.turns.push({ startedAt: w.startedAt, kind: w.turnKind, logPath: w.logPath, costUsd: 0 });
+    w.turns.push({ n: w.turns.length + 1, startedAt: w.startedAt, kind: w.turnKind, logPath: w.logPath, costUsd: 0 });
     w.step = 'session';
     touch(w);
     log('ok', `${w.key}: ${w.turnKind === 'round' ? `feedback round ${w.rounds}` : 'build'} session turn ${w.turns.length} started`);
@@ -1506,7 +1506,7 @@ export function createBuilder(app, deps) {
     readActivity(d);
     const r = d._result;
     const cost = r?.total_cost_usd || 0;
-    w.turns.push({ startedAt: d.startedAt, endedAt: Date.now(), kind: 'ask', logPath: d.logPath, costUsd: cost });
+    w.turns.push({ n: w.turns.length + 1, startedAt: d.startedAt, endedAt: Date.now(), kind: 'ask', logPath: d.logPath, costUsd: cost });
     w.costUsd = (w.costUsd || 0) + cost;
     w.sessionCostUsd = (w.sessionCostUsd || 0) + cost;
     const reply = String(r?.result || '').trim() || (r ? `(no reply: the session ended with ${r.subtype || 'an error'})` : '(no reply: the session ended without one; its log has more)');

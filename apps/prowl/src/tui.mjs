@@ -1,5 +1,8 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { CONFIG_PATH } from './config.mjs';
+import { dropCache, readLines, readLog } from './details.mjs';
 import { CONFIG_FIELDS, JIRA } from './fields.mjs';
 import { askLabel, labelNames } from './names.mjs';
 import { label as jiraLabel } from './jira.mjs';
@@ -7,6 +10,8 @@ import { cleanName, notARef, parsePaste } from './paste.mjs';
 import { createMascot, wrap } from './mascot.mjs';
 import { shortstat } from './github.mjs';
 import { copyText, openExternal } from './proc.mjs';
+import { findingLinks, findingsFor, findingUrl, prLinks, readResult, SEVERITY_FILTERS, STATUS_FILTERS, webLink } from './reviewer/details.mjs';
+import { isCounted, isParked, SEVERITIES } from './reviewer/result.mjs';
 import { awaitingHuman, isOwn } from './reviewer/reviews.mjs';
 import { spendText } from './builder/rules.mjs';
 
@@ -232,6 +237,7 @@ function* keyPresses(data) {
  */
 export function startTui(app, actions, io = {}) {
   const out = io.out || process.stdout;
+  const openIt = target => (io.open || openExternal)(target); // io.open: the self-test's opener
   const stdin = io.stdin || process.stdin;
   const owl = createMascot();
   const { sides } = actions;
@@ -248,6 +254,7 @@ export function startTui(app, actions, io = {}) {
     panes: new Map(), // the scrolling panes, by id: { at, ops, top, room, total, follow, focus, painted, owner }
     front: null, // the pane the scroll keys go to, as the last frame painted it: { id, arrows, sig }
     bodyH: 0, // the rows the view had in the last frame
+    det: { reviewer: null, builder: null }, // the details open on each side, over History's or Running's list
     menu: null, // a setting's values listed under its row, while open: { key, label, options: [{ value, label, current } | { other, label }], at }
     picked: { reviewer: null, builder: null }, // the selected Running row, by id (and ticket): re-found each frame, so rows coming and going don't shift the selection
   };
@@ -364,7 +371,7 @@ export function startTui(app, actions, io = {}) {
   const whereText = st => (st.follow && st.at === null ? `latest ${st.room} of ${st.total} lines · PgUp to scroll back`
     : `lines ${st.top + 1}–${Math.min(st.total, st.top + st.room)} of ${st.total} · ${st.follow ? 'End: latest' : 'PgUp PgDn to scroll'}`);
   /** The view (and what is open over it) a frame was painted for: a pane painted for another is not scrolled. */
-  const frontSig = () => `${ui.side}:${view()}:${ui.notes ? 'notes' : ui.keys ? 'keys' : ui.menu ? 'menu' : offerOpen() ? 'offer' : ''}`;
+  const frontSig = () => `${ui.side}:${view()}:${ui.notes ? 'notes' : ui.keys ? 'keys' : ui.menu ? 'menu' : offerOpen() ? 'offer' : ''}:${ui.det[ui.side]?.view === view() ? 'details' : ''}`;
 
   /**
    * `blocks` ([{ key, segs, hang, wrap, src, hit }]) in at most `h` rows of `w` columns. `follow`: starts at its latest
@@ -460,6 +467,7 @@ export function startTui(app, actions, io = {}) {
     if (ui.edit?.prs) return prsInput(W);
     if (ui.edit?.build) return buildInput(W);
     if (ui.edit?.naming) return nameInput(W);
+    if (detOf()?.view === RUNNING) { const open = detailsView(W, H); if (open) return open; }
     if (ui.side === 'builder') return builderRunning(W, H);
     const runs = runningRows();
     if (!runs.length) {
@@ -618,48 +626,677 @@ export function startTui(app, actions, io = {}) {
     return [ST.grey, `${f.status}${f.note ? `: ${f.note}` : ''}`];
   }
 
-  const label = t => [ST.grey, `  ${t.padEnd(8)}`];
+  const label = (t, w = 8) => [ST.grey, `  ${t.padEnd(w)}`];
 
-  function fixDetails(f) {
+  function fixDetails(f, lw = 8) {
     return [
-      f.briefDir ? [label('Brief'), [ST.link, f.briefDir, pathToFileURL(f.briefDir).href]] : [label('Brief'), [ST.grey, '(none)']],
-      [label('Ticket'), [ST.link, f.ticketUrl || '', f.ticketUrl]],
-      [label('PR'), [ST.link, f.pr.url, f.pr.url], [ST.grey, `  ${f.pr.title || ''}`]],
-      [label('Status'), fixStatus(f), [ST.grey, `${f.costUsd ? `  · $${f.costUsd.toFixed(2)}` : ''}  · Fix my PRs, removed in 2.12.0`]],
+      f.briefDir ? [label('Brief', lw), [ST.link, f.briefDir, pathToFileURL(f.briefDir).href]] : [label('Brief', lw), [ST.grey, '(none)']],
+      [label('Ticket', lw), [ST.link, f.ticketUrl || '', f.ticketUrl]],
+      [label('PR', lw), [ST.link, f.pr.url, f.pr.url], [ST.grey, `  ${f.pr.title || ''}`]],
+      [label('Status', lw), fixStatus(f), [ST.grey, `${f.costUsd ? `  · $${f.costUsd.toFixed(2)}` : ''}  · Fix my PRs, removed in 2.12.0`]],
     ];
   }
 
-  function details(r) {
+  function details(r, lw = 8) {
     const flagged = waiting(r);
     const prs = prsOf(r);
     const rows = [];
     rows.push(r.status === 'done'
-      ? [label('Report'), [ST.link, r.reportPath, pathToFileURL(r.reportPath).href]]
-      : [label('Report'), [ST.grey, '(none)']]);
-    rows.push(r.quick ? [label('Ticket'), [ST.grey, '(none: a quick review)']] : [label('Ticket'), [ST.link, r.ticketUrl, r.ticketUrl]]);
-    prs.slice(0, 4).forEach((p, i) => rows.push([label(i ? '' : 'PRs'), [ST.link, p.url, p.url],
+      ? [label('Report', lw), [ST.link, r.reportPath, pathToFileURL(r.reportPath).href]]
+      : [label('Report', lw), [ST.grey, '(none)']]);
+    rows.push(r.quick ? [label('Ticket', lw), [ST.grey, '(none: a quick review)']] : [label('Ticket', lw), [ST.link, r.ticketUrl, r.ticketUrl]]);
+    prs.slice(0, 4).forEach((p, i) => rows.push([label(i ? '' : 'PRs', lw), [ST.link, p.url, p.url],
       ...(flagged.includes(p.url) ? [[ST.yellow, isOwn(p, app.me) ? "  ⚑ needs a teammate's approval" : '  ⚑ needs your approval']] : []), [ST.grey, `  ${p.title}`]]));
-    if (prs.length > 4) rows.push([label(''), [ST.grey, `+${prs.length - 4} more (o opens all)`]]);
+    if (prs.length > 4) rows.push([label('', lw), [ST.grey, `+${prs.length - 4} more (o opens all)`]]);
     const how = r.status === 'failed' ? [ST.red, `failed: ${r.error}`]
       : r.status === 'stopped' ? [ST.grey, 'stopped by you']
         : [ST.green, `done in ${dur(r.endedAt - r.startedAt)}${r.costUsd != null ? ` · $${r.costUsd.toFixed(2)}` : ''}`];
-    rows.push([label('Status'), how, [ST.yellow, r.pendingTag != null ? '  · ticket tag update pending' : '']]);
+    rows.push([label('Status', lw), how, [ST.yellow, r.pendingTag != null ? '  · ticket tag update pending' : '']]);
     return rows;
   }
 
-  function workDetails(w) {
+  function workDetails(w, lw = 8) {
     const prs = w.prs?.length ? w.prs : (w.repos || []).filter(r => r.pr).map(r => r.pr);
     const rows = [
-      [label('Brief'), [ST.link, w.briefDir, pathToFileURL(w.briefDir).href]],
-      [label('Ticket'), [ST.link, w.url || '', w.url]],
-      ...prs.slice(0, 4).map((p, i) => [label(i ? '' : 'PRs'), [ST.link, p.url, p.url], [ST.grey, `  ${p.title || ''}`]]),
-      ...(w.plan ? [[label('Plan'), [ST.link, w.plan, pathToFileURL(w.plan).href]]] : []),
+      [label('Brief', lw), [ST.link, w.briefDir, pathToFileURL(w.briefDir).href]],
+      [label('Ticket', lw), [ST.link, w.url || '', w.url]],
+      ...prs.slice(0, 4).map((p, i) => [label(i ? '' : 'PRs', lw), [ST.link, p.url, p.url], [ST.grey, `  ${p.title || ''}`]]),
+      ...(w.plan ? [[label('Plan', lw), [ST.link, w.plan, pathToFileURL(w.plan).href]]] : []),
     ];
-    rows.push([label('Status'), workStatus(w), [ST.grey, `  · ${spendText(w)}${w.note ? ` · ${w.note}` : ''}${w.summary ? ` · ${w.summary}` : ''}`]]);
+    rows.push([label('Status', lw), workStatus(w), [ST.grey, `  · ${spendText(w)}${w.note ? ` · ${w.note}` : ''}${w.summary ? ` · ${w.summary}` : ''}`]]);
     return rows;
+  }
+
+  // ---- Details: everything Prowl kept about a review or a build, in tabs, over History's or Running's list ----
+  // Each side keeps its own (ui.det[side]): { key, ticket, view, tab, sel: {}, stack: [], status, severity, full,
+  // find, findAt }. A row's key is its id (a review; `preparing:<ticket>` while it is set up) or its uid (a build).
+  // What they show comes from files Prowl doesn't control, so every paint and key runs inside a try.
+
+  const MARK = `${fg(16)}${bg(229)}`; // a search match: dark text on pale yellow
+  const MARK_AT = `${ST.bold}${fg(16)}${bg(226)}`; // …and the one under the cursor
+  const SEV_STYLE = { critical: ST.red, high: ST.orange, medium: ST.yellow, low: ST.grey, nit: ST.grey };
+  const lab9 = t => [ST.grey, `  ${t.padEnd(9)}`];
+  const fileLink = f => [ST.link, f, pathToFileURL(f).href];
+  const when = ms => new Date(ms).toLocaleString();
+  const detOf = (name = ui.side) => ui.det[name];
+  const keepDays = () => (app.cfg.logRetentionDays > 0 ? `: Keep logs deletes session logs after ${plural(app.cfg.logRetentionDays, 'day')}` : '');
+
+  /** Where the details' row is now: { item, where: RUNNING | HISTORY }, or null when it is gone from both lists. */
+  function detFind(det, name = ui.side) {
+    if (name === 'builder') {
+      const w = builder.history().find(x => x.uid === det.key);
+      return w ? { item: w, where: live('builder').some(x => x.uid === w.uid) ? RUNNING : HISTORY } : null;
+    }
+    let r = [...reviewer.running(), ...settingUp()].find(x => x.id === det.key);
+    if (!r && String(det.key).startsWith('preparing:')) { // its session started: the review's own row has taken its place
+      r = reviewer.running().find(x => x.ticket === det.ticket);
+      if (r) det.key = r.id;
+    }
+    if (r) return { item: r, where: RUNNING };
+    r = (name === ui.side ? history('reviewer') : [...reviewer.finished(), ...(reviewer.state.fixes || [])]).find(x => x.id === det.key);
+    return r ? { item: r, where: HISTORY } : null;
+  }
+
+  function closeDetails(name = ui.side) {
+    ui.det[name] = null;
+    for (const id of [...ui.panes.keys()]) if (id.startsWith(`det:${name}:`)) ui.panes.delete(id);
+    if (!ui.det.reviewer && !ui.det.builder) dropCache(); // a session log can be large
+  }
+
+  function openDetails(item) {
+    if (item._wait) return flash('It has no session yet: its details open once its review runs.');
+    ui.det[ui.side] = { key: item.id || item.uid, ticket: item.ticket || item.key, view: view(), tab: 0, sel: {}, stack: [], status: 0, severity: 0, full: false, find: '', findAt: -1 };
+    return undefined;
+  }
+
+  /** Each frame: the details follow their row from Running to History and back, and close when it is gone from both. */
+  function syncDetails() {
+    for (const name of SIDES) {
+      const det = ui.det[name];
+      if (!det) continue;
+      let at;
+      try { at = detFind(det, name); } catch { at = null; }
+      if (!at) { closeDetails(name); continue; }
+      if (at.where === det.view) continue;
+      const looking = ui.side === name && ui.view[name] === det.view;
+      det.view = at.where;
+      if (!looking) continue; // on another view: they are there when you next go to that one
+      ui.view[name] = at.where;
+      const status = name === 'builder' ? workStatus(at.item)[1] : verdict(at.item)[1];
+      flash(at.where === HISTORY ? `${det.ticket} is in History now (${status}): its details moved with it.` : `${det.ticket} is running again: its details are in Running now.`);
+    }
+  }
+
+  const kindOf = it => (ui.side === 'builder' ? 'build' : it.pr ? 'fix' : it.status === 'preparing' ? 'setup' : 'review');
+  const tabsOf = it => ({ build: ['Summary', 'PRs', 'Turns'], fix: ['Summary', ...(it.logPath ? ['Session'] : [])], setup: ['Summary'], review: ['Summary', 'PRs', 'Findings', 'Session'] }[kindOf(it)]);
+  const isLive = det => det.view === RUNNING;
+  const parkOpts = it => ({ parkHumanOnly: it.parkHumanOnly });
+  /** A review's result, or why there is none: { state: 'ok' | 'invalid' | 'missing' | 'none', result }. */
+  const resultOf = (it, det) => (it.resultMode && it.resultPath ? readResult(it.resultPath, { live: isLive(det) }) : { state: 'none', result: null });
+  function noFindings(it, det, res) {
+    if (it.status === 'preparing') return 'Its review is being set up: findings show here once it has run.';
+    if (isLive(det)) return "It's still running: its findings show here once its session writes its review result.";
+    if (res.state === 'none') return 'This review has no review result, as it ran before Prowl kept findings as data: x opens its report, which has them.';
+    if (res.state === 'invalid') return `Its review result isn't a valid review result (${it.resultPath}), so its findings can't be shown: x opens its report.`;
+    if (['failed', 'stopped'].includes(it.status)) return 'It ended before writing a review result.';
+    return `Its review result is missing (${it.resultPath}).`;
+  }
+
+  /** The reviews of a ticket, finished or running, oldest first. */
+  const chainOf = it => [...reviewer.state.runs.filter(r => !r.pr)].filter(r => r.ticket === it.ticket).sort((a, b) => a.startedAt - b.startedAt);
+  function chainStep(det, it, by) {
+    const chain = chainOf(it);
+    const to = chain[chain.findIndex(r => r.id === it.id) + by];
+    if (!to) return flash(`This is ${it.ticket}'s ${by < 0 ? 'first' : 'latest'} review.`);
+    return showReview(det, to);
+  }
+  /** Another review of the same ticket, on the same tab with the same filters. */
+  function showReview(det, to) {
+    Object.assign(det, { key: to.id, stack: [], find: '', findAt: -1, sel: {} });
+    const at = detFind(det);
+    if (at && at.where !== det.view) { det.view = at.where; ui.view[ui.side] = at.where; }
+    return undefined;
+  }
+
+  // A screen is a document (blocks in a scrolling pane; with choices, ↑ ↓ move between them and enter opens the
+  // chosen one) or a list (a row per item, and under a rule the selected item's preview in its own pane).
+  function docOf(id, opts = {}) {
+    const blocks = [];
+    const choices = [];
+    const doc = {
+      kind: 'doc', id, blocks, choices, ...opts,
+      row(name, segs, hang = 11) { blocks.push({ key: blocks.length, segs: [lab9(name), ...segs], hang }); return doc; },
+      /** Multi-line text keeps its line breaks, the label on the first line only. */
+      text(name, text, style = '') { String(text ?? '').split('\n').forEach((l, i) => doc.row(i ? '' : name, [[style, l]])); return doc; },
+      line(segs, hang = 2) { blocks.push({ key: blocks.length, segs, hang }); return doc; },
+      blank() { blocks.push({ key: blocks.length, segs: [] }); return doc; },
+      choice(segs, open, hang = 3) { blocks.push({ key: blocks.length, segs, hang, choice: choices.length }); choices.push(open); return doc; },
+    };
+    return doc;
+  }
+  const para = (id, text) => docOf(id).blank().line([[ST.grey, `  ${text}`]]);
+  const linkSegs = (u, text = u) => (webLink(u) ? [[ST.link, text, u]] : [['', String(text ?? '')]]); // a session's URL is a link only when it is a plain https one
+
+  /** A text file in a window: its lines, wrapped. x opens it outside Prowl. */
+  function fileScreen(win) {
+    const lines = readLines(win.path, { grows: Boolean(win.grows) });
+    if (!lines) return Object.assign(para(`file:${win.path}`, `${win.label === 'Prompt' ? 'The prompt is gone' : `${win.path}: gone`}${keepDays()}.`), { file: win.path });
+    const doc = docOf(`file:${win.path}`, { file: win.path });
+    doc.blocks.push(...lines.map((l, i) => ({ key: i, src: l, segs: [['', `  ${l.line}`]], hang: 2 })));
+    return doc;
+  }
+
+  /** The Files choices of a Summary: a label column, then the path as a link. One that isn't there says why and can't be opened. */
+  function filesInto(doc, det, files) {
+    const shown = files.filter(f => f.path);
+    if (!shown.length) return doc;
+    const w = Math.max(14, ...shown.map(f => f.label.length + 2));
+    doc.blank().line([[ST.bold, '  Files']]);
+    for (const f of shown) {
+      const there = f.tab != null || fs.existsSync(f.path);
+      doc.choice([[there ? '' : ST.grey, f.label.padEnd(w)], ...(there ? [fileLink(f.path)] : [[ST.grey, `${f.path}: ${isLive(det) ? 'not written yet' : `gone${keepDays()}`}`]])],
+        !there ? null : f.tab != null ? () => { det.tab = f.tab; det.find = ''; } : () => det.stack.push({ type: 'file', label: f.label, path: f.path, grows: f.grows }));
+    }
+    return doc;
+  }
+
+  function reviewSummary(det, it) {
+    const doc = docOf('summary');
+    const kind = kindOf(it);
+    if (kind === 'fix') { for (const segs of fixDetails(it, 9)) doc.blocks.push({ key: doc.blocks.length, segs, hang: 11 }); }
+    else if (isLive(det)) {
+      doc.row('Report', [[ST.grey, '(when it finishes)']]);
+      doc.row('Ticket', it.quick ? [[ST.grey, '(none: a quick review)']] : [[ST.link, it.ticketUrl, it.ticketUrl]]);
+      it.prs.forEach((p, i) => doc.row(i ? '' : 'PRs', [[ST.link, p.url, p.url], [ST.grey, `  ${p.title || ''}`]]));
+      doc.row('Status', [[ST.yellow, `${liveStatus(it).toLowerCase()} · for ${dur(Date.now() - it.startedAt)}`]]);
+    } else for (const segs of details(it, 9)) doc.blocks.push({ key: doc.blocks.length, segs, hang: 11 });
+    doc.blank().row('Started', [['', when(it.startedAt || it.createdAt)]]);
+    if (!isLive(det) && it.endedAt) doc.row('Ended', [['', when(it.endedAt)]]);
+    if (kind !== 'fix') {
+      doc.row('Review', [['', it.reviewNo > 1 ? `re-review #${it.reviewNo}` : 'first review']]);
+      const chain = chainOf(it);
+      if (chain.length > 1) {
+        const twice = r => chain.filter(x => x.reviewNo === r.reviewNo).length > 1 && r.status !== 'done';
+        doc.row('Chain', [...chain.flatMap((r, i) => [...(i ? [[ST.grey, ' · ']] : []), r.id === it.id ? [ST.bold, `r${r.reviewNo}${twice(r) ? ` ${r.status}` : ''}`]
+          : [ST.link, `r${r.reviewNo}${twice(r) ? ` ${r.status}` : ''}`, undefined, () => showReview(det, r)]]), [ST.grey, '   [ ] the review before or after']]);
+      }
+      const res = kind === 'review' ? resultOf(it, det) : null;
+      if (res?.result) {
+        const b = res.result.batch || {};
+        if (b.goal) doc.text('Goal', b.goal);
+        if (b.mergeOrder) doc.text('Merge', b.mergeOrder);
+        if (b.complete) doc.text('Complete', b.complete);
+        const earlier = (res.result.findings || []).filter(f => String(f.id).startsWith('C-'));
+        if (earlier.length) {
+          const by = {};
+          for (const f of earlier) by[f.status] = (by[f.status] || 0) + 1;
+          doc.row('Earlier', [['', `${plural(earlier.length, 'earlier finding')}: ${Object.entries(by).map(([s, n]) => `${n} ${s}`).join(', ')}`]]);
+        }
+        for (const q of res.result.questions || []) doc.text('Question', typeof q === 'string' ? q : q?.question || q?.text || JSON.stringify(q), ST.yellow);
+      } else if (res) doc.row('Findings', [[ST.grey, noFindings(it, det, res)]]);
+    }
+    const prep = it.prep?.dir ? [['Comments', path.join(it.prep.dir, 'existing-comments.md')], ['Earlier reviews', path.join(it.prep.dir, 'prior-findings.md')],
+      ...(it.prep.prs || []).filter(p => p.facts).map(p => [`Facts ${prName(p)}`, p.facts])] : [];
+    return filesInto(doc, det, [...(it.resultMode ? [{ label: 'Result', path: it.resultPath }] : []), ...(it.logPath && tabsOf(it).includes('Session') ? [{ label: 'Session', path: it.logPath, tab: tabsOf(it).indexOf('Session') }] : []),
+      { label: 'Prompt', path: it.promptPath }, ...prep.map(([label, p]) => ({ label, path: p }))]);
+  }
+
+  function buildSummary(det, w) {
+    const doc = docOf('summary');
+    for (const segs of workDetails(w, 9)) doc.blocks.push({ key: doc.blocks.length, segs, hang: 11 });
+    doc.blank().row('Started', [['', when(w.createdAt)]]);
+    if (!isLive(det)) doc.row('Ended', [['', when(w.updatedAt || w.createdAt)]]);
+    const turns = w.turns || [];
+    doc.row('Turns', [['', `${plural(turns.length, 'turn')} · ${plural(w.rounds || 0, 'feedback round')} · the Turns tab has each one's session`]]);
+    const dir = w.briefDir || '';
+    const there = name => (dir && fs.existsSync(path.join(dir, name)) ? path.join(dir, name) : '');
+    let rounds = [];
+    try { rounds = fs.readdirSync(dir).map(f => /^feedback-(\d+)\.md$/.exec(f)).filter(Boolean).sort((a, b) => a[1] - b[1]); } catch { /* no brief folder */ }
+    return filesInto(doc, det, [{ label: 'Brief', path: there('ticket.md') || there('quick.md') }, { label: 'Investigation', path: there('investigation.md') }, { label: 'Plan', path: w.plan && fs.existsSync(w.plan) ? w.plan : there('plan.md') },
+      { label: 'Result', path: there('result.json') }, ...rounds.map(m => ({ label: `Round ${Number(m[1])} feedback`, path: path.join(dir, m[0]) }))]);
+  }
+
+  /** What a review recorded about a PR without a result: the commit reviewed, and the approval. */
+  function runFacts(doc, it, url) {
+    const head = it.reviewedHeads?.[url];
+    doc.row('Reviewed', [[head ? '' : ST.grey, head ? `at ${String(head).slice(0, 7)}` : 'not reviewed: no head commit']]);
+    if (it.approved?.[url]) doc.row('Approved', [[ST.green, `at ${String(it.approved[url]).slice(0, 7)}`], ...((it.awaitingHuman || []).includes(url) ? [[ST.yellow, " · Prowl's stamp only: a person's approval is still needed"]] : [])]);
+  }
+  const prTitle = (it, url) => [...(it.prs || []), ...(it.contextPrs || []), ...(it.leftOut || [])].find(p => p.url === url)?.title || '';
+  const leftOutWhy = (it, entry) => {
+    const said = /^Not reviewed: (.*?)\.?$/.exec(String(entry?.coverage?.unverified || ''))?.[1];
+    if (said) return said;
+    if ((it.contextPrs || []).some(p => p.url === entry?.url)) return 'context only, unchanged since an earlier review cleared it';
+    return (it.leftOut || []).some(p => p.url === entry?.url) ? 'a draft now, or past the round cap' : '';
+  };
+  const nameOf = url => { const m = /github\.com\/[^/]+\/([^/]+)\/pull\/(\d+)/.exec(String(url)); return m ? `${m[1]}#${m[2]}` : String(url); };
+  const findingText = f => [f.id, f.severity, f.status, f.title, f.problem, f.fix, f.location?.path, f.pr].filter(Boolean).join(' ');
+
+  function reviewPrs(det, it) {
+    const res = resultOf(it, det);
+    const urls = res.result?.prs?.length ? res.result.prs.map(p => p.url) : [...it.prs, ...(it.contextPrs || [])].map(p => p.url);
+    const reviewed = new Set(it.prs.map(p => p.url));
+    const items = urls.map(url => {
+      const entry = res.result?.prs.find(p => p.url === url);
+      const counted = res.result ? (res.result.findings || []).filter(f => f.pr === url && isCounted(f, parkOpts(it))) : [];
+      const worst = SEVERITIES.find(s => counted.some(f => f.severity === s));
+      const verdictSeg = !res.result ? [] : [worst ? [SEV_STYLE[worst], `${worst} · ${counted.length}`.padEnd(18)] : [ST.green, 'none counted'.padEnd(18)]];
+      const title = prTitle(it, url);
+      return {
+        segs: [[ST.link, nameOf(url).padEnd(14), url], ['', ' '], ...verdictSeg, ['', title]], text: [url, title, entry?.summary].filter(Boolean).join(' '), url,
+        open: () => det.stack.push({ type: 'pr', url }),
+        preview: () => {
+          const doc = docOf('preview');
+          if (res.result && !reviewed.has(url)) doc.row('Skipped', [[ST.grey, `left out of this review: ${leftOutWhy(it, entry) || 'not part of it'}`]]);
+          if (entry?.summary) doc.text('Summary', entry.summary);
+          if (entry?.role) doc.text('Role', entry.role);
+          if (!entry) doc.line([[ST.grey, `  ${res.result ? 'Not in the review result.' : noFindings(it, det, res)}`]]);
+          return doc.blocks;
+        },
+      };
+    });
+    return { kind: 'list', id: 'prs', items, empty: 'No PRs.' };
+  }
+
+  function prWindow(det, it, win) {
+    const res = resultOf(it, det);
+    const entry = res.result?.prs.find(p => p.url === win.url);
+    const doc = docOf(`pr:${win.url}`, { pr: win.url });
+    doc.row('PR', [[ST.link, win.url, win.url], [ST.grey, `  ${prTitle(it, win.url)}`]]);
+    if (!entry) runFacts(doc, it, win.url);
+    else {
+      if (entry.summary) doc.text('Summary', entry.summary);
+      if (entry.role) doc.text('Role', entry.role);
+      doc.row('Reviewed', [[entry.reviewedAt ? '' : ST.grey, entry.reviewedAt ? `at ${String(entry.reviewedAt).slice(0, 7)}` : 'not reviewed: no head commit']]);
+      if (entry.coverage?.axes?.length) doc.row('Axes', [['', entry.coverage.axes.join(', ')]]);
+      for (const c of entry.coverage?.clean || []) doc.text('Clean', c);
+      if (String(entry.coverage?.unverified || '').trim()) doc.text('Gaps', entry.coverage.unverified, ST.yellow);
+      (entry.related || []).forEach((x, i) => doc.row(i ? '' : 'Related', [...linkSegs(x?.url), [ST.grey, `  ${x?.shares || ''}`]]));
+      (entry.earlierReviews || []).forEach((x, i) => doc.row(i ? '' : 'Earlier', [...linkSegs(x?.url), [ST.grey, `  ${plural((x?.findings || []).length, 'finding')}${x?.unread ? ' · not read in full' : ''}`]]));
+      if (entry.conventions?.length) doc.row('Rules', [['', entry.conventions.join(', ')]]);
+      prLinks(win.url, it.published).forEach((l, i) => doc.row(i ? '' : 'GitHub', [['', `${l.what}  `], ...(l.url ? [[ST.link, l.url, l.url]] : [])]));
+      if (it.approved?.[win.url]) doc.row('Approved', [[ST.green, `at ${String(it.approved[win.url]).slice(0, 7)}`], ...((it.awaitingHuman || []).includes(win.url) ? [[ST.yellow, " · Prowl's stamp only: a person's approval is still needed"]] : [])]);
+      const on = findingsFor(res.result, {}, parkOpts(it)).filter(f => f.pr === win.url);
+      doc.blank().line([[ST.bold, `  Findings on this PR (${on.length})`]]);
+      for (const f of on) doc.choice([[ST.bold, `${f.id}  `], [SEV_STYLE[f.severity] || '', `${f.severity}  `], [ST.grey, `${f.status}  `], ['', f.title]], () => det.stack.push({ type: 'finding', pr: f.pr, id: f.id, from: 'pr' }));
+    }
+    return doc;
+  }
+
+  const statusStyle = (f, it) => (isCounted(f, parkOpts(it)) ? SEV_STYLE[f.severity] || '' : ['fixed', 'answered', 'no-longer-applies'].includes(f.status) && !isParked(f, parkOpts(it)) ? ST.green
+    : isParked(f, parkOpts(it)) || f.status === 'deferred' ? ST.cyan : ST.grey);
+  const filterStep = (det, which) => () => {
+    const list = which === 'status' ? STATUS_FILTERS : SEVERITY_FILTERS;
+    det[which] = (det[which] + 1) % list.length;
+    det.sel.findings = 0;
+    flash(`Findings: ${list[det[which]]}.`);
+  };
+
+  function reviewFindings(det, it) {
+    const res = resultOf(it, det);
+    if (!res.result) return para('findings', noFindings(it, det, res));
+    const all = res.result.findings || [];
+    const list = findingsFor(res.result, det, parkOpts(it));
+    const many = (res.result.prs || []).length > 1;
+    const head = [[[ST.grey, '  Showing '], [ST.bold, STATUS_FILTERS[det.status], undefined, filterStep(det, 'status')], [ST.grey, ' · '], [ST.bold, SEVERITY_FILTERS[det.severity], undefined, filterStep(det, 'severity')],
+      [ST.grey, ` · ${list.length} of ${plural(all.length, 'finding')}   s status · v severity`]]];
+    const items = list.map(f => ({
+      segs: [[ST.bold, String(f.id).padEnd(6)], [SEV_STYLE[f.severity] || '', String(f.severity).padEnd(10)], [statusStyle(f, it), (isParked(f, parkOpts(it)) ? `${f.status} · parked` : String(f.status)).padEnd(20)],
+        ...(many ? [[ST.grey, nameOf(f.pr).padEnd(14)]] : []), ['', f.title]],
+      text: findingText(f), finding: f,
+      open: () => det.stack.push({ type: 'finding', pr: f.pr, id: f.id, from: 'tab' }),
+      preview: () => docOf('preview').row('Where', [['', f.location?.path ? `${f.location.path}${f.location.line ? `:${f.location.line}` : ''}` : 'no single place']]).text('Problem', f.problem).text('Fix', f.fix).blocks,
+    }));
+    return { kind: 'list', id: 'findings', head, items, empty: all.length ? 'No finding matches these filters: s and v change them.' : 'The review found nothing.' };
+  }
+
+  /** The findings a finding's window steps through: the Findings tab with its filters, or one PR's. */
+  const siblings = (det, it, win, result) => (win.from === 'pr' ? findingsFor(result, {}, parkOpts(it)).filter(f => f.pr === win.pr) : findingsFor(result, det, parkOpts(it)));
+
+  function findingWindow(det, it, win) {
+    const res = resultOf(it, det);
+    const list = res.result ? siblings(det, it, win, res.result) : [];
+    const now = list.find(f => f.pr === win.pr && f.id === win.id);
+    if (now) win.was = now; // the window holds the finding's PR and id, not a copy: a result rewritten while it is open updates it
+    const f = now || win.was;
+    const doc = docOf(`finding:${win.pr}:${win.id}`, { finding: f, result: res.result, pr: f?.pr });
+    if (!f) return doc.blank().line([[ST.grey, "  The review result doesn't list this finding now."]]);
+    win.at = now ? [list.indexOf(now) + 1, list.length] : null;
+    if (!now) doc.line([[ST.yellow, "  As it was when opened: the review result, or the filters, don't list it now."]]).blank();
+    const o = parkOpts(it);
+    doc.line([[ST.bold, `  ${f.id}  `], [`${ST.bold}${SEV_STYLE[f.severity] || ''}`, String(f.severity).toUpperCase()], [statusStyle(f, it), `  ${f.status}`], [ST.grey, `${f.axis ? `  · ${f.axis}` : ''}  · ${isCounted(f, o) ? 'counts toward the verdict' : isParked(f, o) ? 'parked' : "doesn't count toward the verdict"}`]]);
+    doc.line([[ST.bold, `  ${f.title}`]]).blank();
+    doc.row('PR', linkSegs(f.pr));
+    const at = findingUrl(f, res.result);
+    const where = f.location?.path ? `${f.location.path}${f.location.line ? `:${f.location.startLine && f.location.startLine < f.location.line ? `${f.location.startLine}-` : ''}${f.location.line}` : ''}` : 'no single place';
+    doc.row('Where', [at ? [ST.link, where, at] : ['', where], ...(at ? [[ST.grey, '  · o opens it at the reviewed commit']] : [])]);
+    doc.text('Problem', f.problem).text('Fix', f.fix).blank();
+    const d = f.detail || {};
+    for (const [name, v] of [['Why', d.explanation], ['Scenario', d.scenario], ['Steps', d.fixDetail], ['Check', d.check], ['Verified', d.verification]]) if (String(v || '').trim()) doc.text(name, v);
+    if (d.quote?.code) { doc.row('Code', [[ST.grey, d.quote.language || '']]); for (const l of String(d.quote.code).split('\n')) doc.line([[ST.dim, `      ${l}`]], 6); }
+    if (f.crossPr) doc.row('Cross-PR', [['', `with ${f.crossPr.counterpart || 'another PR'}; the fix belongs in ${f.crossPr.fixBelongsTo || f.pr}`], [ST.grey, f.crossPr.why ? `  ${f.crossPr.why}` : '']]);
+    if (f.consumer) doc.row('Consumer', [['', `outside the batch: ${f.consumer.repo || ''} ${f.consumer.path || ''}`]]);
+    if (f.earlier) {
+      const e = f.earlier;
+      doc.row('Earlier', [['', `${e.by === 'prowl' ? 'PR-Owl' : e.author || 'someone else'}${e.ref ? `, ${e.ref}` : ''} · thread ${e.threadState || 'none'}${e.parked ? ' · parked' : ''}  `], ...(webLink(e.url) ? [[ST.link, e.url, e.url]] : [])]);
+    }
+    if (f.outcome && (f.outcome.commit || f.outcome.note || f.outcome.answer || f.outcome.disputeHolds != null)) {
+      const out = f.outcome;
+      doc.row('Outcome', [['', [out.commit && `in ${String(out.commit).slice(0, 7)}`, out.note, out.disputeHolds != null && `the dispute ${out.disputeHolds ? 'holds' : "doesn't hold"}`].filter(Boolean).join(' · ')],
+        ...(out.answer ? [['', '  '], ...linkSegs(out.answer)] : [])]);
+    }
+    findingLinks(f, it.published).forEach((l, i) => doc.row(i ? '' : 'GitHub', [['', `${l.what}  `], ...(l.url ? [[ST.link, l.url, l.url]] : [])]));
+    return doc;
+  }
+
+  const entryBlocks = new WeakMap(); // a log entry -> its blocks, as Activity lines and in full
+  /** A session's log as a document: the lines Running's Activity shows, or (l) the session in full. */
+  function sessionScreen(det, it, logPath, id, live, review = true) {
+    const scr = docOf(id, { session: true, log: logPath, follow: live });
+    if (!logPath) return Object.assign(para(id, 'No session log was kept for this one.'), { session: true });
+    const log = readLog(logPath);
+    if (!log) {
+      return Object.assign(para(id, live ? "The session hasn't started yet: its lines show here as it runs."
+        : `The session log gone${keepDays()}.${review ? ' The report and findings are kept.' : ''}`), { session: true, log: logPath, follow: live });
+    }
+    if (log.result) {
+      const r = log.result;
+      scr.line([[ST.grey, `  ${[r.subtype && r.subtype !== 'success' ? r.subtype : '', `$${Number(r.total_cost_usd || 0).toFixed(2)}`, log.results === 1 && r.duration_ms ? dur(r.duration_ms) : '', log.results > 1 ? `${log.results} turns` : ''].filter(Boolean).join(' · ')}`]]);
+    }
+    for (const e of log.entries) {
+      let made = entryBlocks.get(e);
+      if (!made) {
+        const lite = e.kind === 'output' ? null : { src: e, ...(e.kind === 'error' ? { segs: [[ST.red, `  ${e.text}`]], hang: 2 }
+          : e.sub ? { segs: [[ST.grey, '    ↳ '], [ST.grey, e.text]], hang: 6 } : { segs: [[ST.cyan, '  • '], [e.kind === 'said' ? '' : ST.dim, e.text]], hang: 4 }) };
+        const lines = String(e.full).split('\n');
+        const style = e.kind === 'error' || e.error ? ST.red : e.kind === 'said' ? '' : e.kind === 'tool' ? ST.dim : ST.grey;
+        const full = [...lines.map((l, i) => ({ src: {}, segs: e.kind === 'tool' && i === 0 ? [[ST.cyan, e.sub ? '    ▸ ' : '  ▸ '], [ST.bold, l]] : [[style, `${e.sub ? '      ' : '    '}${l}`]], hang: e.sub ? 6 : 4 })),
+          ...(e.kind === 'said' || e.kind === 'output' ? [{ src: {}, segs: [] }] : [])];
+        made = { lite, full };
+        entryBlocks.set(e, made);
+      }
+      if (det.full) scr.blocks.push(...made.full);
+      else if (made.lite) scr.blocks.push(made.lite);
+    }
+    scr.blocks.forEach((b, i) => { b.key = i; });
+    if (!log.entries.length) scr.line([[ST.grey, '  starting…']]);
+    return scr;
+  }
+
+  function buildPrs(det, w) {
+    const prs = w.prs?.length ? w.prs : (w.repos || []).filter(r => r.pr).map(r => r.pr);
+    const facts = p => {
+      const repo = (w.repos || []).find(r => r.pr?.url === p.url || r.repo === p.repo);
+      const doc = docOf(`pr:${p.url}`, { pr: p.url });
+      doc.row('PR', [[ST.link, p.url, p.url]]).row('Title', [['', p.title || '']]);
+      if (repo?.worktree) doc.row('Worktree', [fileLink(repo.worktree)]);
+      return doc;
+    };
+    const items = prs.map(p => ({ segs: [[ST.link, prName(p).padEnd(14), p.url], [p.state && p.state !== 'open' ? ST.grey : ST.green, String(p.state || 'open').toLowerCase().padEnd(8)], ['', p.title || '']],
+      text: [p.url, p.title].filter(Boolean).join(' '), url: p.url, open: () => det.stack.push({ type: 'buildPr', url: p.url }), preview: () => facts(p).blocks, facts: () => facts(p) }));
+    return { kind: 'list', id: 'prs', items, empty: 'No PRs yet.' };
+  }
+
+  const turnPrompt = t => (t.logPath ? t.logPath.replace(/\.ndjson$/, '.prompt.md') : '');
+  function buildTurns(det, w) {
+    const turns = w.turns || [];
+    const items = turns.map((t, i) => {
+      const n = t.n || i + 1;
+      const running = isLive(det) && i === turns.length - 1 && !t.endedAt && w.step === 'session';
+      const gone = t.logPath && !fs.existsSync(t.logPath);
+      const cost = running ? '' : t.costUnknown ? 'cost not reported' : `$${Number(t.costUsd || 0).toFixed(2)}`;
+      const model = running ? 'running now' : t.model ? `${t.model}${t.effort ? ` · ${t.effort} effort` : ''}` : t.costUsd || t.costUnknown ? '' : 'not recorded';
+      return {
+        segs: [[ST.bold, `turn ${n}`.padEnd(9)], [ST.grey, `${stamp(t.startedAt)}  `], ['', cost.padEnd(18)], [ST.grey, (t.endedAt ? dur(t.endedAt - t.startedAt) : '').padEnd(10)], [running ? ST.yellow : ST.grey, model.padEnd(32)], ['', t.kind || ''],
+          ...(gone ? [[ST.grey, ' · log gone']] : [])],
+        text: [`t${n}`, t.model, t.effort, t.kind].filter(Boolean).join(' '), turn: t,
+        open: () => det.stack.push({ type: 'turn', n }),
+        preview: () => {
+          const doc = docOf('preview');
+          doc.row('Session', t.logPath ? (gone ? [[ST.grey, `${t.logPath}: gone${keepDays()}`]] : [fileLink(t.logPath)]) : [[ST.grey, 'No session log was kept for this one.']]);
+          const said = !gone && t.logPath ? (readLog(t.logPath)?.entries || []).filter(e => e.kind === 'said' && !e.sub).at(-1) : null;
+          if (said) doc.row('Said', [['', said.text]]);
+          return doc.blocks;
+        },
+      };
+    });
+    return { kind: 'list', id: 'turns', items, empty: 'No turns yet.' };
+  }
+
+  /** The screen in front: the window on top of the stack, else the tab's. */
+  function frontScreen(det, it) {
+    const win = det.stack.at(-1);
+    const build = kindOf(it) === 'build';
+    if (win?.type === 'file') return fileScreen(win);
+    if (win?.type === 'pr') return prWindow(det, it, win);
+    if (win?.type === 'finding') return findingWindow(det, it, win);
+    if (win?.type === 'buildPr') return buildPrs(det, it).items.find(x => x.url === win.url)?.facts() || para('pr', 'That PR is gone.');
+    if (win?.type === 'turn') {
+      const t = (it.turns || []).find((x, i) => (x.n || i + 1) === win.n);
+      const last = (it.turns || []).at(-1) === t;
+      return Object.assign(sessionScreen(det, it, t?.logPath, `turn:${win.n}`, isLive(det) && last && !t?.endedAt, false), { prompt: t ? turnPrompt(t) : '' });
+    }
+    const tab = tabsOf(it)[det.tab];
+    if (tab === 'Summary') return build ? buildSummary(det, it) : reviewSummary(det, it);
+    if (tab === 'PRs') return build ? buildPrs(det, it) : reviewPrs(det, it);
+    if (tab === 'Findings') return reviewFindings(det, it);
+    if (tab === 'Turns') return buildTurns(det, it);
+    return Object.assign(sessionScreen(det, it, it.logPath, 'session', isLive(det), true), { prompt: it.promptPath });
+  }
+  const winName = win => (win.type === 'file' ? win.label : win.type === 'pr' || win.type === 'buildPr' ? nameOf(win.url) : win.type === 'finding' ? win.id : `turn ${win.n}`);
+  const liveStatus = it => (ui.side === 'builder' ? (it.stopRequested ? 'STOPPING' : (STEP_NAMES[it.step] || 'waiting').toUpperCase())
+    : it.status === 'preparing' ? 'BEING SET UP' : it.status === 'stopping' ? 'STOPPING' : it.phase === 'checks' ? 'BUILDING AND TESTING' : it.phase === 'publishing' ? 'POSTING ITS REVIEW' : 'REVIEWING');
+
+  /** `blocks` with every match of `find` highlighted, the one at `current` brighter: { blocks, matches: [block key] }. Matching spans the pieces of one row. */
+  function markBlocks(det, scr, find, current) {
+    const [first, last] = [scr.blocks[0], scr.blocks.at(-1)];
+    const memo = det._marks;
+    if (memo && memo.id === scr.id && memo.find === find && memo.current === current && memo.n === scr.blocks.length && memo.first === first?.src && memo.last === last?.src && (first?.src || !scr.blocks.length)) return memo.out;
+    const needle = find.toLowerCase();
+    const matches = [];
+    const blocks = scr.blocks.map(b => {
+      const text = b.segs.map(s => clean(s[1])).join('').toLowerCase();
+      const spans = [];
+      for (let i = text.indexOf(needle); i >= 0; i = text.indexOf(needle, i + needle.length)) spans.push([i, i + needle.length, matches.push(b.key) - 1]);
+      if (!spans.length) return b;
+      const segs = [];
+      let at = 0;
+      for (const s of b.segs) {
+        const t = clean(s[1]);
+        let from = 0;
+        for (const [a, z, n] of spans) {
+          const [x, y] = [Math.max(a - at, from), Math.min(z - at, t.length)];
+          if (y <= x) continue;
+          if (x > from) segs.push([s[0], t.slice(from, x), ...s.slice(2)]);
+          segs.push([n === current ? MARK_AT : MARK, t.slice(x, y), ...s.slice(2)]);
+          from = y;
+        }
+        if (from < t.length) segs.push([s[0], t.slice(from), ...s.slice(2)]);
+        at += t.length;
+      }
+      return { ...b, segs, src: undefined };
+    });
+    const out = { blocks, matches };
+    det._marks = { id: scr.id, find, current, n: scr.blocks.length, first: first?.src, last: last?.src, out };
+    return out;
+  }
+
+  /** The details' rows, or null when they can't be shown (they close, and the list behind shows). */
+  function detailsView(W, H) {
+    const det = detOf();
+    try {
+      const at = detFind(det);
+      if (!at) { closeDetails(); return null; }
+      const it = at.item;
+      const tabs = tabsOf(it);
+      det.tab = Math.min(det.tab, tabs.length - 1);
+      const scr = frontScreen(det, it);
+      const build = kindOf(it) === 'build';
+      // Row 1: back, the ticket, the status, the title, and the chain of the ticket's reviews.
+      const [stStyle, stText] = isLive(det) ? [ST.yellow, liveStatus(it)] : build ? workStatus(it) : it.pr ? fixStatus(it) : verdict(it);
+      const chain = build || it.pr ? [] : chainOf(it);
+      const right = chain.length > 1 ? [[ST.grey, '‹ ', undefined, () => chainStep(det, it, -1)], ['', `[ review ${chain.findIndex(r => r.id === it.id) + 1} of ${chain.length} ]`], [ST.grey, ' › ', undefined, () => chainStep(det, it, 1)]] : [];
+      const ticketUrl = build ? it.url : it.ticketUrl;
+      const left = [[acc().key, ' ❮ back ', undefined, () => onKey('esc'), acc().keyHover], ['', '  '], [ST.bold, det.ticket, ticketUrl || undefined], ['', '  '], [`${ST.bold}${stStyle}`, String(stText).toUpperCase()], ['', '  ']];
+      const out = [spread([...left, ['', trunc(it.title, Math.max(0, W - width(left) - width(right) - 1))]], right, W)];
+      // Row 2: the tabs.
+      const counts = { PRs: build ? (it.prs?.length ?? 0) : (resultOf(it, det).result?.prs?.length ?? it.prs?.length ?? 0), Findings: resultOf(it, det).result?.findings?.length, Turns: it.turns?.length };
+      out.push(tabs.flatMap((name, i) => [[i === det.tab ? `${ST.bold}${acc().fg}` : ST.grey, `  ${name}${counts[name] != null && !(name === 'Findings' && build) ? ` (${counts[name]})` : ''} `, undefined, () => { Object.assign(det, { tab: i, stack: [], find: '', findAt: -1 }); }]]));
+      // Row 3, while a window is open: where it is, and how to get back.
+      if (det.stack.length) {
+        const crumbs = [[ST.grey, `  ${tabs[det.tab]}`, undefined, () => { det.stack = []; det.find = ''; }], ...det.stack.flatMap((win, i) => [[ST.grey, ' › '],
+          i === det.stack.length - 1 ? [ST.bold, winName(win)] : [ST.grey, winName(win), undefined, () => { det.stack.length = i + 1; det.find = ''; }]])];
+        const win = det.stack.at(-1);
+        out.push(spread(crumbs, [[ST.grey, `${win.type === 'finding' && win.at && win.at[1] > 1 ? `${win.at[0]} of ${win.at[1]} · ← → ` : ''}esc back `]], W));
+      }
+      // The body: a document, or a list with the selected item's preview.
+      const find = det.find;
+      let body;
+      let counted = null; // [the match in front (1-based, 0 for none), how many]
+      const id = `det:${ui.side}:${scr.id}`;
+      const searchRow = () => (ui.edit?.find ? [[[ST.grey, '  Find  '], ...editSegs(W - 10)]]
+        : find ? [[['', '  '], [MARK, ` ${find} `], [ST.grey, counted[1] ? `  ${counted[0] || '-'} of ${counted[1] === 1 ? '1 match' : `${counted[1]} matches`} · n N next and previous · esc clears` : '  no match · esc clears']]] : []);
+      const bodyH = () => Math.max(1, H - out.length - 1 - (ui.edit?.find || find ? 1 : 0));
+      if (scr.kind === 'doc') {
+        const chosen = scr.choices.length ? Math.max(0, Math.min(det.sel[scr.id] ?? 0, scr.choices.length - 1)) : -1;
+        if (chosen >= 0) det.sel[scr.id] = chosen;
+        const withChoices = scr.choices.length ? { ...scr, blocks: scr.blocks.map(b => (b.choice == null ? b : { ...b, segs: [b.choice === chosen ? [acc().fg, ' ❯ '] : ['', '   '], ...b.segs],
+          hit: () => { if (det.sel[scr.id] === b.choice) scr.choices[b.choice]?.(); else det.sel[scr.id] = b.choice; } })) } : scr;
+        const marked = find ? markBlocks(det, withChoices, find, det.findAt) : { blocks: withChoices.blocks, matches: [] };
+        det._matches = marked.matches.length;
+        if (find && det.findAt >= marked.matches.length) det.findAt = marked.matches.length - 1;
+        counted = [det.findAt + 1, marked.matches.length];
+        const focus = find && det.findAt >= 0 ? `m${det.findAt}:${marked.matches[det.findAt]}` : chosen >= 0 ? `c${chosen}` : undefined;
+        const focusKey = find && det.findAt >= 0 ? marked.matches[det.findAt] : chosen >= 0 ? scr.blocks.find(b => b.choice === chosen)?.key : undefined;
+        // The pane is told which block to keep in view; a new match or choice scrolls to it.
+        const st = ui.panes.get(id);
+        const reveal = Boolean(st) && st.wants !== focus && focus !== undefined;
+        body = pane(id, marked.blocks, W, bodyH(), { follow: Boolean(scr.follow) && !find, front: true, arrows: !scr.choices.length, focus: focusKey, reveal });
+        ui.panes.get(id).wants = focus;
+      } else {
+        const items = scr.items;
+        const sel = Math.max(0, Math.min(det.sel[scr.id] ?? 0, items.length - 1));
+        det.sel[scr.id] = sel;
+        const hits = find ? items.map((x, i) => (x.text.toLowerCase().includes(find.toLowerCase()) ? i : -1)).filter(i => i >= 0) : [];
+        det._matches = hits.length;
+        counted = [hits.indexOf(sel) + 1, hits.length];
+        const head = scr.head || [];
+        if (!items.length) body = [...head, [], [[ST.grey, `  ${scr.empty}`]]];
+        else {
+          const rowsOf = h => windowed(items, sel, h).map(({ item: x, i }) => onClick([cursor(i === sel), [ST.yellow, hits.includes(i) ? '• ' : '  '], ...x.segs], () => { if (det.sel[scr.id] === i) x.open?.(); else det.sel[scr.id] = i; }));
+          const blocks = items[sel].preview().map((b, k) => ({ ...b, key: k }));
+          body = [...head, ...withDetails(items.length, rowsOf, blocks, W, bodyH() - head.length, `${id}:preview`, `${scr.id}:${sel}`)];
+        }
+      }
+      out.push(...searchRow(), rule(W), ...body);
+      det.screen = scr.kind === 'doc' ? (scr.session ? 'session' : scr.choices.length ? 'choices' : 'doc') : scr.id;
+      return out;
+    } catch (e) {
+      closeDetails();
+      flash(`Can't show those details: ${e.message}`);
+      return null;
+    }
+  }
+
+  /** A key while the details are open. True when it was theirs (used up, even when it failed); false leaves it to Prowl. */
+  function detailKey(k, det) {
+    if (['tab', 'R', 'B', 'q', 'e', 'r', '/', 'ctrl-c'].includes(k) || (k.length === 1 && k >= '1' && k <= '9') || (k === 'n' && !det.find)) return false;
+    try {
+      const at = detFind(det);
+      if (!at) { closeDetails(); return true; }
+      const it = at.item;
+      const scr = frontScreen(det, it);
+      const win = det.stack.at(-1);
+      const id = `det:${ui.side}:${scr.id}`;
+      const clearFind = () => { det.find = ''; det.findAt = -1; };
+      if (k === 'esc') { if (det.find) clearFind(); else if (det.stack.length) det.stack.pop(); else closeDetails(); return true; }
+      if (k === 'left' || k === 'right') {
+        const by = k === 'right' ? 1 : -1;
+        if (win?.type === 'finding') {
+          const list = siblings(det, it, win, resultOf(it, det).result);
+          const i = list.findIndex(f => f.pr === win.pr && f.id === win.id);
+          if (list.length) { const to = list[(Math.max(i, 0) + by + list.length) % list.length]; Object.assign(win, { pr: to.pr, id: to.id, was: to }); clearFind(); }
+        } else if (!win) { const n = tabsOf(it).length; det.tab = (det.tab + by + n) % n; clearFind(); }
+        return true;
+      }
+      const items = scr.kind === 'list' ? scr.items : null;
+      if (k === 'up' || k === 'down') {
+        const by = k === 'down' ? 1 : -1;
+        if (items) det.sel[scr.id] = Math.max(0, Math.min((det.sel[scr.id] ?? 0) + by, items.length - 1));
+        else if (scr.choices.length) det.sel[scr.id] = Math.max(0, Math.min((det.sel[scr.id] ?? 0) + by, scr.choices.length - 1));
+        else scrollPane(id, k);
+        return true;
+      }
+      if (SCROLL_KEYS.includes(k)) { scrollPane(items ? `${id}:preview` : id, k); return true; }
+      if (k === 'enter') {
+        const open = items ? items[det.sel[scr.id] ?? 0]?.open : scr.choices[det.sel[scr.id] ?? 0];
+        if (open) { open(); clearFind(); }
+        return true;
+      }
+      if (k === 'f') {
+        startEdit(det.find, v => { det.find = v.trim(); det.findAt = det.find ? 0 : -1; if (det.find && items) nextMatch(det, scr, 0); return ''; });
+        ui.edit.find = true;
+        return true;
+      }
+      if ((k === 'n' || k === 'N') && det.find) { nextMatch(det, scr, k === 'n' ? 1 : -1); return true; }
+      if (scr.id === 'findings' && items && (k === 's' || k === 'v')) { filterStep(det, k === 's' ? 'status' : 'severity')(); return true; }
+      if (k === 's') { if (isLive(det)) (ui.side === 'builder' ? builderKey : reviewerKey)('s', it); return true; }
+      if (k === 'l' && scr.session) { det.full = !det.full; clearFind(); flash(det.full ? 'The session in full: what was said, and each tool with its input and output.' : 'The session as Activity lines.'); return true; }
+      if (k === 'p') {
+        const turn = items && scr.id === 'turns' ? items[det.sel.turns ?? 0]?.turn : null;
+        const file = turn ? turnPrompt(turn) : scr.prompt ?? (kindOf(it) === 'build' ? '' : it.promptPath);
+        if (file) { det.stack.push({ type: 'file', label: 'Prompt', path: file }); clearFind(); }
+        return true;
+      }
+      if (k === '[' || k === ']') { if (kindOf(it) === 'review') chainStep(det, it, k === '[' ? -1 : 1); return true; }
+      const prs = kindOf(it) === 'build' ? (it.prs?.length ? it.prs : (it.repos || []).filter(r => r.pr).map(r => r.pr)) : prsOf(it);
+      if (k === 'o') {
+        const target = scr.finding ? findingUrl(scr.finding, scr.result) || scr.finding.pr : scr.pr || (items && ['prs'].includes(scr.id) ? items[det.sel[scr.id] ?? 0]?.url : '');
+        if (!target) prs.forEach(p => openIt(p.url));
+        else if (webLink(target)) openIt(target);
+        else flash("That isn't a web link, so Prowl won't open it.");
+        return true;
+      }
+      if (k === 'x') {
+        const target = scr.file || (scr.session && scr.log && fs.existsSync(scr.log) ? scr.log : '')
+          || (kindOf(it) === 'build' ? (it.plan && fs.existsSync(it.plan) ? it.plan : it.briefDir) : it.status === 'done' && it.reportPath ? it.reportPath : it.pr ? it.briefDir : '');
+        if (target) openIt(target); else flash('Nothing to open outside Prowl here.');
+        return true;
+      }
+      if (k === 'a') { const url = kindOf(it) === 'build' ? it.url : it.ticketUrl; if (url) openIt(url); return true; }
+      return true; // every other key is the details' while they are open: nothing behind them acts
+    } catch (e) {
+      closeDetails();
+      flash(`Can't show those details: ${e.message}`);
+      return true;
+    }
+  }
+
+  /** The next (or previous) match: in a document, the match in front; in a list, the next matching item from the selected one on. */
+  function nextMatch(det, scr, by) {
+    if (scr.kind === 'list') {
+      const hits = scr.items.map((x, i) => (x.text.toLowerCase().includes(det.find.toLowerCase()) ? i : -1)).filter(i => i >= 0);
+      if (!hits.length) return;
+      const sel = det.sel[scr.id] ?? 0;
+      const to = by === 0 ? hits.find(i => i >= sel) ?? hits[0] : by > 0 ? hits.find(i => i > sel) ?? hits[0] : [...hits].reverse().find(i => i < sel) ?? hits.at(-1);
+      det.sel[scr.id] = to;
+      return;
+    }
+    const n = det._matches || 0;
+    if (n) det.findAt = (Math.max(det.findAt, by > 0 ? -1 : 0) + by + n) % n;
+  }
+
+  /** The keys bar while the details are open: the keys that apply to the screen in front. */
+  function detailKeys(det) {
+    const s = det.screen;
+    const live = isLive(det);
+    return [...(s === 'findings' ? [['s', 'status'], ['v', 'severity']] : []), ...(s === 'doc' || s === 'session' ? [] : [['enter', 'open']]), ...(s === 'session' ? [['l', det.full ? 'activity' : 'in full']] : []),
+      ...(ui.side === 'reviewer' || s === 'session' || s === 'turns' ? [['p', 'prompt']] : []), ['f', 'find'], ...(det.find ? [['n N', 'matches']] : []),
+      ...(ui.side === 'reviewer' ? [['[ ]', 'reviews']] : []), ['o', 'GitHub'], ['x', 'open outside'], ['a', 'ticket'], ...(live && s !== 'findings' ? [['s', 'stop']] : []), ['esc', 'back']];
   }
 
   function historyView(W, H) {
+    if (detOf()?.view === HISTORY) { const open = detailsView(W, H); if (open) return open; }
     const runs = history(ui.side);
     if (!runs.length) return [[], [[ST.grey, ui.side === 'builder' ? '  Nothing built yet.' : '  No finished reviews yet.']]];
     const at = clampSel(HISTORY, runs.length);
@@ -957,16 +1594,23 @@ export function startTui(app, actions, io = {}) {
 
   // Keys, as [key, short label (the bar), what it does (the full list)]. Each view's, most useful first, then the rest.
   const CONFIG_KEYS = [['enter', 'edit', 'Edit the setting, list its values to pick one, flip its switch, or open its file'], ['a', 'add board', 'Add a board to watch'], ['d', 'delete board', 'Delete the selected board']];
+  const DETAIL_KEYS = [['↑ ↓', 'select', 'Select in a list; choose in a document with choices; else scroll a line'], ['enter', 'open', 'Open the selected or chosen item'],
+    ['← →', 'tabs', "The previous or next tab; in a finding's window, the previous or next finding"], ['esc', 'back', 'Clear the search, else close the window, else back to the list'],
+    ['s', 'status', 'On the Findings list: the status filter. Elsewhere, when opened from Running: stop it (asks first)'], ['v', 'severity', 'On the Findings list: the severity filter'],
+    ['l', 'in full', 'A session: Activity lines, or the full text'], ['p', 'prompt', "The prompt the session was given (a turn's on the Turns list or in its window)"],
+    ['f', 'find', 'Find text in what is in front; n and N go to the next and previous match'], ['[ ]', 'reviews', "The ticket's review before or after this one"],
+    ['o', 'GitHub', 'Open on GitHub: the finding at the reviewed commit, the PR in front or selected, else all its PRs'],
+    ['x', 'outside', "Open outside Prowl: the file in front, the session's log, else the report, the plan or the brief folder"], ['a', 'ticket', 'Open its ticket']];
   const LOG_KEYS = [['PgUp PgDn', 'scroll', 'Scroll the Log a page'], ['↑ ↓', 'line', 'Scroll the Log a line'], ['Home End', 'first / latest', 'The first line kept / back to the latest']];
   const VIEW_KEYS = {
     reviewer: [
-      [['s', 'stop', "Stop the selected review (its in-progress tag comes off, so re-tag the ticket to run it again), or stop a quick review waiting on its PRs (◷; its labels stay as they are)"], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser']],
-      [['enter', 'report', "Open the review's report"], ['v', 'review again', "Review the selected review's PRs again, as a quick review under the same ticket or name (asks first; no tags change)"], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser']],
+      [['enter', 'details', 'Open everything Prowl kept about it, in tabs: its summary, PRs, findings and session'], ['s', 'stop', "Stop the selected review (its in-progress tag comes off, so re-tag the ticket to run it again), or stop a quick review waiting on its PRs (◷; its labels stay as they are)"], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser']],
+      [['enter', 'details', 'Open everything Prowl kept about it, in tabs: its summary, PRs, findings and session'], ['x', 'report', "Open the review's report outside Prowl"], ['v', 'review again', "Review the selected review's PRs again, as a quick review under the same ticket or name (asks first; no tags change)"], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser']],
       [], CONFIG_KEYS, LOG_KEYS,
     ],
     builder: [
-      [['enter', 'brief', "Open the ticket's brief folder"], ['s', 'stop', 'Stop the selected build before its next push, PR, tag or turn'], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser']],
-      [['enter', 'brief', "Open the ticket's brief folder"], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser'],
+      [['enter', 'details', 'Open everything Prowl kept about it, in tabs: its summary, PRs, PRs and turns'], ['x', 'brief', "Open the ticket's brief folder"], ['s', 'stop', 'Stop the selected build before its next push, PR, tag or turn'], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser']],
+      [['enter', 'details', 'Open everything Prowl kept about it, in tabs: its summary, PRs, PRs and turns'], ['x', 'plan', "Open the ticket's plan outside Prowl, or its brief folder when it has none"], ['o', 'open PRs', 'Open its PRs in the browser'], ['a', 'ticket', 'Open its ticket in the browser'],
         ['w', 'follow', "Follow the ticket's PRs through review (not a quick build without a ticket)"], ['t', 'unfollow', "Stop following the ticket's PRs"]],
       [['space', 'pick', 'Pick the option under the cursor (or untick it, where several may be picked)'],
         ['enter', 'submit', 'Submit what you picked, your own answer, or your question for its session: one at a time'],
@@ -1055,19 +1699,21 @@ export function startTui(app, actions, io = {}) {
       [nav, own] = [[say(`${ST.bold}${ST.yellow}`, ui.confirm.text)], keys('Confirm', answers)];
     } else if (ui.edit) {
       const about = ui.edit.prs ? 'Quick review: paste PR links, owner/repo#12 or tickets, then enter.' : ui.edit.build ? 'Quick build: paste a ticket, PRs, or what to build, then enter.'
+        : ui.edit.find ? 'Text to find in what is in front, then enter; n and N go to the next and previous match.'
         : ui.edit.naming ? 'Type a name, then enter.' : ui.edit.secret ? 'Paste the token, then enter.'
         : ui.edit.form ? (ui.edit.field === 'ask' ? 'Ask about this: your question goes to its session, which replies under the question.' : 'Your own answer: type it, then enter to submit.')
           : 'Type, then enter to save.';
       [nav, own] = [[say(NAV.text, about)], keys('Typing', ui.edit.form ? [['enter', 'submit'], ['↑ ↓', 'move'], ['esc', 'back'], ['← →', 'cursor']]
-        : [['enter', ui.edit.prs ? 'review' : ui.edit.build ? 'build' : ui.edit.naming ? 'name' : 'save'], ['esc', 'cancel'], ['← →', 'move']])];
+        : [['enter', ui.edit.prs ? 'review' : ui.edit.build ? 'build' : ui.edit.naming ? 'name' : ui.edit.find ? 'find' : 'save'], ['esc', 'cancel'], ['← →', 'move']])];
     } else if (ui.menu) [nav, own] = [[say(NAV.text, `${ui.menu.label}: choose a value, then enter.`)], keys('Options', [['↑ ↓', 'choose'], ['enter', 'pick'], ['esc', 'cancel']])];
     else if (ui.keys) [nav, own] = [[say(NAV.text, 'All keys: any other key closes this list and does its job.')], keys('Keys', [['↑ ↓', 'scroll'], ['PgUp PgDn', 'page'], ['/', 'close'], ['esc', 'close']])];
     else {
-      const list = viewKeys();
-      own = list.length ? keys(TABS[view()], list) : [[...tag(TABS[view()]), [fg(245), EMPTY[view()] || 'no keys here']]];
+      const det = detOf()?.view === view() ? detOf() : null; // the details are in front: their keys, and p and ← → are theirs
+      const list = det ? detailKeys(det) : viewKeys();
+      own = list.length ? keys(det ? `${TABS[view()]}, details` : TABS[view()], list) : [[...tag(TABS[view()]), [fg(245), EMPTY[view()] || 'no keys here']]];
       // Every button that fits in a third of the screen's rows; on a small one, the least used come off first.
-      let moves = [...(SIDES.filter(visible).length > 1 ? [['tab', 'side']] : []), ['← →', 'views'], ui.side === 'reviewer' ? NEW_REVIEW : NEW_BUILD,
-        ['r', 'poll'], ['p', 'pause'], ['e', 'on/off'], ['↑ ↓', 'select']];
+      let moves = [...(SIDES.filter(visible).length > 1 ? [['tab', 'side']] : []), ...(det ? [] : [['← →', 'views']]), ui.side === 'reviewer' ? NEW_REVIEW : NEW_BUILD,
+        ['r', 'poll'], ...(det ? [] : [['p', 'pause']]), ['e', 'on/off'], ['↑ ↓', 'select']];
       for (;;) {
         nav = stack(moves, NAV, W, [['', ' ']], [['/', 'all keys'], ['q', 'quit']]);
         if (nav.length + own.length <= Math.max(2, Math.floor(H / 3)) || !moves.length) break;
@@ -1161,7 +1807,8 @@ export function startTui(app, actions, io = {}) {
   /** The full list of keys (/): this view's first, then the side's other views, then the rest, in columns when there's room. */
   function keysView(W, H) {
     const head = (text, style, note = '') => [[style, ` ${text}`], [ST.grey, note]];
-    const groups = [[`${NAMES[ui.side]} · ${TABS[view()]}`, VIEW_KEYS[ui.side][view()], ' · this view'],
+    const groups = [...(detOf()?.view === view() ? [[`${NAMES[ui.side]} · ${TABS[view()]}, details`, DETAIL_KEYS, ' · open now']] : []),
+      [`${NAMES[ui.side]} · ${TABS[view()]}`, VIEW_KEYS[ui.side][view()], ' · this view'],
       ...TABS.map((t, i) => [`${NAMES[ui.side]} · ${t}`, VIEW_KEYS[ui.side][i]]).filter((g, i) => i !== view()),
       ...KEY_GROUPS].filter(([, list]) => list.length);
     const cols = W >= 120 ? 2 : 1;
@@ -1194,6 +1841,7 @@ export function startTui(app, actions, io = {}) {
 
   function frameRows(advance, W, H) {
     if (!visible(ui.side)) ui.side = 'reviewer'; // the Builder was switched off with nothing left to show
+    syncDetails();
     if (!hasView(view())) ui.view[ui.side] = RUNNING;
     if (ui.edit?.form && currentItem()?.id !== ui.edit.item) ui.edit = null; // left Needs you, or the item went
     const out = [titleBar(W)];
@@ -1324,7 +1972,7 @@ export function startTui(app, actions, io = {}) {
     const f = configRows()[sel()[CONFIG]];
     if (k === 'a') return editBoard(null);
     if (f.switch) return k === 'enter' ? toggleSide(f.switch) : undefined;
-    if (f.file) return k === 'enter' ? openExternal(f.file) : undefined;
+    if (f.file) return k === 'enter' ? openIt(f.file) : undefined;
     if (k === 'd' && f.board != null) {
       ui.confirm = { text: `Remove board ${app.tracker().boardLabel(app.boards()[f.board])}?`, yes: () => { app.boards().splice(f.board, 1); saved('Board removed.'); } };
       return undefined;
@@ -1342,7 +1990,7 @@ export function startTui(app, actions, io = {}) {
         return '';
       }, true);
     }
-    if (f.type === 'list') return openExternal(CONFIG_PATH);
+    if (f.type === 'list') return openIt(CONFIG_PATH);
     if (f.type === 'bool') { setPath(app.cfg, f.key, !getPath(app.cfg, f.key)); return saved(); }
     if (f.type === 'enum') return openMenu(f);
     return typeValue(f);
@@ -1412,7 +2060,7 @@ export function startTui(app, actions, io = {}) {
     else if (k === '[' || k === ']') {
       sel()[NEEDS] = Math.max(0, Math.min(needs(ui.side).length - 1, sel()[NEEDS] + (k === ']' ? 1 : -1)));
       focusForm(currentItem());
-    } else if (k === 'o') openExternal(it.pr || builder.history().find(w => w.uid === it.recordId)?.url || '');
+    } else if (k === 'o') openIt(it.pr || builder.history().find(w => w.uid === it.recordId)?.url || '');
     else if (k === 's' && it.gate) { // a quick build's question before it started: s cancels it
       ui.confirm = { text: `Cancel the quick build of ${it.ticket}? Nothing has been claimed or started.`, yes: () => { actions.skip(it); flash('Quick build cancelled.'); } };
     } else if (k === 't' && it.gate) flash("Nothing to hand back: the quick build hasn't claimed it.");
@@ -1442,13 +2090,15 @@ export function startTui(app, actions, io = {}) {
   function reviewerKey(k, r) {
     if (r._wait) {
       if (k === 's') ui.confirm = { text: `Stop waiting on ${r.key}'s PRs? Their labels stay as they are.`, yes: () => { actions.stopWait(r); flash(`${r.key} no longer waits on its PRs.`); } };
-      else if (k === 'a' && r.ticketUrl) openExternal(r.ticketUrl);
+      else if (k === 'a' && r.ticketUrl) openIt(r.ticketUrl);
+      else if (k === 'enter') openDetails(r);
       return undefined;
     }
-    if (k === 'o') prsOf(r).forEach(p => openExternal(p.url));
-    else if (k === 'a' && r.ticketUrl) openExternal(r.ticketUrl);
-    else if (k === 'enter' && view() === HISTORY && r.pr) openExternal(r.briefDir || r.pr.url);
-    else if (k === 'enter' && view() === HISTORY && r.status === 'done') openExternal(r.reportPath);
+    if (k === 'o') prsOf(r).forEach(p => openIt(p.url));
+    else if (k === 'a' && r.ticketUrl) openIt(r.ticketUrl);
+    else if (k === 'enter') openDetails(r);
+    else if (k === 'x' && view() === HISTORY && r.pr) openIt(r.briefDir || r.pr.url);
+    else if (k === 'x' && view() === HISTORY && r.status === 'done') openIt(r.reportPath);
     else if (k === 'v' && view() === HISTORY && !r.pr && r.prs?.length) { // not a row of the old fix feature
       const n = r.prs.length + (r.contextPrs?.length || 0);
       ui.confirm = { text: `Review ${r.ticket} again? A quick review of the same ${plural(n, 'PR')} starts under ${r.ticket}; no tags change.`, yes: () => {
@@ -1464,9 +2114,10 @@ export function startTui(app, actions, io = {}) {
 
   function builderKey(k, w) {
     const prs = w.prs?.length ? w.prs : (w.repos || []).filter(r => r.pr).map(r => r.pr);
-    if (k === 'o') prs.forEach(p => openExternal(p.url));
-    else if (k === 'a' && w.url) openExternal(w.url);
-    else if (k === 'enter') openExternal(w.briefDir);
+    if (k === 'o') prs.forEach(p => openIt(p.url));
+    else if (k === 'a' && w.url) openIt(w.url);
+    else if (k === 'enter') openDetails(w);
+    else if (k === 'x') openIt(view() === HISTORY && w.plan && fs.existsSync(w.plan) ? w.plan : w.briefDir);
     else if (k === 's' && view() === RUNNING) {
       const yours = (w.repos || []).find(r => r.continued);
       ui.confirm = { text: `Stop ${w.key}? It stops before its next push, PR, tag or turn, and '${app.cfg.builder.tags.inProgress}' comes off.${yours ? ` Any commits the session made on your branch ${yours.branch} and didn't push are kept on a local prowl/kept-… branch.` : ''}`, yes: () => actions.stop('builder', w) };
@@ -1509,6 +2160,8 @@ export function startTui(app, actions, io = {}) {
     }
     if (ui.edit) return editKey(k);
     if (ui.menu) return menuKey(k);
+    const det = detOf();
+    if (det && det.view === view() && !ui.keys && detailKey(k, det)) return undefined;
     if (ui.keys) {
       if (moved !== undefined) { ui.keys.scroll = Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, ui.keys.scroll + moved)); return undefined; }
       ui.keys = null;

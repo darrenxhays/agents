@@ -153,6 +153,7 @@ function parseLine(run, line) {
   }
 }
 
-const describeTool = ({ name, input = {} }) =>
+/** A tool call as an Activity line: its name, then its description, command, file or pattern. */
+export const describeTool = ({ name, input = {} }) =>
   `${name} ${input.description || input.command || input.skill || input.file_path || input.pattern || input.url || input.prompt || ''}`
     .replace(/\s+/g, ' ').trim();

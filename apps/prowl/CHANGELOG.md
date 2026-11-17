@@ -51,6 +51,8 @@ Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z`
 - Running remembers the selected row by what it is: rows coming and going no longer shift the selection.
 - Settings with a fixed set of values are picked from a list: `enter` on one opens every value under its row, the current one ticked, instead of stepping to the next. `↑` `↓` or the wheel move, `enter` or a click picks, `esc` closes with nothing changed.
 - The model settings list the current models' full IDs, then the short names Claude Code takes for the latest of each family (`fable`, `opus`, `sonnet`, `haiku`), and end with **Other…** to type any model name. A model you typed into `config.json` by hand shows as `(not in the list)` and stays pickable.
+- `enter` on a History or Running row now opens its details in Prowl, in tabs: a review's Summary, PRs, Findings and Session; a build's Summary, PRs and Turns. Findings can be filtered (`s`, `v`) and opened in full, a session read as Activity lines or in full (`l`), and anything in front searched (`f`, then `n` `N`). Opened on a running row, the details fill in live and follow it into History.
+- **What to do**: `enter` no longer opens the report or the brief folder from History. Press `x` for that (the report on the Reviewer, the plan or brief folder on the Builder).
 
 ## 2.23.6
 - An answer pasted into a Needs-you form is now what Submit sends. Before, pasting into **Other**, **Send it back with a note** or **Ask about this** and pressing enter sent the option that was already picked: the recommended answer, or an approval of the plan.

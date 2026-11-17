@@ -1178,15 +1178,15 @@ let frameText = fits(tui.frame(80, 30), 'bars, Reviewer Running');
 assert.ok(navLine(frameText).includes('/ all keys') && navLine(frameText).includes('n quick review') && navLine(frameText).includes('← → views'), 'the top bar: moving around, and /');
 assert.ok(keyLine(frameText).startsWith('▌Running') && keyLine(frameText).includes('nothing running') && !keyLine(frameText).includes('s stop'), "the bottom bar: the screen's keys, once it has something for them");
 tui.key('2');
-assert.ok(keyLine(tui.frame(80, 30).join('\n')).includes('enter report'), "History's keys");
+assert.ok(keyLine(tui.frame(80, 30).join('\n')).includes('enter details') && keyLine(tui.frame(80, 30).join('\n')).includes('x report'), "History's keys");
 tuiApp.override = { reviewer: true, builder: true };
 builderNeeds = [{ id: 'n1', ticket: 'AB#124', kind: 'question', question: 'Keep the old cart format?', context: [], options: ['Yes', 'No'], recommended: 'Yes', createdAt: 9 }];
 tui.key('B');
 tui.key('2');
 frameText = fits(tui.frame(80, 30), 'bars, Builder History');
-assert.ok(['enter brief', 'o open PRs', 'a ticket', 'w follow'].every(k => keyLine(frameText).includes(k)) && !navLine(frameText).includes('quick review'), "the bars follow the view in sight: the Builder History's keys");
+assert.ok(['enter details', 'x plan', 'o open PRs', 'a ticket', 'w follow'].every(k => keyLine(frameText).includes(k)) && !navLine(frameText).includes('quick review'), "the bars follow the view in sight: the Builder History's keys");
 tui.key('/');
-let keysList = fits(tui.frame(80, 80), 'all keys');
+let keysList = fits(tui.frame(80, 100), 'all keys');
 assert.ok(keysList.includes('Builder · History · this view') && keysList.includes('Builder · Needs you') && keysList.includes('Moving around') && keysList.includes('Mouse')
   && keysList.includes('Stop following the ticket') && !/Hoot|\(o,o\)/.test(keysList), 'the full list: this view first, the side\'s other views, the rest, with Hoot out of the way');
 assert.ok(tui.frame(140, 40).some(l => l.length <= 140 && ['Moving around', 'The side in view', 'Typing', 'Mouse', 'Prowl'].some(h => l.indexOf(` ${h}`) > 60)), 'in two columns when wide');
@@ -1608,5 +1608,6 @@ await (await import('./builder/self-test.mjs')).run(assert);
 await (await import('./features-self-test.mjs')).run(assert, { appDir });
 await (await import('./reviewer/self-test.mjs')).run(assert, { appDir });
 await (await import('./reviewer/prep-self-test.mjs')).run(assert, { appDir });
+await (await import('./details-self-test.mjs')).run(assert, { appDir });
 
 console.log(`self-test passed: ${count} asserts`);
