@@ -2,7 +2,7 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
-## Unreleased
+## 2.24.0
 - A repo's git hooks (husky's, say, or a `post-checkout` a PR adds) no longer run on your machine because Prowl checked a commit out: hooks are off in every worktree Prowl makes, and for every git command a review session runs. A Builder session's own commits still run the repo's commit hooks. If a repo's build needs something its post-checkout hook made, add that step to the repo's commands in Checks (Config).
 - A review whose session sends its reviewers off in the background is no longer failed and retried while they work: a session counts as ended only once its process has exited, not at the end of its first turn. The same goes for a Builder turn.
 - A review that has posted and written its report counts as done even when Stop or the time cap is what ended its process, and is tagged (or its PRs labelled) as usual. Stop's question says so when the report is already there.
