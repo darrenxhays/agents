@@ -49,6 +49,8 @@ export const CONFIG_FIELDS = [
   { key: 'autoUpdate', label: 'Auto-update', type: 'bool', help: 'Install a newer Prowl release before launching. It waits while sessions from an earlier launch are still running.' },
   { key: 'logRetentionDays', label: 'Keep logs (days)', type: 'int', min: 0, max: 3650, help: 'Session logs older than this are deleted, and poller.log rolls over to poller.log.1 past 5 MB. Reports are always kept. 0 = keep everything.' },
   { key: 'hoot', label: 'Hoot', type: 'bool', help: 'on: Hoot the owl sits at the top of the screen (in a window 27 rows or taller) and says what Prowl is doing. off: no owl, and the Boards and Needs you cards take the full width of his strip.' },
+  { key: 'notifyVia', label: 'Notify via', type: 'enum', values: ['auto', 'desktop', 'bell'], help: "How Prowl's notifications (the Builder's Notifications) reach you. auto: a desktop notification where one works (macOS, Windows, WSL through Windows, Linux with notify-send), else the terminal bell. desktop: only a desktop notification. bell: only the terminal bell, which your terminal shows its own way. enter lists them." },
+  { key: 'mouse', label: 'Mouse', type: 'bool', help: "on: click tabs, rows, links and the buttons at the bottom, and see what a click would do light up under the pointer; click a selected row for what enter does; drag over text to copy it; the wheel scrolls the text under it, and elsewhere moves the selection. off: the mouse is your terminal's: its own selection, copy and scrolling, and its own way of opening links." },
 
   { heading: 'Boards' },
   { key: 'taskBoard', label: 'Task board', type: 'enum', values: ['ado', 'jira'], names: { ado: 'Azure DevOps', jira: 'Jira' }, help: 'Where tickets are watched, for both sides: Azure DevOps or Jira Cloud. enter lists them. Each keeps its own boards.' },
@@ -178,5 +180,5 @@ export const CONFIG_FIELDS = [
   { key: 'builder.fixFrom', label: 'Fix comments from', type: 'enum', values: ['prowl', 'prowl+bots', 'everyone'], help: "Whose unresolved threads a round takes on: Prowl's own, Prowl's plus bots', or everyone's. Reviews requesting changes always count." },
   { key: 'builder.maxRounds', label: 'Max feedback rounds', type: 'int', min: 1, max: 20, help: 'Feedback rounds per ticket. Then it goes to Needs you.' },
   { key: 'builder.waitForChecksMinutes', label: 'Wait for CI (min)', type: 'int', min: 0, max: 1440, help: "After a round's push, how long to wait for the required checks before marking the ticket done. A failing check gets one more turn. 0 = don't wait." },
-  { key: 'builder.notify', label: 'Desktop notifications', type: 'bool', help: 'on: a notification when PRs open, a ticket is ready to merge, or one needs you.' },
+  { key: 'builder.notify', label: 'Notifications', type: 'bool', help: 'on: a notification when PRs open, a ticket is ready to merge, or one needs you, sent as Notify via says.' },
 ];

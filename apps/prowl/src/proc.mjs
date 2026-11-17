@@ -1,5 +1,6 @@
 import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
+import path from 'node:path';
 
 export const WIN = process.platform === 'win32';
 const QUIET = { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] };
@@ -158,27 +159,85 @@ export function openExternal(target) {
   spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true }).on('error', () => {}).unref();
 }
 
-/** Shows a desktop notification, best effort: any failure is ignored. `title` and `text` may come from other people. */
-export function notifyDesktop(title, text) {
+const TOAST_SHOW = "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show([Windows.UI.Notifications.ToastNotification]::new($x))";
+
+/** True inside WSL: Windows' notifications are reached through powershell.exe there. */
+export const WSL = (() => {
+  if (process.platform !== 'linux') return false;
+  if (process.env.WSL_DISTRO_NAME) return true;
+  try { return /microsoft/i.test(fs.readFileSync('/proc/sys/kernel/osrelease', 'utf8')); } catch { return false; }
+})();
+
+/** True when `cmd` is on PATH. */
+function onPath(cmd, env = process.env) {
+  return String(env.PATH || '').split(path.delimiter).filter(Boolean).some(dir => { try { fs.accessSync(path.join(dir, cmd), fs.constants.X_OK); return true; } catch { return false; } });
+}
+
+/**
+ * How a desktop notification is sent on this machine: 'osascript' (macOS), 'powershell' (Windows, and WSL through
+ * interop when powershell.exe is on PATH), 'notify-send' (other Linux, when it is on PATH and the session has a
+ * desktop to talk to), or null where there is none.
+ */
+export function desktopRoute({ platform = process.platform, wsl = WSL, has = onPath, env = process.env } = {}) {
+  if (platform === 'darwin') return 'osascript';
+  if (platform === 'win32') return 'powershell';
+  if (wsl) return has('powershell.exe') ? 'powershell' : null;
+  return has('notify-send') && (env.DISPLAY || env.WAYLAND_DISPLAY || env.DBUS_SESSION_BUS_ADDRESS) ? 'notify-send' : null;
+}
+
+/** Where a notification goes: 'bell', 'desktop', or null (Notify via is desktop and this machine has no route). */
+export const notifyChannel = (via, route) => (via === 'bell' ? 'bell' : route ? 'desktop' : via === 'desktop' ? null : 'bell');
+
+/** The terminal bell, when stdout is a terminal: the terminal shows it its own way (a sound, a flashing tab or taskbar icon). */
+export function ringBell(out = process.stdout) {
+  if (out.isTTY) out.write('\x07');
+}
+
+const notifyState = { failed: false }; // a desktop notification failed once in this launch: `auto` goes to the bell from then on
+/**
+ * A notification, best effort, sent as Notify via says (`via`: 'auto', 'desktop' or 'bell'; anything else is auto).
+ * auto: a desktop notification where one works, else the bell; if one fails once (the command can't start, or exits
+ * non-zero), the bell rings for that one and for every later auto notification in this launch. `deps`, for the
+ * self-test: { route, wsl, spawn, bell, state }. Title and text are tidied: control characters to spaces, 200 characters each.
+ */
+export function notify(title, text, via = 'auto', deps = {}) {
+  const d = { route: desktopRoute(), wsl: WSL, spawn, bell: ringBell, state: notifyState, ...deps };
+  const mode = ['auto', 'desktop', 'bell'].includes(via) ? via : 'auto';
+  const channel = notifyChannel(mode, mode === 'auto' && d.state.failed ? null : d.route);
+  if (channel === 'bell') return d.bell();
+  if (!channel) return undefined;
   const tidy = s => String(s).replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 200);
   const [t, b] = [tidy(title), tidy(text)];
   let cmd;
   let args;
-  if (process.platform === 'darwin') {
+  if (d.route === 'osascript') {
     const as = s => `"${s.replace(/[\\"]/g, '\\$&')}"`; // an AppleScript string
     [cmd, args] = ['osascript', ['-e', `display notification ${as(b)} with title ${as(t)}`]];
-  } else if (WIN) {
+  } else if (d.route === 'powershell') {
     const ps = s => `'${s.replace(/'/g, "''")}'`; // a PowerShell string
     const script = '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null;'
       + '$x = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02);'
       + `$n = $x.GetElementsByTagName('text'); $n.Item(0).AppendChild($x.CreateTextNode(${ps(t)})) > $null; $n.Item(1).AppendChild($x.CreateTextNode(${ps(b)})) > $null;`
-      + "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show([Windows.UI.Notifications.ToastNotification]::new($x))";
-    // Encoded, so nothing in the text is parsed by a shell on the way in.
-    [cmd, args] = ['powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')]];
+      + TOAST_SHOW;
+    // Encoded, so nothing in the text is parsed by a shell on the way in. From WSL, Windows' own powershell.exe, through interop.
+    [cmd, args] = [d.wsl ? 'powershell.exe' : 'powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')]];
   } else {
     [cmd, args] = ['notify-send', ['--', t, b]]; // -- so a title starting with - isn't read as an option
   }
-  spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true }).on('error', () => {}).unref();
+  let told = false;
+  const failed = () => { // once per notification: under auto, the bell stands in, now and for the rest of this launch
+    if (told || mode !== 'auto') return;
+    told = true;
+    d.state.failed = true;
+    d.bell();
+  };
+  try {
+    const child = d.spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true });
+    child.on('error', failed);
+    child.on('exit', code => { if (code) failed(); });
+    child.unref?.();
+  } catch { failed(); }
+  return undefined;
 }
 
 /**

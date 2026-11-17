@@ -15,7 +15,7 @@ import { askLabel, labelNames, labelsOf, labelWrite, pendingTag } from '../names
 import { mentions } from '../match.mjs';
 import { offerFor, acceptOffer } from '../offers.mjs';
 import { autoName, cleanName, parsePaste, ticketKey } from '../paste.mjs';
-import { killTree, notifyDesktop } from '../proc.mjs';
+import { killTree, notify as sendNotification } from '../proc.mjs';
 import { alive, capHit, readActivity, sessionEnded } from '../sessions.mjs';
 import { modelCosts } from '../stats.mjs';
 import { fill, outputTemplate } from '../templates.mjs';
@@ -58,7 +58,7 @@ export function createBuilder(app, deps) {
   const gh = deps.github || github;
   const session = deps.session || DEFAULT_SESSION;
   const clone = deps.clone || ghClone;
-  const notify = deps.notify || notifyDesktop;
+  const notify = deps.notify || sendNotification;
   const statePath = deps.statePath || WORK_PATH;
   const workDir = path.join(path.dirname(statePath), 'work');
   const answersPath = path.join(workDir, 'answers.jsonl');
@@ -74,7 +74,7 @@ export function createBuilder(app, deps) {
   const trackerOf = w => deps.tracker || deps.trackers[w?.tracker || cfg().taskBoard];
   const tags = () => rules.builderTags(cfg());
   const isOwn = p => Boolean(app.me && p.author?.toLowerCase() === app.me.toLowerCase());
-  const notifyIf = (title, text) => { if (b().notify) notify(title, text); };
+  const notifyIf = (title, text) => { if (b().notify) notify(title, text, cfg().notifyVia); }; // whether: the Builder's Notifications; how: Notify via
   const labels = deps.labels || createLabels({ gh, log: (sd, ...a) => log(...a), file: path.join(path.dirname(statePath), 'labels.json') });
   const pickup = () => ({ drafts: true, branches: true, checks: true, conflicts: true, ...(b().pickup || {}) });
   // A quick build without a ticket marks its cycle with labels on its PRs; every other build with its ticket's tags.

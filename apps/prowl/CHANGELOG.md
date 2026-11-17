@@ -57,6 +57,9 @@ Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z`
 - New view **Stats** (`6`, on either side): what its reviews or builds cost over the last 7, 30 or 90 days or all time (`t` steps), with the total and averages, spend per day, per model and per effort, and the dearest and longest ones.
 - History says which model and effort each review and build ran on, and splits the cost by model when more than one was used. Reviews finished before this update get their model from their session logs once, at the first launch; their effort stays `not recorded`.
 - In Windows Terminal (from WSL too), the tab and the taskbar icon show Prowl's state: a busy marker while a session runs, yellow while something needs you, red when a poll failed or Prowl stopped some work.
+- New setting **Notify via** (`notifyVia`): `auto` sends a desktop notification where one works (now from WSL too, through Windows) and rings the terminal bell elsewhere; `desktop` and `bell` pick one. The Builder's **Desktop notifications** setting is now called **Notifications**; whether any are sent is still up to it.
+- New setting **Mouse** (`mouse`, on by default): turn it off to leave the mouse to your terminal, for its own selection, scrollback and link clicks. Every action has a key.
+- The terminal's title says what Prowl is doing, what needs you first: `Prowl ⚑2 · reviewing PROJ-123`, `Prowl · idle`, `Prowl · poll error`.
 
 ## 2.23.6
 - An answer pasted into a Needs-you form is now what Submit sends. Before, pasting into **Other**, **Send it back with a note** or **Ask about this** and pressing enter sent the option that was already picked: the recommended answer, or an approval of the plan.

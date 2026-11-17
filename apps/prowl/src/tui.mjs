@@ -334,6 +334,24 @@ export function startTui(app, actions, io = {}) {
     return allLive() ? 3 : 0;
   }
 
+  /**
+   * The terminal's title: short, with what matters first, since a narrow tab cuts it from the right. `Prowl` (with
+   * ⚑n when n Needs-you items wait), then what is running per side, or with nothing running: off, poll error, paused or idle.
+   */
+  function titleText() {
+    const waiting = SIDES.reduce((n, name) => n + sides[name].needs().length, 0);
+    const parts = [`Prowl${waiting ? ` ⚑${waiting}` : ''}`];
+    const [reviews, builds] = [live('reviewer'), live('builder')]; // a review being set up doesn't count as running
+    if (reviews.length) parts.push(reviews.length === 1 ? `reviewing ${reviews[0].ticket}` : `${reviews.length} reviews`);
+    if (builds.length) parts.push(builds.length === 1 ? `${builds[0].turnKind === 'round' ? 'fixing' : 'building'} ${builds[0].key}` : `${builds.length} builds`);
+    if (parts.length === 1) {
+      const on = SIDES.filter(isOn);
+      parts.push(!on.length ? 'off' : on.some(name => sides[name].lastError) ? 'poll error' : on.every(name => sides[name].paused) ? 'paused' : 'idle');
+    }
+    return parts.join(' · ').replace(/[\u0000-\u001f\u007f-\u009f]/g, ' '); // a ticket key or quick name comes from elsewhere
+  }
+  const mouseOn = () => app.cfg.mouse !== false;
+
   function mood(said) {
     if (said?.mood) return said.mood;
     if (SIDES.some(s => sides[s].polling)) return 'poll';
@@ -1720,7 +1738,7 @@ export function startTui(app, actions, io = {}) {
     ['Typing', [['enter', 'save', 'Save the edit, or send the answer'], ['esc', 'cancel', 'Cancel it'], ['←→', 'move', 'Move the cursor; home and end jump to either end']]],
     ['Offers', [['1–3', 'choose', 'A paste of only tickets on a board pops up an offer first: tag them, add their board and tag them, or go ahead quickly'], ['↑↓ enter', 'choose', 'Move to a choice and take it'], ['esc', 'cancel', 'Cancel']]],
     ['Mouse', [['click', '', 'A side, view or row picks it; the selected row again does what enter does; a link opens; a key in the bar presses it'],
-      ['scroll', '', 'Scrolls the text under the pointer; elsewhere moves the selection']]],
+      ['scroll', '', 'Scrolls the text under the pointer; elsewhere moves the selection'], ['drag', '', 'Select text; it is copied to the clipboard when you let go']]],
     ['Prowl', [['/', 'all keys', 'Show or hide this list'], ['esc', 'close', 'Close this list, or answer no'],
       ['q', 'quit', 'Quit both sides; running sessions keep going and reappear on the next launch'], ['ctrl-c', 'quit now', 'Quit at once, without asking']]],
   ];
@@ -1899,11 +1917,12 @@ export function startTui(app, actions, io = {}) {
     const groups = [...(detOf()?.view === view() ? [[`${NAMES[ui.side]} · ${TABS[view()]}, details`, DETAIL_KEYS, ' · open now']] : []),
       [`${NAMES[ui.side]} · ${TABS[view()]}`, VIEW_KEYS[ui.side][view()], ' · this view'],
       ...TABS.map((t, i) => [`${NAMES[ui.side]} · ${t}`, VIEW_KEYS[ui.side][i]]).filter((g, i) => i !== view()),
-      ...KEY_GROUPS].filter(([, list]) => list.length);
+      ...KEY_GROUPS.filter(([name]) => name !== 'Mouse' || mouseOn())].filter(([, list]) => list.length);
     const cols = W >= 120 ? 2 : 1;
     const colW = Math.floor((W - (cols - 1) * 2) / cols);
+    const shared = KEY_GROUPS.length - (mouseOn() ? 0 : 1);
     const blocks = groups.map(([title, list, note], g) => [
-      head(title, `${ST.bold}${g < groups.length - KEY_GROUPS.length ? acc().fg : ST.reset}`, note),
+      head(title, `${ST.bold}${g < groups.length - shared ? acc().fg : ST.reset}`, note),
       ...list.flatMap(([k, , text]) => wrap(text, colW - 13, 3).map((l, n) => [['', '   '], [`${ST.bold}${acc().fg}`, (n ? '' : k).padEnd(10)], ['', l]])),
       [],
     ]);
@@ -1947,6 +1966,7 @@ export function startTui(app, actions, io = {}) {
     out.push(...body, ...bars);
     ui.frame = out;
     ui.text = out.map(r => r.map(seg => clean(seg[1])).join('').slice(0, W));
+    if (!mouseOn()) return out;
     if (!ui.drag?.moved) return ui.hover ? out.map((r, y) => (y === ui.hover.y ? hovered(r, ui.hover.x) : r)) : out;
     const { ys, xs, ye, xe } = span(ui.drag);
     return out.map((r, y) => (y < ys || y > ye ? r : highlight(r, y === ys ? xs : 0, y === ye ? xe + 1 : W)));
@@ -1957,11 +1977,17 @@ export function startTui(app, actions, io = {}) {
   // Only where OSC 9;4 means progress: Windows Terminal (which WSL passes on) and ConEmu. Some terminals read OSC 9 as a notification.
   const showsProgress = Boolean(process.env.WT_SESSION) || process.env.ConEmuANSI === 'ON';
   let progress = 0; // the state last written
+  let mouseSent = false; // whether the terminal was last asked for mouse reports
+  let titleSent = null; // the title last written
   function paint(advance) {
     painted = Date.now();
     const [W, H] = size();
     const state = showsProgress ? progressState() : 0;
     if (state !== progress) { progress = state; out.write(progressSeq(state)); }
+    // The mouse follows its setting as it changes, in Config or in the file; the title is written when it changes.
+    if (mouseOn() !== mouseSent) { mouseSent = mouseOn(); out.write(mouseSent ? '\x1b[?1003h\x1b[?1006h' : '\x1b[?1006l\x1b[?1003l'); if (!mouseSent) { ui.hover = null; ui.drag = null; } }
+    const title = titleText();
+    if (title !== titleSent) { titleSent = title; out.write(`\x1b]0;${title}\x07`); }
     out.write(`\x1b[?2026h\x1b[H${rows(advance, W, H).map(r => draw(r, W)).join('\r\n')}\x1b[?2026l`);
   }
 
@@ -2306,6 +2332,7 @@ export function startTui(app, actions, io = {}) {
    * highlighted, which is copied to the clipboard when the button is let go.
    */
   function onMouse({ mouse: b, x, y, release }) {
+    if (!mouseOn()) { ui.hover = null; ui.drag = null; return undefined; } // the mouse is the terminal's: a report still in flight is dropped
     if (b & 64) { // the wheel: 3 lines a notch of the pane under the pointer (in the Log, anywhere); elsewhere it moves the selection
       if (release || ui.edit) return undefined;
       if (ui.menu) return menuKey(b & 1 ? 'down' : 'up');
@@ -2385,13 +2412,15 @@ export function startTui(app, actions, io = {}) {
       /** The frame as plain text lines, at `W` by `H` columns and rows. */
       /** The state the terminal's tab would show (0, 2, 3 or 4), and the sequence that says so. */
       progress: () => progressState(),
+      /** The terminal's title, as it would be written. */
+      titleText: () => titleText(),
       frame(W = 80, H = 30, ansi = false) { return rows(false, W, H).map(r => (ansi ? draw(r, W) : draw(r, W).replace(/\x1b\[[0-9;?]*[A-Za-z]|\x1b\]8;;[^\x1b]*\x1b\\/g, ''))); },
       ui,
     };
   }
   // Save the tab title and set it, alternate screen, hidden cursor, and the mouse reported: clicks, drags, the wheel
   // and the pointer moving, for hover (any-motion tracking, SGR encoding).
-  out.write('\x1b[22;0t\x1b]0;Prowl\x07\x1b[?1049h\x1b[?25l\x1b[?1003h\x1b[?1006h\x1b[?2004h'); // …and bracketed paste
+  out.write('\x1b[22;0t\x1b[?1049h\x1b[?25l\x1b[?2004h'); // …and bracketed paste; paint() sets the title and asks for the mouse
   stdin.setRawMode(true);
   stdin.setEncoding('utf8');
   stdin.resume();
@@ -2419,7 +2448,8 @@ export function startTui(app, actions, io = {}) {
       clearInterval(timer);
       clearTimeout(lone);
       if (progress) out.write(progressSeq(0));
-      out.write('\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[?2026l\x1b[?25h\x1b[?1049l\x1b[23;0t'); // …and restore the tab title
+      // Its own title cleared first, then the saved one restored: a terminal without a title stack falls back to its default.
+      out.write('\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[?2026l\x1b[?25h\x1b[?1049l\x1b]0;\x07\x1b[23;0t');
       try { stdin.setRawMode(false); } catch { /* not a TTY any more */ }
       stdin.pause();
     },

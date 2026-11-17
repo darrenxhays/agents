@@ -2,7 +2,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { loadConfig } from './config.mjs';
+import { CONFIG_PATH, loadConfig, saveConfig } from './config.mjs';
+import { desktopRoute, notify, notifyChannel } from './proc.mjs';
 import { cached, cacheKeys, dropCache, plain, readLines, readLog } from './details.mjs';
 import { findingLinks, findingsFor, findingUrl, prLinks, readResult, webLink } from './reviewer/details.mjs';
 import { checkResult } from './reviewer/result.mjs';
@@ -468,6 +469,91 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
       assert.equal(tuiOver({ builder: { needs: () => [need('question'), need('cap')] }, cfgOver: on }).tui.progress(), 2, 'a stop');
       assert.equal(tuiOver({ builder: { lastError: 'HTTP 500' } }).tui.progress(), 0, 'a poll error on a side that is off');
       assert.equal(tuiOver({ builder: { lastError: 'HTTP 500' }, cfgOver: on }).tui.progress(), 2, 'and on one that is on');
+    }
+
+    // ---- C-31: Notify via, the mouse switch, and a title that says what's on ----
+    {
+      const route = (platform, wsl, cmds, env = {}) => desktopRoute({ platform, wsl, has: c => cmds.includes(c), env });
+      assert.deepEqual([route('darwin', false, []), route('win32', false, []), route('linux', true, ['powershell.exe']), route('linux', true, []), route('linux', false, ['notify-send'], { DISPLAY: ':0' }), route('linux', false, ['notify-send'])],
+        ['osascript', 'powershell', 'powershell', null, 'notify-send', null]);
+      assert.deepEqual([notifyChannel('bell', 'osascript'), notifyChannel('bell', null), notifyChannel('desktop', null), notifyChannel('auto', null), notifyChannel('auto', 'osascript')], ['bell', 'bell', null, 'bell', 'desktop']);
+      const fake = exit => {
+        const seen = { spawned: [], bells: 0, state: { failed: false } };
+        const spawn = (cmd, args) => { seen.spawned.push([cmd, args]); return { on(evt, fn) { if (evt === 'exit') fn(exit); return this; }, unref() {} }; };
+        return { seen, deps: route2 => ({ route: route2, wsl: false, spawn, bell: () => { seen.bells++; }, state: seen.state }) };
+      };
+      let n = fake(1);
+      notify('T', 'b', 'auto', n.deps('notify-send'));
+      assert.deepEqual([n.seen.spawned.length, n.seen.bells, n.seen.state.failed], [1, 1, true], 'auto: a desktop notification that fails rings the bell once');
+      notify('T', 'b', 'auto', n.deps('notify-send'));
+      assert.deepEqual([n.seen.spawned.length, n.seen.bells], [1, 2], 'and the next auto goes to the bell without spawning');
+      n = fake(1);
+      notify('T', 'b', 'desktop', n.deps('notify-send'));
+      assert.deepEqual([n.seen.spawned.length, n.seen.bells, n.seen.state.failed], [1, 0, false], 'desktop with a failing spawn rings nothing');
+      notify('T', 'b', 'desktop', n.deps(null));
+      notify('T', 'b', 'bell', n.deps('notify-send'));
+      notify('T', 'b', 'nonsense', n.deps(null));
+      assert.deepEqual([n.seen.spawned.length, n.seen.bells], [1, 2], 'desktop with no route: nothing; bell: the bell; another value behaves as auto');
+      n = fake(0);
+      notify('T', 'b', 'auto', { ...n.deps('powershell'), wsl: true });
+      assert.deepEqual([n.seen.spawned[0][0], n.seen.spawned[0][1].includes('-EncodedCommand'), n.seen.bells], ['powershell.exe', true, 0], 'from WSL: powershell.exe, encoded');
+      n = fake(0);
+      notify('Say "hi"\nnow', 'b\\c', 'auto', n.deps('osascript'));
+      assert.deepEqual(n.seen.spawned[0], ['osascript', ['-e', 'display notification "b\\\\c" with title "Say \\"hi\\" now"']], 'escaped for AppleScript, on one line');
+      n = fake(0);
+      const throwing = { ...n.deps('notify-send'), spawn: () => { throw new Error('ENOENT'); } };
+      notify('T', 'b', 'auto', throwing);
+      assert.deepEqual([n.seen.bells, n.seen.state.failed], [1, true], "a command that can't start counts as failed");
+
+      // The title.
+      const on = { builder: { ...cfg.builder, enabled: true } };
+      const rev = (ticket, over = {}) => ({ id: ticket, ticket, title: 't', prs: [], status: 'running', startedAt: 1, ...over });
+      const need = k => ({ id: k, recordId: 'u', ticket: 'AB#1', kind: 'question', question: 'q', context: [], options: [], createdAt: 1, thread: [] });
+      assert.equal(tuiOver({ cfgOver: on }).tui.titleText(), 'Prowl · idle');
+      const off = tuiOver();
+      off.app.override.reviewer = false;
+      assert.equal(off.tui.titleText(), 'Prowl · off');
+      assert.equal(tuiOver({ reviewer: { running: () => [rev('PROJ-123')] }, builder: { needs: () => [need('a'), need('b')] }, cfgOver: on }).tui.titleText(), 'Prowl ⚑2 · reviewing PROJ-123');
+      assert.equal(tuiOver({ reviewer: { running: () => [rev('A-1'), rev('A-2')] }, builder: { running: () => [{ uid: 'u', key: '12345', turnKind: 'round' }] }, cfgOver: on }).tui.titleText(), 'Prowl · 2 reviews · fixing 12345');
+      assert.equal(tuiOver({ builder: { running: () => [{ uid: 'u', key: 'AB#7', turnKind: 'build' }, { uid: 'v', key: 'AB#8' }] }, cfgOver: on }).tui.titleText(), 'Prowl · 2 builds');
+      assert.equal(tuiOver({ builder: { running: () => [{ uid: 'u', key: 'AB#7', turnKind: 'build' }] }, cfgOver: on }).tui.titleText(), 'Prowl · building AB#7');
+      assert.equal(tuiOver({ reviewer: { running: () => [rev('BAD\x07KEY')] } }).tui.titleText(), 'Prowl · reviewing BAD KEY', 'control characters come out as spaces');
+      assert.equal(tuiOver({ reviewer: { lastError: 'HTTP 500' } }).tui.titleText(), 'Prowl · poll error');
+      assert.equal(tuiOver({ reviewer: { paused: true } }).tui.titleText(), 'Prowl · paused');
+      assert.equal(tuiOver({ reviewer: { preparing: () => [rev('AB#1', { status: 'preparing' })] } }).tui.titleText(), 'Prowl · idle', "a review being set up doesn't count as running");
+
+      // The mouse switch.
+      const copied = [];
+      const m = tuiOver();
+      m.app.cfg.mouse = false;
+      let frame = m.tui.frame(100, 26);
+      const tabsRow = frame.findIndex(l => l.includes('2 History'));
+      m.tui.mouse(frame[tabsRow].indexOf('2 History') + 2, tabsRow);
+      assert.equal(m.tui.ui.view.reviewer, 0, 'off: a click on a tab changes nothing');
+      m.tui.hover(frame[tabsRow].indexOf('2 History') + 2, tabsRow);
+      assert.deepEqual([m.tui.ui.hover, m.tui.frame(100, 26, true).join('') === (() => { m.tui.ui.hover = null; return m.tui.frame(100, 26, true).join(''); })()], [null, true], 'nothing lights up');
+      m.tui.drag(2, 0, 12, 0);
+      assert.equal(m.tui.ui.drag, null);
+      m.tui.key('/');
+      assert.ok(!m.tui.frame(100, 100).join('\n').includes(' Mouse') && m.tui.frame(100, 100).join('\n').includes('Moving around'), 'the key list has no Mouse group');
+      m.tui.key('/');
+      m.app.cfg.mouse = true;
+      m.tui.key('/');
+      assert.ok(m.tui.frame(100, 110).join('\n').includes('Select text; it is copied to the clipboard when you let go'));
+      m.tui.key('/');
+      frame = m.tui.frame(100, 26);
+      m.tui.mouse(frame[tabsRow].indexOf('2 History') + 2, tabsRow);
+      assert.equal(m.tui.ui.view.reviewer, 1, 'on again: a click works');
+      void copied;
+
+      // The two settings, in the file with their comments after a save.
+      const file = fs.readFileSync(CONFIG_PATH, 'utf8');
+      const loaded = loadConfig();
+      assert.deepEqual([loaded.notifyVia, loaded.mouse], ['auto', true]);
+      saveConfig(loaded);
+      const saved = fs.readFileSync(CONFIG_PATH, 'utf8');
+      assert.ok(saved.includes('"notifyVia": "auto"') && saved.includes('How notifications reach you') && saved.includes('"mouse": true') && saved.includes('the mouse is left to your terminal'), saved.slice(0, 400));
+      fs.writeFileSync(CONFIG_PATH, file);
     }
   } finally {
     dropCache();
