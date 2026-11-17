@@ -179,6 +179,9 @@ export const branchSeg = (p, branch, style = '') => {
 export const shaSeg = (p, sha, style = '') => (repoWeb(p) && /^[0-9a-f]{7,40}$/i.test(String(sha))
   ? [ST.link, String(sha).slice(0, 7), `${repoWeb(p)}/commit/${sha}`] : [style, String(sha).slice(0, 7)]);
 
+/** The terminal progress report (OSC 9;4) for a state: a full bar for error and warning, none otherwise. */
+export const progressSeq = state => `\x1b]9;4;${state};${state === 2 || state === 4 ? 100 : 0}\x07`;
+
 /** List rows around the selection, so the selected row always stays visible. */
 function windowed(list, sel, h) {
   const start = Math.max(0, Math.min(sel - Math.floor(h / 2), list.length - h));
@@ -319,6 +322,18 @@ export function startTui(app, actions, io = {}) {
   const liveCount = name => live(name).length + (name === 'reviewer' ? settingUp().length : 0);
 
   // Hoot sleeps unless something is happening: a poll, a running session, or something he has to say.
+  /**
+   * Prowl's state for the terminal's tab and taskbar icon (OSC 9;4, the progress report): 2 error (red) when a side
+   * that is on has a poll error or something in Needs you is a stop rather than a question, 4 warning (yellow) when
+   * anything else needs you, 3 busy while a session runs, else 0.
+   */
+  function progressState() {
+    const waiting = SIDES.flatMap(name => sides[name].needs());
+    if (SIDES.some(name => isOn(name) && sides[name].lastError) || waiting.some(x => !['question', 'plan', 'repos', 'blocked'].includes(x.kind))) return 2;
+    if (waiting.length) return 4;
+    return allLive() ? 3 : 0;
+  }
+
   function mood(said) {
     if (said?.mood) return said.mood;
     if (SIDES.some(s => sides[s].polling)) return 'poll';
@@ -1939,9 +1954,14 @@ export function startTui(app, actions, io = {}) {
 
   const size = () => [Math.max(40, (out.columns || 100) - 1), Math.max(12, out.rows || 30)];
   let painted = 0;
+  // Only where OSC 9;4 means progress: Windows Terminal (which WSL passes on) and ConEmu. Some terminals read OSC 9 as a notification.
+  const showsProgress = Boolean(process.env.WT_SESSION) || process.env.ConEmuANSI === 'ON';
+  let progress = 0; // the state last written
   function paint(advance) {
     painted = Date.now();
     const [W, H] = size();
+    const state = showsProgress ? progressState() : 0;
+    if (state !== progress) { progress = state; out.write(progressSeq(state)); }
     out.write(`\x1b[?2026h\x1b[H${rows(advance, W, H).map(r => draw(r, W)).join('\r\n')}\x1b[?2026l`);
   }
 
@@ -2363,6 +2383,8 @@ export function startTui(app, actions, io = {}) {
       /** A drag with the left button from (x0, y0) to (x1, y1), let go there. */
       drag(x0, y0, x1, y1) { for (const [m, x, y, release] of [[0, x0, y0, false], [32, x1, y1, false], [0, x1, y1, true]]) onMouse({ mouse: m, x, y, release }); },
       /** The frame as plain text lines, at `W` by `H` columns and rows. */
+      /** The state the terminal's tab would show (0, 2, 3 or 4), and the sequence that says so. */
+      progress: () => progressState(),
       frame(W = 80, H = 30, ansi = false) { return rows(false, W, H).map(r => (ansi ? draw(r, W) : draw(r, W).replace(/\x1b\[[0-9;?]*[A-Za-z]|\x1b\]8;;[^\x1b]*\x1b\\/g, ''))); },
       ui,
     };
@@ -2396,6 +2418,7 @@ export function startTui(app, actions, io = {}) {
     restore() {
       clearInterval(timer);
       clearTimeout(lone);
+      if (progress) out.write(progressSeq(0));
       out.write('\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[?2026l\x1b[?25h\x1b[?1049l\x1b[23;0t'); // …and restore the tab title
       try { stdin.setRawMode(false); } catch { /* not a TTY any more */ }
       stdin.pause();

@@ -9,7 +9,7 @@ import { checkResult } from './reviewer/result.mjs';
 import { readActivity } from './sessions.mjs';
 import { backfillUsage, bar, breakdown, modelCosts, modelEffort, readLogUsage, scaledModels, spendIn, summarize } from './stats.mjs';
 import { finalize } from './reviewer/reviews.mjs';
-import { branchSeg, shaSeg, startTui } from './tui.mjs';
+import { branchSeg, progressSeq, shaSeg, startTui } from './tui.mjs';
 
 const SHA = 'a'.repeat(40);
 const BATCH = 'rb-20261110-ab42-r1-1432-9f3a';
@@ -455,6 +455,19 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
       const empty = tuiOver();
       empty.tui.key('6');
       assert.ok(empty.text(120, 30).includes('Nothing spent in the last 30 days. t changes the time frame.'));
+    }
+
+    // ---- C-30: Windows Terminal shows Prowl's state on its tab ----
+    {
+      assert.deepEqual([progressSeq(2), progressSeq(3), progressSeq(4), progressSeq(0)], ['\x1b]9;4;2;100\x07', '\x1b]9;4;3;0\x07', '\x1b]9;4;4;100\x07', '\x1b]9;4;0;0\x07']);
+      const need = kind => ({ id: kind, recordId: 'u', ticket: 'AB#1', kind, question: 'q', context: [], options: [], createdAt: 1, thread: [] });
+      const on = { builder: { ...cfg.builder, enabled: true } };
+      assert.equal(tuiOver().tui.progress(), 0, 'nothing running');
+      assert.equal(tuiOver({ reviewer: { running: () => [{ id: 'r', ticket: 'AB#1', title: 't', prs: [], status: 'running', startedAt: 1 }] } }).tui.progress(), 3, 'one review running');
+      assert.equal(tuiOver({ builder: { needs: () => [need('question')] }, cfgOver: on }).tui.progress(), 4, 'a question');
+      assert.equal(tuiOver({ builder: { needs: () => [need('question'), need('cap')] }, cfgOver: on }).tui.progress(), 2, 'a stop');
+      assert.equal(tuiOver({ builder: { lastError: 'HTTP 500' } }).tui.progress(), 0, 'a poll error on a side that is off');
+      assert.equal(tuiOver({ builder: { lastError: 'HTTP 500' }, cfgOver: on }).tui.progress(), 2, 'and on one that is on');
     }
   } finally {
     dropCache();

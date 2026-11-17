@@ -48,7 +48,7 @@ prowl --dry-run   # first time: only logs what it would review or build
 prowl
 ```
 
-On Windows, use Windows Terminal. Sessions run in the **Projects Directory** from setup (your projects folder), so its `CLAUDE.md` is loaded. A repo that isn't cloned there yet (no folder with the repo's name) is cloned into it first.
+On Windows, use Windows Terminal. Its tab and taskbar icon show Prowl's state without switching to it: a busy marker while a session runs, yellow while something in Needs you waits, red when a poll failed or Prowl stopped some work (from WSL too; other terminals are sent nothing). Sessions run in the **Projects Directory** from setup (your projects folder), so its `CLAUDE.md` is loaded. A repo that isn't cloned there yet (no folder with the repo's name) is cloned into it first.
 
 ## The two sides
 

@@ -56,6 +56,7 @@ Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z`
 - In a PR's details, the branch and every commit hash are links to that branch or that exact commit on GitHub. A PR from a fork shows its branch as `owner/repo:branch` and links to the fork. Reviews from before this have no Branch row.
 - New view **Stats** (`6`, on either side): what its reviews or builds cost over the last 7, 30 or 90 days or all time (`t` steps), with the total and averages, spend per day, per model and per effort, and the dearest and longest ones.
 - History says which model and effort each review and build ran on, and splits the cost by model when more than one was used. Reviews finished before this update get their model from their session logs once, at the first launch; their effort stays `not recorded`.
+- In Windows Terminal (from WSL too), the tab and the taskbar icon show Prowl's state: a busy marker while a session runs, yellow while something needs you, red when a poll failed or Prowl stopped some work.
 
 ## 2.23.6
 - An answer pasted into a Needs-you form is now what Submit sends. Before, pasting into **Other**, **Send it back with a note** or **Ask about this** and pressing enter sent the option that was already picked: the recommended answer, or an approval of the plan.
