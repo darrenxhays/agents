@@ -1144,6 +1144,10 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
     late.forEach(go => go());
     await sleep(20);
     assert.ok(h2.seen.logs.some(l => /^AB#42: its PRs are \d+ files? changed, \+\d+ -\d+/.test(l)), h2.seen.logs.join('\n'));
+    // C-39: each PR's branch is recorded as the review starts; one that can't be read is left out and holds nothing up.
+    const h4 = reviewerOver({ open: [prOf(1), prOf(2)], deps: { sizeWaitMs: 50 }, ghOver: { headBranch: async p => { if (p.number === 2) throw new Error('HTTP 502'); return 'octo/r1:fix'; } } });
+    await h4.side.poll();
+    assert.deepEqual([h4.side.state.runs.length, h4.side.state.runs[0].branches], [1, { [prOf(1).url]: 'octo/r1:fix' }]);
     // A dry run: no row, no sizes read.
     let asked = 0;
     const h3 = reviewerOver({ open: [prOf(1)], dry: true, ghOver: { prStats: async () => { asked++; return stats; } } });

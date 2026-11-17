@@ -164,6 +164,20 @@ export function wrapSegs(segs, w, hang = 0) {
   return lines;
 }
 
+// A branch or a commit as a link to GitHub. The repo's web address is the PR's own URL up to /pull/<n>, so GitHub
+// Enterprise hosts work; with no usable PR URL, or a value that isn't a branch or a hash, it is plain text.
+const repoWeb = p => /^(https:\/\/[^/\s]+\/[^/\s]+\/[^/\s]+)\/pull\/\d+/.exec(String(p?.url ?? ''))?.[1] || '';
+/** A branch: its bare name links into the PR's repo, `owner/repo:branch` into the fork; `deleted fork:branch` is text. */
+export const branchSeg = (p, branch, style = '') => {
+  const [, fork, name] = /^([^:]*):(.*)$/.exec(String(branch)) || [null, '', String(branch)];
+  const host = /^https:\/\/[^/\s]+/.exec(repoWeb(p))?.[0];
+  const web = !fork ? repoWeb(p) : host && /^[\w.-]+\/[\w.-]+$/.test(fork) ? `${host}/${fork}` : '';
+  return web ? [ST.link, String(branch), `${web}/tree/${name.split('/').map(encodeURIComponent).join('/')}`] : [style, String(branch)];
+};
+/** A commit, shown as its first 7 characters: a link only when the value is 7 to 40 hex characters. */
+export const shaSeg = (p, sha, style = '') => (repoWeb(p) && /^[0-9a-f]{7,40}$/i.test(String(sha))
+  ? [ST.link, String(sha).slice(0, 7), `${repoWeb(p)}/commit/${sha}`] : [style, String(sha).slice(0, 7)]);
+
 /** List rows around the selection, so the selected row always stays visible. */
 function windowed(list, sel, h) {
   const start = Math.max(0, Math.min(sel - Math.floor(h / 2), list.length - h));
@@ -859,8 +873,8 @@ export function startTui(app, actions, io = {}) {
   /** What a review recorded about a PR without a result: the commit reviewed, and the approval. */
   function runFacts(doc, it, url) {
     const head = it.reviewedHeads?.[url];
-    doc.row('Reviewed', [[head ? '' : ST.grey, head ? `at ${String(head).slice(0, 7)}` : 'not reviewed: no head commit']]);
-    if (it.approved?.[url]) doc.row('Approved', [[ST.green, `at ${String(it.approved[url]).slice(0, 7)}`], ...((it.awaitingHuman || []).includes(url) ? [[ST.yellow, " · Prowl's stamp only: a person's approval is still needed"]] : [])]);
+    doc.row('Reviewed', head ? [['', 'at '], shaSeg({ url }, head)] : [[ST.grey, 'not reviewed: no head commit']]);
+    if (it.approved?.[url]) doc.row('Approved', [[ST.green, 'at '], shaSeg({ url }, it.approved[url], ST.green), ...((it.awaitingHuman || []).includes(url) ? [[ST.yellow, " · Prowl's stamp only: a person's approval is still needed"]] : [])]);
   }
   const prTitle = (it, url) => [...(it.prs || []), ...(it.contextPrs || []), ...(it.leftOut || [])].find(p => p.url === url)?.title || '';
   const leftOutWhy = (it, entry) => {
@@ -903,11 +917,12 @@ export function startTui(app, actions, io = {}) {
     const entry = res.result?.prs.find(p => p.url === win.url);
     const doc = docOf(`pr:${win.url}`, { pr: win.url });
     doc.row('PR', [[ST.link, win.url, win.url], [ST.grey, `  ${prTitle(it, win.url)}`]]);
+    if (it.branches?.[win.url]) doc.row('Branch', [branchSeg({ url: win.url }, it.branches[win.url])]);
     if (!entry) runFacts(doc, it, win.url);
     else {
       if (entry.summary) doc.text('Summary', entry.summary);
       if (entry.role) doc.text('Role', entry.role);
-      doc.row('Reviewed', [[entry.reviewedAt ? '' : ST.grey, entry.reviewedAt ? `at ${String(entry.reviewedAt).slice(0, 7)}` : 'not reviewed: no head commit']]);
+      doc.row('Reviewed', entry.reviewedAt ? [['', 'at '], shaSeg({ url: win.url }, entry.reviewedAt)] : [[ST.grey, 'not reviewed: no head commit']]);
       if (entry.coverage?.axes?.length) doc.row('Axes', [['', entry.coverage.axes.join(', ')]]);
       for (const c of entry.coverage?.clean || []) doc.text('Clean', c);
       if (String(entry.coverage?.unverified || '').trim()) doc.text('Gaps', entry.coverage.unverified, ST.yellow);
@@ -915,7 +930,7 @@ export function startTui(app, actions, io = {}) {
       (entry.earlierReviews || []).forEach((x, i) => doc.row(i ? '' : 'Earlier', [...linkSegs(x?.url), [ST.grey, `  ${plural((x?.findings || []).length, 'finding')}${x?.unread ? ' · not read in full' : ''}`]]));
       if (entry.conventions?.length) doc.row('Rules', [['', entry.conventions.join(', ')]]);
       prLinks(win.url, it.published).forEach((l, i) => doc.row(i ? '' : 'GitHub', [['', `${l.what}  `], ...(l.url ? [[ST.link, l.url, l.url]] : [])]));
-      if (it.approved?.[win.url]) doc.row('Approved', [[ST.green, `at ${String(it.approved[win.url]).slice(0, 7)}`], ...((it.awaitingHuman || []).includes(win.url) ? [[ST.yellow, " · Prowl's stamp only: a person's approval is still needed"]] : [])]);
+      if (it.approved?.[win.url]) doc.row('Approved', [[ST.green, 'at '], shaSeg({ url: win.url }, it.approved[win.url], ST.green), ...((it.awaitingHuman || []).includes(win.url) ? [[ST.yellow, " · Prowl's stamp only: a person's approval is still needed"]] : [])]);
       const on = findingsFor(res.result, {}, parkOpts(it)).filter(f => f.pr === win.url);
       doc.blank().line([[ST.bold, `  Findings on this PR (${on.length})`]]);
       for (const f of on) doc.choice([[ST.bold, `${f.id}  `], [SEV_STYLE[f.severity] || '', `${f.severity}  `], [ST.grey, `${f.status}  `], ['', f.title]], () => det.stack.push({ type: 'finding', pr: f.pr, id: f.id, from: 'pr' }));
@@ -1029,6 +1044,8 @@ export function startTui(app, actions, io = {}) {
       const repo = (w.repos || []).find(r => r.pr?.url === p.url || r.repo === p.repo);
       const doc = docOf(`pr:${p.url}`, { pr: p.url });
       doc.row('PR', [[ST.link, p.url, p.url]]).row('Title', [['', p.title || '']]);
+      const branch = repo?.branch || p.branch; // the repo's branch, else the PR's own (one it picked up)
+      if (branch) doc.row('Branch', [branchSeg(p, branch), ...(repo?.pushedSha ? [[ST.grey, '  · pushed '], shaSeg(p, repo.pushedSha)] : [])]);
       if (repo?.worktree) doc.row('Worktree', [fileLink(repo.worktree)]);
       return doc;
     };

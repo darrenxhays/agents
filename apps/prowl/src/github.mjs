@@ -478,3 +478,12 @@ export async function prStats(pr) {
 /** A size as git's --shortstat words it: 12 files changed, 340 insertions(+), 1 deletion(-). */
 export const shortstat = ({ files, additions, deletions }) =>
   `${files} file${files === 1 ? '' : 's'} changed, ${additions} insertion${additions === 1 ? '' : 's'}(+), ${deletions} deletion${deletions === 1 ? '' : 's'}(-)`;
+
+/**
+ * A PR's branch, as Prowl records it for links: its bare name in the PR's own repo, `owner/repo:branch` from a fork,
+ * `deleted fork:branch` when the fork is gone (a branch name can't hold a colon). One call, with a 60-second limit.
+ */
+export async function headBranch(pr) {
+  return (await run('gh', ['api', `repos/${pr.repo}/pulls/${pr.number}`, '--jq',
+    'if (.head.repo.full_name // "") == .base.repo.full_name then .head.ref else ((.head.repo.full_name // "deleted fork") + ":" + .head.ref) end'], { timeoutMs: 60_000 })).trim();
+}

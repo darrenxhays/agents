@@ -218,9 +218,12 @@ export function createReviewer(app, deps) {
    * only, replaced by the review's own row when its session starts. Each PR's size is read from GitHub meanwhile
    * (all at once; one that can't be read is left out).
    */
-  function standFor(ticket, prs, quick = false) {
-    const stand = { id: `preparing:${ticket.key}`, ticket: ticket.key, ticketUrl: ticket.url || '', title: ticket.title, prs, status: 'preparing', startedAt: Date.now(), stats: {}, _activity: [], ...(quick && { quick: true }) };
-    stand._sizes = Promise.allSettled(prs.map(async p => { stand.stats[p.url] = await gh.prStats(p); })); // a GitHub stand-in without it (the self-test) reads no sizes
+  function standFor(ticket, prs, quick = false, others = []) {
+    const stand = { id: `preparing:${ticket.key}`, ticket: ticket.key, ticketUrl: ticket.url || '', title: ticket.title, prs, status: 'preparing', startedAt: Date.now(), stats: {}, branches: {}, _activity: [], ...(quick && { quick: true }) };
+    // Each PR's size, and the branch of every PR the review covers (`others`: carried as context, or left out), for its
+    // details' links. One that can't be read is left out, and never holds the review up.
+    stand._sizes = Promise.allSettled([...prs.map(async p => { stand.stats[p.url] = await gh.prStats(p); }), // a GitHub stand-in without these (the self-test) reads none
+      ...[...prs, ...others].map(async p => { const b = await gh.headBranch(p); if (b) stand.branches[p.url] = b; })]);
     preparing.set(ticket.key, stand);
     return stand;
   }
@@ -250,6 +253,7 @@ export function createReviewer(app, deps) {
     await Promise.race([stand._sizes.then(() => { all = true; }), new Promise(r => setTimeout(r, Math.max(0, (deps.sizeWaitMs ?? 10_000) - waited)))]);
     run._activity = [...stand._activity, ...(run._activity || [])];
     run.stats = stand.stats;
+    run.branches = stand.branches;
     const had = Object.keys(run.stats).length;
     if (!all) {
       stand._sizes.then(() => {
@@ -396,7 +400,7 @@ export function createReviewer(app, deps) {
     // Everything slow comes before the claim, so nothing is awaited between the claim and the session's start: a
     // quit or crash while a repo clones then leaves the ticket tagged, not In Review with no review running.
     let ticketText = '';
-    const stand = toReview.length ? standFor(ticket, toReview) : null; // Running lists it from here
+    const stand = toReview.length ? standFor(ticket, toReview, false, [...approved, ...(prior ? leftOut : [])]) : null; // Running lists it from here
     try {
     if (stand) {
       await cloneFor(c, stand, toReview);
@@ -668,7 +672,7 @@ export function createReviewer(app, deps) {
     const strip = pr => ({ url: pr.url, title: pr.title, number: pr.number, repo: pr.repo, author: pr.author, draft: false });
     const ticket = { key: spec.key, title: spec.title, url: spec.ticketUrl || '', ref: null };
     if (app.dryRun()) { log('info', `${spec.key}: would review ${toReview.map(p => p.url).join(' ')}`); return null; }
-    const stand = standFor(ticket, toReview.map(strip), true); // Running lists it from here
+    const stand = standFor(ticket, toReview.map(strip), true, [...approved, ...(prior ? leftOut : [])].map(strip)); // Running lists it from here
     let run;
     try {
       await cloneFor(c, stand, toReview);

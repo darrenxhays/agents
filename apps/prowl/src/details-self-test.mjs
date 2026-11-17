@@ -7,7 +7,7 @@ import { cached, cacheKeys, dropCache, plain, readLines, readLog } from './detai
 import { findingLinks, findingsFor, findingUrl, prLinks, readResult, webLink } from './reviewer/details.mjs';
 import { checkResult } from './reviewer/result.mjs';
 import { readActivity } from './sessions.mjs';
-import { startTui } from './tui.mjs';
+import { branchSeg, shaSeg, startTui } from './tui.mjs';
 
 const SHA = 'a'.repeat(40);
 const BATCH = 'rb-20261110-ab42-r1-1432-9f3a';
@@ -108,7 +108,7 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
       const id = `AB42-${n}`;
       const r = { id, tracker: 'ado', ref: { id: 42 }, ticket: 'AB#42', title: 'Carts: retry failed payments', ticketUrl: 'https://dev.azure.com/o/Shop/_workitems/edit/42', status: 'done', startedAt: 1_700_000_000_000 + n * 3_600_000, endedAt: 1_700_000_000_000 + n * 3_600_000 + 842_000,
         reviewNo: n, prs: [prOf(A), prOf(B)], contextPrs: [], approved: { [B]: SHA }, awaitingHuman: [B], reviewedHeads: { [A]: SHA, [B]: SHA }, costUsd: 3.41, summary: { verdict: 'REQUEST CHANGES', critical: 1, high: 2, medium: 0, low: 1, nit: 0 },
-        reportPath: path.join(reports, `${id}.md`), logPath, promptPath: path.join(tmp, 'logs', `${id}.prompt.md`), resultMode: 1, resultPath: path.join(reports, `${id}.result.json`), published, ...over };
+        branches: { [A]: 'octo/widgets:fix' }, reportPath: path.join(reports, `${id}.md`), logPath, promptPath: path.join(tmp, 'logs', `${id}.prompt.md`), resultMode: 1, resultPath: path.join(reports, `${id}.result.json`), published, ...over };
       fs.writeFileSync(r.reportPath, '# report\n');
       fs.writeFileSync(r.promptPath, 'Review these PRs.\nThe prompt line two.\n');
       if (r.resultPath && !over.noResult) fs.writeFileSync(r.resultPath, JSON.stringify(result));
@@ -180,6 +180,12 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
     t.tui.key('p');
     assert.ok(t.text().includes('The prompt line two.'), 'p opens the prompt');
     t.tui.key('esc');
+    // C-39: branches and commits link to GitHub.
+    const P = { url: A };
+    assert.equal(branchSeg(P, 'feature/x y')[2], 'https://github.com/acme/widgets/tree/feature/x%20y');
+    assert.deepEqual([branchSeg(P, 'octo/widgets:fix')[2], branchSeg(P, 'octo/widgets:fix')[1], branchSeg(P, 'deleted fork:fix').length, branchSeg({ url: 'nope' }, 'main').length], ['https://github.com/octo/widgets/tree/fix', 'octo/widgets:fix', 2, 2]);
+    assert.equal(branchSeg({ url: 'https://git.example.com/acme/widgets/pull/3' }, 'main')[2], 'https://git.example.com/acme/widgets/tree/main');
+    assert.deepEqual([shaSeg(P, SHA).slice(1), shaSeg(P, 'abc').length, shaSeg(P, 'HEAD~1'), shaSeg({ url: '' }, SHA).length], [['aaaaaaa', `https://github.com/acme/widgets/commit/${SHA}`], 2, ['', 'HEAD~1'], 2]);
     // PRs, a PR's window, and text split across a label and a link.
     t.tui.key('left'); t.tui.key('left');
     f = t.text();
@@ -188,9 +194,9 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
     f = t.text(110, 50);
     assert.ok(f.includes(`PR       ${A}`) && f.includes('Reviewed at aaaaaaa') && f.includes('Axes     Correctness') && f.includes('Clean    Security') && f.includes('Rules    CLAUDE.md') && /GitHub\s+review\s+\S+#pullrequestreview-9/.test(f)
       && /details part 2\s+\S+#issuecomment-5/.test(f) && f.includes('Findings on this PR (5)'), f);
-    t.tui.key('f');
-    type(t, `pr        ${A}`.replace(/\s+/g, ' ').slice(0, 2)); // "pr"
-    t.tui.key('esc');
+    assert.ok(f.includes('Branch   octo/widgets:fix'), f);
+    const ansi = t.tui.frame(110, 50, true).join('\n');
+    assert.ok(ansi.includes(`\x1b]8;;https://github.com/acme/widgets/commit/${SHA}\x1b\\aaaaaaa`) && ansi.includes('\x1b]8;;https://github.com/octo/widgets/tree/fix'), 'the commit and the branch are links');
     t.tui.key('f');
     type(t, 'at aaaaaaa');
     assert.ok(/1 of 1 match · /.test(t.text(110, 50)));
@@ -318,7 +324,7 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
     const t2log = path.join(tmp, 'logs', 'work-1.t2.ndjson');
     fs.writeFileSync(t2log, ev({ type: 'assistant', message: { content: [{ type: 'text', text: 'Working on round one.' }] } }));
     const work = { uid: 'u1', key: 'AB#123', title: 'Build it', url: 'https://dev.azure.com/o/Shop/_workitems/edit/123', status: 'active', step: 'session', turnKind: 'round', rounds: 1, createdAt: 1_700_000_000_000, updatedAt: 1_700_000_900_000, briefDir,
-      plan: path.join(briefDir, 'plan.md'), prs: [{ ...prOf(A), state: 'open' }], repos: [{ repo: 'acme/widgets', branch: 'feat/x', worktree: briefDir, pr: prOf(A) }],
+      plan: path.join(briefDir, 'plan.md'), prs: [{ ...prOf(A), state: 'open' }], repos: [{ repo: 'acme/widgets', branch: 'feat/x', pushedSha: 'b'.repeat(40), worktree: briefDir, pr: prOf(A) }],
       turns: [{ n: 1, startedAt: 1_700_000_000_000, endedAt: 1_700_000_760_000, kind: 'build', logPath: t1log, costUsd: 2.1 }, { n: 2, startedAt: 1_700_000_800_000, kind: 'round', logPath: t2log, costUsd: 0 }], costUsd: 2.1 };
     let active = [work];
     t = tuiOver({ builder: { running: () => active, history: () => [work] }, cfgOver: { builder: { ...cfg.builder, enabled: true } } });
@@ -331,7 +337,7 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
     assert.ok(/AB#123\s+SESSION RUNNING/.test(f) && /Summary\s+PRs \(1\)\s+Turns \(2\)/.test(f) && f.includes("Turns    2 turns · 1 feedback round · the Turns tab has each one's session") && /Brief\s+\S+ticket\.md/.test(f) && /Plan\s+\S+plan\.md/.test(f) && /Round 2 feedback\s+\S+feedback-2\.md/.test(f), f);
     t.tui.key('right');
     f = t.text(120, 40);
-    assert.ok(/❯\s+widgets#12\s+open\s+PR 12 title/.test(f) && /Worktree\s+\S+brief/.test(f), f);
+    assert.ok(/❯\s+widgets#12\s+open\s+PR 12 title/.test(f) && /Worktree\s+\S+brief/.test(f) && /Branch\s+feat\/x\s+· pushed bbbbbbb/.test(f), f);
     t.tui.key('right');
     f = t.text(120, 40);
     assert.ok(/❯\s+turn 1\s+\S+ \S+\s+\$2\.10\s+12m40s\s+build/.test(f) && /turn 2\s+\S+ \S+\s+running now\s+round/.test(f) && f.includes('Said     Opened acme/widgets#12 and wrote result.json.'), f);
