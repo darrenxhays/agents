@@ -482,13 +482,16 @@ export function startTui(app, actions, io = {}) {
 
   const rowId = r => (r._wait ? `wait:${r.key}` : r.id || r.uid || r.key);
   /** Running's selection: the remembered row where it is now (a review's own row, once it replaces its preparing row), until ↑ ↓ or a click moves it. */
-  function selectRunning(list) {
+  /** Where the remembered Running row is in `list` now (a review's own row, once it has replaced its preparing row), or -1. */
+  function pickedAt(list) {
     const want = ui.picked[ui.side];
-    if (want) {
-      let i = list.findIndex(r => rowId(r) === want.id);
-      if (i < 0 && String(want.id).startsWith('preparing:')) i = list.findIndex(r => !r._wait && r.ticket === want.ticket);
-      if (i >= 0) sel()[RUNNING] = i;
-    }
+    if (!want) return -1;
+    const i = list.findIndex(r => rowId(r) === want.id);
+    return i < 0 && String(want.id).startsWith('preparing:') ? list.findIndex(r => !r._wait && r.ticket === want.ticket) : i;
+  }
+  function selectRunning(list) {
+    const i = pickedAt(list);
+    if (i >= 0) sel()[RUNNING] = i;
     const at = clampSel(RUNNING, list.length);
     ui.picked[ui.side] = { id: rowId(list[at]), ticket: list[at].ticket };
     return at;
@@ -1099,9 +1102,10 @@ export function startTui(app, actions, io = {}) {
       const repo = (w.repos || []).find(r => r.pr?.url === p.url || r.repo === p.repo);
       const doc = docOf(`pr:${p.url}`, { pr: p.url });
       doc.row('PR', [[ST.link, p.url, p.url]]).row('Title', [['', p.title || '']]);
-      const branch = repo?.branch || p.branch; // the repo's branch, else the PR's own (one it picked up)
-      const pushed = w.lastPushed?.[p.url] || repo?.pushedSha; // the last commit Prowl pushed to it: a feedback round's, else the build's
+      const branch = repo?.branch || w.branches?.[p.url] || p.branch; // the repo's branch, else the PR's own (one it picked up, or only follows)
+      const pushed = w.lastPushed?.[p.url] || repo?.pushedSha; // the last commit Prowl pushed to it, whichever turn pushed it
       if (branch) doc.row('Branch', [branchSeg(p, branch), ...(pushed ? [[ST.grey, '  · pushed '], shaSeg(p, pushed)] : [])]);
+      else if (pushed) doc.row('Pushed', [shaSeg(p, pushed)]);
       if (repo?.worktree) doc.row('Worktree', [fileLink(repo.worktree)]);
       return doc;
     };
@@ -2320,7 +2324,7 @@ export function startTui(app, actions, io = {}) {
     if ((k === 'up' || k === 'down') && currentItem()) return formMove(k); // Needs you: through the form
     if ((k === 'up' || k === 'down') && view() === RUNNING && ui.picked[ui.side]) {
       // From where the remembered row is now: rows that came or went since the last frame don't shift the move.
-      const now = (ui.side === 'reviewer' ? runningRows() : live(ui.side)).findIndex(x => rowId(x) === ui.picked[ui.side].id);
+      const now = pickedAt(ui.side === 'reviewer' ? runningRows() : live(ui.side));
       if (now >= 0) sel()[RUNNING] = now;
     }
     if (k === 'up' || k === 'down') ui.picked[ui.side] = null; // the selection moves: Running remembers the new row
@@ -2343,8 +2347,7 @@ export function startTui(app, actions, io = {}) {
     if (view() === NEEDS) return needsKey(k);
     const list = view() === RUNNING ? (ui.side === 'reviewer' ? runningRows() : live(ui.side)) : view() === HISTORY ? history(ui.side) : [];
     // In Running the selected row is the remembered one: rows that came or went since the last frame don't shift what a key acts on.
-    const want = view() === RUNNING ? ui.picked[ui.side] : null;
-    const r = want ? list.find(x => rowId(x) === want.id) || (String(want.id).startsWith('preparing:') ? list.find(x => !x._wait && x.ticket === want.ticket) : undefined) : list[sel()[view()]];
+    const r = view() === RUNNING && ui.picked[ui.side] ? list[pickedAt(list)] : list[sel()[view()]];
     if (!r) return undefined;
     return ui.side === 'reviewer' ? reviewerKey(k, r) : builderKey(k, r);
   }

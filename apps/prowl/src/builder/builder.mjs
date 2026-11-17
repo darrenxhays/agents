@@ -955,6 +955,7 @@ export function createBuilder(app, deps) {
           throw new NeedsYou('failed', `${rec.repo} refused Prowl's push of ${w.key} to ${rec.branch}: ${e.message.split('\n')[0]}.`, { retry: 'publish' });
         }
         rec.pushedSha = head;
+        if (rec.pr?.url) (w.lastPushed ??= {})[rec.pr.url] = head; // a PR already open (picked up): this push is its latest
         touch(w);
         log('ok', `${w.key}: pushed ${short(head)} to ${rec.repo} ${rec.branch}`);
       }
@@ -1194,6 +1195,7 @@ export function createBuilder(app, deps) {
       const threads = actionable(await gh.prThreads(pr), b().fixFrom, parkedUrls(details));
       const reviews = (await gh.prReviews(pr)).filter(r => r.state === 'CHANGES_REQUESTED' && (Date.parse(r.at) || 0) > (w.lastActivityAt || 0));
       answersText.push(details, ...threads.map(t => t.body), ...reviews.map(r => r.body));
+      (w.branches ??= {})[pr.url] = facts.headBranch; // for the PR's details: a build that only follows PRs has no repo record of its own
       prs.push({ pr, repo: pr.repo, number: pr.number, url: pr.url, title: pr.title, branch: facts.headBranch, headSha: sha, worktree, clone: dir, details: stripParked(details), reviews, threads,
         defaultBranch: facts.defaultBranch, mergeBase: baseSha, failing, ...(fix?.conflict && baseSha && { conflict: { base: facts.base, baseSha } }) });
     }
@@ -1280,7 +1282,8 @@ export function createBuilder(app, deps) {
         if (failing.length) reasons.push('failing checks');
         // Had failing checks: not known yet while they still run, or one that failed isn't reported for the new head
         // (whether or not another has failed already).
-        if (was?.failing.length && (github.checksState(checks) === 'pending' || was.failing.some(name => !checks.some(c => c.name === name)))) unsettled.push(p);
+        const running = checks.some(c => !['pass', 'skipping', 'fail', 'cancel'].includes(c.bucket)); // asked of each check: checksState() says failing as soon as one has failed
+        if (was?.failing.length && (running || was.failing.some(name => !checks.some(c => c.name === name)))) unsettled.push(p);
       }
       const conflicting = pk.conflicts && facts.mergeable === 'CONFLICTING';
       if (conflicting) reasons.push(`conflicts with ${facts.base}`);
@@ -1700,6 +1703,7 @@ export function createBuilder(app, deps) {
   async function gate(w) {
     app.me ||= await gh.me();
     const g = await gateLook(w);
+    checkStop(w); // stopped while it looked: nothing is followed, asked or started
     const what = w.ref ? 'tag' : 'label';
     const start = () => { Object.assign(w, { gateAnswer: undefined, gateAsked: undefined }); return next(w, w.ref ? 'claim' : 'adopt'); };
     if (g.act === 'build') return start();

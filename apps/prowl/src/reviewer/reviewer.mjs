@@ -261,6 +261,7 @@ export function createReviewer(app, deps) {
     await Promise.race([stand._sizes.then(() => { stand._sized = true; }), new Promise(r => setTimeout(r, Math.max(0, (deps.sizeWaitMs ?? 10_000) - waited)))]);
   }
   function takeOver(run, stand) {
+    stand._run = run; // with or without a setup: a Stop confirmed after the launch stops this review
     const all = Boolean(stand._sized);
     run._activity = [...stand._activity, ...(run._activity || [])];
     run.stats = stand.stats;
