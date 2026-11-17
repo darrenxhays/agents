@@ -235,13 +235,18 @@ export function detailsBlock(body, name = '') {
 export function reviewDetails(review, comments) {
   const d = detailsBlock(review?.body);
   if (!d || d.part2) return '';
+  const part2 = part2Block(review, comments, d.file);
+  return part2 ? `${d.text}\n\n${part2.text}` : d.text;
+}
+
+/** The second part of a review's details file (detailsBlock()'s { file, text, part2, closed }), or null. `file`: the details file's name. */
+export function part2Block(review, comments, file = detailsBlock(review?.body)?.file) {
   // Its second part is the conversation comment the review itself links, after its details block, written by the
   // review's own author: a comment that only carries the same file name (anyone can write or edit one) is not it.
   const body = String(review.body || '');
   const linked = [...body.slice(Math.max(0, body.lastIndexOf('</details>'))).matchAll(/#issuecomment-(\d+)/g)].map(m => m[1]);
   const sameUser = (a, b) => Boolean(a) && String(a).toLowerCase() === String(b || '').toLowerCase();
-  const part2 = (comments || []).filter(c => linked.includes(String(c.id)) && sameUser(c.user, review.user)).map(c => detailsBlock(c.body)).find(x => x?.part2 && x.file === d.file);
-  return part2 ? `${d.text}\n\n${part2.text}` : d.text;
+  return (comments || []).filter(c => linked.includes(String(c.id)) && sameUser(c.user, review.user)).map(c => detailsBlock(c.body)).find(x => x?.part2 && x.file === file) || null;
 }
 
 export function detailsFromBodies(reviews, comments, name) {

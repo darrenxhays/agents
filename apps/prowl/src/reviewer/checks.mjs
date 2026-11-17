@@ -20,13 +20,13 @@ export const checksWorktree = (workDir, repo) => path.join(workDir, '.prowl-work
  * head's build output.
  */
 export function baseSteps(steps, results) {
-  const failed = new Set(results.filter(r => r.status === 'failed').map(r => r.name));
-  return steps.slice(0, steps.findLastIndex(([name]) => failed.has(name)) + 1);
+  // By place, not by name: a checks.json entry can have two steps of one name (its own setup, and a review step called setup).
+  return steps.slice(0, results.findLastIndex(r => r.status === 'failed') + 1);
 }
 
 /** A PR's checks files, next to the review's log: `prefix` is the log's path without its extension. */
 export function checksFiles(prefix, pr) {
-  const base = `${prefix}.${pr.repo.split('/')[1]}-${pr.number}`;
+  const base = `${path.resolve(prefix)}.${pr.repo.split('/')[1]}-${pr.number}`; // absolute: a check reads PROWL_CHANGED_FILES from inside its worktree
   return { changed: `${base}.changed.txt`, log: `${base}.checks.log` };
 }
 
@@ -65,7 +65,7 @@ export async function prChecks(cfg, { pr, spec }, head, prefix, { signal, progre
       log(`\nThe failed steps again, at the merge base ${mergeBase}\n`);
       const atBase = await d.runSteps(baseSteps(steps, results), wt, { ...env, PROWL_AT_BASE: '1' }, spec.timeoutMinutes || 20, signal, log);
       for (const r of results.filter(x => x.status === 'failed')) {
-        const b = atBase.find(x => x.name === r.name);
+        const b = atBase[results.indexOf(r)]; // the same step, by its place
         // Nothing to run at the base (a project the PR adds): the failure is the PR's.
         r.atBase = !b ? 'skipped' : b.status === 'nothing' ? 'passed' : b.status;
         if (r.atBase === 'failed') r.baseTail = b.tail;

@@ -180,10 +180,20 @@ export function migrateNames(saved) {
 /** The role `t` had, when it is a name the move reset (`were`: that side's tagsWere), limited to `roles` if given; else ''. */
 export function wasRole(were, tags, t, ...roles) {
   const same = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
-  // On Jira a tag is on issues as a label: no colons, a dash for each run of spaces. A reset name is known in that spelling too.
-  const asLabel = s => String(s ?? '').trim().replace(/:/g, '').replace(/\s+/g, '-');
-  if (!were || !String(t ?? '').trim() || Object.values(tags).some(x => same(x, t) || same(asLabel(x), t))) return '';
-  return Object.keys(were).find(r => (!roles.length || roles.includes(r)) && (same(were[r], t) || same(asLabel(were[r]), t))) || '';
+  if (!were || !String(t ?? '').trim() || Object.values(tags).some(x => same(x, t))) return '';
+  return Object.keys(were).find(r => (!roles.length || roles.includes(r)) && same(were[r], t)) || '';
+}
+
+/**
+ * wasRole() for a Jira label: there a tag is on issues as a label, so a reset name is known in the spellings Prowl has
+ * written it in too (a dash for each run of spaces, with its colons dropped, or kept as older versions did). One of
+ * today's tags in either spelling still comes first.
+ */
+function wasJiraRole(were, tags, t) {
+  const same = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
+  const spellings = s => { const dashed = String(s ?? '').trim().replace(/\s+/g, '-'); return [s, dashed, dashed.replace(/:/g, '')]; };
+  if (!were || !String(t ?? '').trim() || Object.values(tags).some(x => spellings(x).some(v => same(v, t)))) return '';
+  return Object.keys(were).find(r => spellings(were[r]).some(v => same(v, t))) || '';
 }
 
 /**
@@ -200,9 +210,10 @@ export function tagReader(cfg) {
   const old = { 'reviewer.trigger': OLD.reviewer.trigger, 'reviewer.inProgress': OLD.reviewer.inProgress, 'reviewer.done': OLD.reviewer.done, 'builder.start': OLD.builder.start, 'builder.inProgress': OLD.builder.inProgress };
   const exactRole = t => {
     // A name the move reset reads the same as one of today's tags: matched to the letter, and first.
-    const was = wasRole(cfg.tagsWere?.reviewer, r, t);
+    const read = cfg.taskBoard === 'jira' ? wasJiraRole : wasRole; // only Jira respells a tag
+    const was = read(cfg.tagsWere?.reviewer, r, t);
     if (was) return `reviewer.${was}`;
-    const built = wasRole(cfg.tagsWere?.builder, bt, t);
+    const built = read(cfg.tagsWere?.builder, bt, t);
     if (built) return `builder.${built}`;
     const n = norm(t);
     return Object.keys(today).find(k => today[k] && norm(today[k]) === n) || Object.keys(old).find(k => norm(old[k]) === n) || '';

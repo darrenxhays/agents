@@ -146,6 +146,8 @@ export async function publishReview(run, result, deps) {
     if (op.kind === 'reply' || op.kind === 'part2') {
       try {
         writeJson(file, { body: op.body });
+        // Pinned before it is posted: a resume after a crash in between finds the same split, whatever the body says by then.
+        if (op.kind === 'part2' && !run.split[pr.url]) { run.split[pr.url] = rec.split; save(); }
         run.published[op.key] = there || await attempt(() => (op.kind === 'reply' ? gh.replyOn(pr, op.commentId, file) : gh.commentOn(pr, file)), { sleep, landed: again });
         if (op.kind === 'part2') run.split[pr.url] = rec.split; // pinned: a resume finds the same split, whatever the body says by then
         return save();

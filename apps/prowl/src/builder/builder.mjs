@@ -1019,7 +1019,7 @@ export function createBuilder(app, deps) {
    */
   async function keepContinued(w, rec) {
     if (!fs.existsSync(rec.worktree)) return;
-    const head = (await git(rec.worktree, 'rev-parse', 'HEAD').catch(() => '')).trim();
+    const head = (await git(rec.worktree, 'rev-parse', 'HEAD')).trim(); // a worktree git can't read is not known to hold nothing: the error keeps it
     const start = rec.pushedSha || rec.continued.head; // what is on the remote: the head checked out, or Prowl's last push there
     if (!head || head === start) return;
     const count = await git(rec.worktree, 'rev-list', '--count', `${start}..HEAD`).then(o => Number(o.trim()), () => NaN);
@@ -1278,8 +1278,9 @@ export function createBuilder(app, deps) {
         const checks = await gh.requiredChecks(p.url).catch(() => []);
         failing = checks.filter(c => ['fail', 'cancel'].includes(c.bucket));
         if (failing.length) reasons.push('failing checks');
-        // Had failing checks: not known yet while they still run, or one that failed isn't reported for the new head.
-        else if (was?.failing.length && (github.checksState(checks) === 'pending' || was.failing.some(name => !checks.some(c => c.name === name)))) unsettled.push(p);
+        // Had failing checks: not known yet while they still run, or one that failed isn't reported for the new head
+        // (whether or not another has failed already).
+        if (was?.failing.length && (github.checksState(checks) === 'pending' || was.failing.some(name => !checks.some(c => c.name === name)))) unsettled.push(p);
       }
       const conflicting = pk.conflicts && facts.mergeable === 'CONFLICTING';
       if (conflicting) reasons.push(`conflicts with ${facts.base}`);
@@ -1346,6 +1347,7 @@ export function createBuilder(app, deps) {
           return drop(`the push to ${prName(p)} was rejected (${e.message.split('\n')[0]})`);
         }
         p.pushedSha = head;
+        (w.lastPushed ??= {})[p.url] = head; // for the PR's details: the round's own records go when it ends
         (w.pushedShas ??= []).push(head); // kept once the round is over: a rebuild steps past a branch Prowl pushed to
         w.lastPushAt = Date.now();
         w.roundAgain = false; // a round that pushes clears the dropped-once mark
@@ -1617,10 +1619,13 @@ export function createBuilder(app, deps) {
     if (asKey) ticket = await tracker.lookup(c, asKey);
     if (ticket && current(ticket.key)) throw new Error(`${ticket.key} is already ${current(ticket.key).status === 'following' ? 'being followed' : 'being built'}`);
     // A pasted PR a live build of this Prowl holds already is that build's.
-    for (const p of scope || []) {
-      const holder = records().find(r => !['done', 'stopped', 'ended'].includes(r.status) && [...(r.prs || []), ...(r.scope || [])].some(x => x.url === p.url));
-      if (holder) throw new Error(`the Builder already has ${prName(p)} (${holder.key})`);
-    }
+    const heldCheck = () => {
+      for (const p of scope || []) {
+        const holder = records().find(r => !['done', 'stopped', 'ended'].includes(r.status) && [...(r.prs || []), ...(r.scope || [])].some(x => x.url === p.url));
+        if (holder) throw new Error(`the Builder already has ${prName(p)} (${holder.key})`);
+      }
+    };
+    heldCheck();
     const oneShot = Boolean(opts.oneShot);
     /** A dry run: the same read and decision as the gate, to word what would happen. */
     const wouldDo = async (probe, plain) => {
@@ -1638,6 +1643,7 @@ export function createBuilder(app, deps) {
     } else {
       let name = cleanName((!asKey && opts.as) || opts.name);
       if (!name && c.quickName === 'auto') name = await (deps.autoName || autoName)(c, [text, ...(scope || []).map(p => `${prName(p)}: ${p.title}`)].join('\n')).catch(() => '');
+      heldCheck(); // again: naming can take a while, and another quick build of the same PRs may have been recorded meanwhile
       const n = Math.max(0, ...records().filter(r => /^BUILD#\d+$/.test(r.key)).map(r => Number(r.key.split('#')[1]))) + 1;
       const key = `BUILD#${n}`;
       const title = name || (scope ? `Quick build: ${scope.map(prName).join(', ')}` : instructions.split('\n')[0].slice(0, 60));

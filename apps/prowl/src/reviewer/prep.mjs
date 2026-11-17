@@ -33,7 +33,7 @@ function realPath(p) {
   }
 }
 // On real paths: /tmp is a link to /private/tmp on macOS, and a folder reached through a link is still inside.
-const inside = (dir, p) => { const rel = path.relative(realPath(dir), realPath(p)); return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel)); };
+const inside = (dir, p) => { const rel = path.relative(realPath(dir), realPath(p)); return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel)); }; // a folder named ..x is inside
 
 /**
  * The folder review worktrees go in, never inside the Projects directory: that is the session's working directory,
@@ -278,7 +278,8 @@ function part2Gone(review, disc, pr) {
   const after = body.slice(Math.max(0, body.lastIndexOf('</details>'))).split('<!--')[0];
   const here = id => (disc.issueComments || []).some(c => Number(c.id) === Number(id));
   const linked = [...after.matchAll(/#issuecomment-(\d+)/g)].map(m => m[1]);
-  if (/part 2/i.test(after) && linked.length) return !linked.every(here);
+  // It says it goes on: the comment must still be there, and still hold the rest, whole (not edited away or cut short).
+  if (/part 2/i.test(after) && linked.length) return !linked.every(here) || github.part2Block(review, disc.issueComments)?.closed !== true;
   return [...after.matchAll(new RegExp(`${pr.url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}#issuecomment-(\\d+)`, 'g'))].some(m => !here(m[1]));
 }
 

@@ -33,7 +33,7 @@ const DROPPED = ['refuted', 'addressed-elsewhere', 'withdrawn', 'disputed', 'unv
 export function findingsFor(result, { status = 0, severity = 0 } = {}, opts = {}) {
   const counted = f => isCounted(f, opts);
   const parked = f => isParked(f, opts);
-  const byStatus = [() => true, counted, f => DONE.includes(f.status) && !parked(f), f => DROPPED.includes(f.status) && !parked(f), parked, f => f.status === 'deferred'][status] || (() => true);
+  const byStatus = [() => true, counted, f => DONE.includes(f.status), f => DROPPED.includes(f.status) && !parked(f), parked, f => f.status === 'deferred'][status] || (() => true);
   const worst = severity ? SEVERITIES.slice(0, severity) : SEVERITIES;
   const list = (result?.findings || []).filter(f => byStatus(f) && worst.includes(f.severity));
   const sorted = fs2 => bySeverity(fs2);

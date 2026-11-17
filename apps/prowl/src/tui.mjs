@@ -206,7 +206,16 @@ export function holdBack(data) {
  */
 export const timedOut = held => (held === '\x1b' ? [held, false] : ['', true]);
 /** `chunk` without the end of a sequence whose start was dropped (timedOut). */
-export const restOf = chunk => chunk.slice(/^[<0-9;]*[A-Za-z~]/.exec(chunk)?.[0].length || 0);
+export const restOf = chunk => skipRest(chunk)[0];
+/**
+ * The same, for an end that may itself arrive in pieces: [what is left to read, whether more of it is still to
+ * come]. A chunk of only digits, ; and < is all part of it, and its final letter (or ~) hasn't arrived yet.
+ */
+export function skipRest(chunk) {
+  const end = /^[<0-9;]*[A-Za-z~]/.exec(chunk);
+  if (end) return [chunk.slice(end[0].length), false];
+  return /^[<0-9;]+$/.test(chunk) ? ['', true] : [chunk, false];
+}
 
 /** The keys, pastes and mouse events in `data`, as onKey, onPaste and onMouse take them. */
 export function* keys(data) {
@@ -1091,7 +1100,8 @@ export function startTui(app, actions, io = {}) {
       const doc = docOf(`pr:${p.url}`, { pr: p.url });
       doc.row('PR', [[ST.link, p.url, p.url]]).row('Title', [['', p.title || '']]);
       const branch = repo?.branch || p.branch; // the repo's branch, else the PR's own (one it picked up)
-      if (branch) doc.row('Branch', [branchSeg(p, branch), ...(repo?.pushedSha ? [[ST.grey, '  · pushed '], shaSeg(p, repo.pushedSha)] : [])]);
+      const pushed = w.lastPushed?.[p.url] || repo?.pushedSha; // the last commit Prowl pushed to it: a feedback round's, else the build's
+      if (branch) doc.row('Branch', [branchSeg(p, branch), ...(pushed ? [[ST.grey, '  · pushed '], shaSeg(p, pushed)] : [])]);
       if (repo?.worktree) doc.row('Worktree', [fileLink(repo.worktree)]);
       return doc;
     };
@@ -2308,6 +2318,11 @@ export function startTui(app, actions, io = {}) {
     if (ui.front?.sig === frontSig() && (SCROLL_KEYS.includes(k) || (ui.front.arrows && (k === 'up' || k === 'down')))) { scrollPane(ui.front.id, k); return undefined; }
     if (SCROLL_KEYS.includes(k)) return undefined;
     if ((k === 'up' || k === 'down') && currentItem()) return formMove(k); // Needs you: through the form
+    if ((k === 'up' || k === 'down') && view() === RUNNING && ui.picked[ui.side]) {
+      // From where the remembered row is now: rows that came or went since the last frame don't shift the move.
+      const now = (ui.side === 'reviewer' ? runningRows() : live(ui.side)).findIndex(x => rowId(x) === ui.picked[ui.side].id);
+      if (now >= 0) sel()[RUNNING] = now;
+    }
     if (k === 'up' || k === 'down') ui.picked[ui.side] = null; // the selection moves: Running remembers the new row
     if (k === 'up') { sel()[view()] = Math.max(0, sel()[view()] - 1); return undefined; }
     if (k === 'down') { sel()[view()]++; return undefined; }
@@ -2435,11 +2450,13 @@ export function startTui(app, actions, io = {}) {
   let held = ''; // the start of a paste or of an escape sequence whose end hasn't arrived yet
   let lone; // the timer that reads a held escape as it is: esc alone is the key, with nothing to follow
   let skip = false; // the start of a sequence was dropped: its end is skipped when it arrives
+  let skipSince = 0;
   const read = (chunk, asIs = false) => {
     clearTimeout(lone);
-    if (skip && chunk) { chunk = restOf(chunk); skip = false; }
+    // For a second at most: after that what arrives is typing, not the end of a sequence dropped long ago.
+    if (skip && chunk) { if (Date.now() - skipSince < 1000) [chunk, skip] = skipRest(chunk); else skip = false; }
     let [data, rest] = asIs ? [held, ''] : holdBack(held + chunk);
-    if (asIs) [data, skip] = timedOut(held);
+    if (asIs) { [data, skip] = timedOut(held); skipSince = Date.now(); }
     held = rest;
     if (held && !held.startsWith('\x1b[200~')) lone = setTimeout(() => read('', true), 50);
     let moved = true; // only the pointer moving: repainted at most every 30ms, so a quick sweep can't flood the terminal
