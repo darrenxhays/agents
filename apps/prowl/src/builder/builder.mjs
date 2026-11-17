@@ -1297,6 +1297,7 @@ export function createBuilder(app, deps) {
       // No longer work to continue: out of the PRs followed and out of the survey, so a finish session never checks
       // out a branch that was deleted with its PR.
       const is = x => gone.some(g => g.url === x.url);
+      if (byLabels(w)) labelPrs(w, gone, ''); // a ticketless build's label comes off them now: nothing later visits a PR it no longer has
       w.prs = w.prs.filter(x => !is(x));
       if (w.survey?.prs) w.survey.prs = w.survey.prs.filter(x => !is(x));
       log('info', `${w.key}: ${gone.map(prName).join(', ')} ${gone.length > 1 ? 'were' : 'was'} merged or closed meanwhile; left out`);
