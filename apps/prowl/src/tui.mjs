@@ -934,6 +934,23 @@ export function startTui(app, actions, io = {}) {
     doc.row('Reviewed', head ? [['', 'at '], shaSeg({ url }, head)] : [[ST.grey, 'not reviewed: no head commit']]);
     if (it.approved?.[url]) doc.row('Approved', [[ST.green, 'at '], shaSeg({ url }, it.approved[url], ST.green), ...((it.awaitingHuman || []).includes(url) ? [[ST.yellow, " · Prowl's stamp only: a person's approval is still needed"]] : [])]);
   }
+  /** A PR's Checks section: what Prowl built and tested before the review, each step's outcome, and the output as a file to open. */
+  function checksInto(doc, det, it, url) {
+    const c = (it.checks || []).find(x => x.url === url);
+    if (!c) return;
+    doc.blank().line([[ST.bold, '  Checks']]);
+    if (c.error) { doc.row('Ran', [[ST.red, `couldn't run: ${c.error}`]]); return; }
+    doc.row('Ran', [['', 'at '], shaSeg({ url }, c.head), [ST.grey, ', merge base '], shaSeg({ url }, c.mergeBase, ST.grey)]);
+    for (const s of c.steps || []) {
+      const [style, text] = s.status === 'failed' ? [ST.red, `failed${{ passed: ' (passes at the merge base)', failed: ' (fails at the merge base too)' }[s.atBase] || ''}`]
+        : s.status === 'nothing' ? [ST.grey, 'nothing to run'] : s.status === 'skipped' ? [ST.grey, `skipped (${s.after === 'stopped' ? 'stopped' : `${s.after} failed`})`] : [ST.green, 'passed'];
+      doc.row('', [['', `${String(s.name).padEnd(10)} `], [style, text], ...(s.status === 'failed' && s.command ? [[ST.grey, `  ${s.command}`]] : [])]);
+    }
+    if (c.log) {
+      const there = fs.existsSync(c.log);
+      doc.choice([[there ? '' : ST.grey, 'Output'.padEnd(11)], ...(there ? [fileLink(c.log)] : [[ST.grey, `${c.log}: gone${keepDays()}`]])], there ? () => det.stack.push({ type: 'file', label: 'Checks output', path: c.log }) : null);
+    }
+  }
   const prTitle = (it, url) => [...(it.prs || []), ...(it.contextPrs || []), ...(it.leftOut || [])].find(p => p.url === url)?.title || '';
   const leftOutWhy = (it, entry) => {
     const said = /^Not reviewed: (.*?)\.?$/.exec(String(entry?.coverage?.unverified || ''))?.[1];
@@ -976,7 +993,7 @@ export function startTui(app, actions, io = {}) {
     const doc = docOf(`pr:${win.url}`, { pr: win.url });
     doc.row('PR', [...linkSegs(win.url), [ST.grey, `  ${prTitle(it, win.url)}`]]);
     if (it.branches?.[win.url]) doc.row('Branch', [branchSeg({ url: win.url }, it.branches[win.url])]);
-    if (!entry) runFacts(doc, it, win.url);
+    if (!entry) { runFacts(doc, it, win.url); checksInto(doc, det, it, win.url); }
     else {
       if (entry.summary) doc.text('Summary', entry.summary);
       if (entry.role) doc.text('Role', entry.role);
@@ -989,6 +1006,7 @@ export function startTui(app, actions, io = {}) {
       if (entry.conventions?.length) doc.row('Rules', [['', entry.conventions.join(', ')]]);
       prLinks(win.url, it.published).forEach((l, i) => doc.row(i ? '' : 'GitHub', [['', `${l.what}  `], ...(l.url ? [[ST.link, l.url, l.url]] : [])]));
       if (it.approved?.[win.url]) doc.row('Approved', [[ST.green, 'at '], shaSeg({ url: win.url }, it.approved[win.url], ST.green), ...((it.awaitingHuman || []).includes(win.url) ? [[ST.yellow, " · Prowl's stamp only: a person's approval is still needed"]] : [])]);
+      checksInto(doc, det, it, win.url);
       const on = findingsFor(res.result, {}, parkOpts(it)).filter(f => f.pr === win.url);
       doc.blank().line([[ST.bold, `  Findings on this PR (${on.length})`]]);
       for (const f of on) doc.choice([[ST.bold, `${f.id}  `], [SEV_STYLE[f.severity] || '', `${f.severity}  `], [ST.grey, `${f.status}  `], ['', f.title]], () => det.stack.push({ type: 'finding', pr: f.pr, id: f.id, from: 'pr' }));
@@ -2299,13 +2317,15 @@ export function startTui(app, actions, io = {}) {
     }
     if (ui.edit) return editKey(k);
     if (ui.menu) return menuKey(k);
-    const det = detOf();
-    if (det && det.view === view() && !ui.keys && detailKey(k, det)) return undefined;
     if (ui.keys) {
       if (moved !== undefined) { ui.keys.scroll = Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, ui.keys.scroll + moved)); return undefined; }
       ui.keys = null;
       if (k === '/' || k === 'esc') return undefined; // anything else closes the list and does its job
-    } else if (k === '/') { ui.keys = { scroll: 0 }; return undefined; }
+    }
+    // The details, when they are open in this view, take their keys before Prowl's own (p is the prompt there, not pause).
+    const det = detOf();
+    if (det && det.view === view() && detailKey(k, det)) return undefined;
+    if (k === '/') { ui.keys = { scroll: 0 }; return undefined; }
     if (k === 'tab' || k === 'R' || k === 'B') {
       const to = k === 'R' ? 'reviewer' : k === 'B' || ui.side === 'reviewer' ? 'builder' : 'reviewer';
       if (visible(to)) ui.side = to;

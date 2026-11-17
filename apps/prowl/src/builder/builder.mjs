@@ -1245,7 +1245,9 @@ export function createBuilder(app, deps) {
     const n = w.rounds;
     const prs = w.round.prs.map(prName).join(', ');
     await tidy(w, [], w.round.prs);
-    w.pickupCarried ??= Object.fromEntries(Object.entries(w.pickupFix || {}).map(([url, f]) => [url, { reasons: f.reasons, failing: (f.failing || []).map(c => c.name) }]));
+    // Refreshed at every drop: the round just dropped may have had other failures than the first one did.
+    const carried = Object.fromEntries(Object.entries(w.pickupFix || {}).map(([url, f]) => [url, { reasons: f.reasons, failing: (f.failing || []).map(c => c.name) }]));
+    if (Object.keys(carried).length || !w.pickupCarried) w.pickupCarried = carried;
     Object.assign(w, { rounds: n - 1, round: null, roundPrs: [], roundClaimed: true, settleSince: null });
     if (w.roundAgain) {
       return raise(w, 'conflict', `The round at pick-up on ${prs} was dropped twice, nothing pushed (${why}). What it was to fix is still there, so ${w.key} isn't handed on. Retry works it out again from the branches' heads; s ends the work.`,

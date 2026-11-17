@@ -111,7 +111,7 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
       const id = `AB42-${n}`;
       const r = { id, tracker: 'ado', ref: { id: 42 }, ticket: 'AB#42', title: 'Carts: retry failed payments', ticketUrl: 'https://dev.azure.com/o/Shop/_workitems/edit/42', status: 'done', startedAt: 1_700_000_000_000 + n * 3_600_000, endedAt: 1_700_000_000_000 + n * 3_600_000 + 842_000,
         reviewNo: n, prs: [prOf(A), prOf(B)], contextPrs: [], approved: { [B]: SHA }, awaitingHuman: [B], reviewedHeads: { [A]: SHA, [B]: SHA }, costUsd: 3.41, summary: { verdict: 'REQUEST CHANGES', critical: 1, high: 2, medium: 0, low: 1, nit: 0 },
-        branches: { [A]: 'octo/widgets:fix' }, reportPath: path.join(reports, `${id}.md`), logPath, promptPath: path.join(tmp, 'logs', `${id}.prompt.md`), resultMode: 1, resultPath: path.join(reports, `${id}.result.json`), published, ...over };
+        branches: { [A]: 'octo/widgets:fix' }, checks: [{ url: A, label: 'acme/widgets#12', head: SHA, mergeBase: 'c'.repeat(40), log: logPath, steps: [{ name: 'build', status: 'passed' }, { name: 'test', status: 'failed', atBase: 'passed', command: 'npm test' }] }], reportPath: path.join(reports, `${id}.md`), logPath, promptPath: path.join(tmp, 'logs', `${id}.prompt.md`), resultMode: 1, resultPath: path.join(reports, `${id}.result.json`), published, ...over };
       fs.writeFileSync(r.reportPath, '# report\n');
       fs.writeFileSync(r.promptPath, 'Review these PRs.\nThe prompt line two.\n');
       if (r.resultPath && !over.noResult) fs.writeFileSync(r.resultPath, JSON.stringify(result));
@@ -198,11 +198,18 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
     assert.ok(f.includes(`PR       ${A}`) && f.includes('Reviewed at aaaaaaa') && f.includes('Axes     Correctness') && f.includes('Clean    Security') && f.includes('Rules    CLAUDE.md') && /GitHub\s+review\s+\S+#pullrequestreview-9/.test(f)
       && /details part 2\s+\S+#issuecomment-5/.test(f) && f.includes('Findings on this PR (5)'), f);
     assert.ok(f.includes('Branch   octo/widgets:fix'), f);
+    // The checks Prowl ran before the review, before the findings, with their output to open.
+    assert.ok(/Checks\n\s+Ran\s+at aaaaaaa, merge base ccccccc\n\s+build\s+passed\n\s+test\s+failed \(passes at the merge base\)\s+npm test/.test(f.replace(/ +\n/g, '\n')) && f.indexOf('Checks') < f.indexOf('Findings on this PR') && /Output\s+\S+AB42-1\.ndjson/.test(f), f);
+    // With the key list opened and closed by a key of the details', that key is still theirs: p is the prompt, not pause.
+    t.tui.key('/');
+    t.tui.key('p');
+    assert.ok(t.tui.ui.keys === null && t.det().stack.at(-1)?.label === 'Prompt', 'p after / opens the prompt');
+    t.tui.key('esc');
     const ansi = t.tui.frame(110, 50, true).join('\n');
     assert.ok(ansi.includes(`\x1b]8;;https://github.com/acme/widgets/commit/${SHA}\x1b\\aaaaaaa`) && ansi.includes('\x1b]8;;https://github.com/octo/widgets/tree/fix'), 'the commit and the branch are links');
     t.tui.key('f');
     type(t, 'at aaaaaaa');
-    assert.ok(/1 of 1 match · /.test(t.text(110, 50)));
+    assert.ok(/1 of 2 matches · /.test(t.text(110, 50)), 'found across a label and a link: the reviewed commit, and the checks\' head');
     t.tui.key('esc');
     t.tui.key('esc');
     assert.equal(t.det().stack.length, 0, 'esc closes the window');
