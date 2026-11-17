@@ -57,7 +57,10 @@ export function runCommand(command, cwd, env, timeoutMs, { signal, log, graceMs 
     running.add(p.pid);
     p.stdout.on('data', keep);
     p.stderr.on('data', keep);
+    let asked = false;
     const stop = () => {
+      if (asked) return; // a timeout, then Stop: one request and one escalation timer, never a second that outlives the cleanup
+      asked = true;
       killTree(p.pid);
       if (!WIN) killer = setTimeout(() => killTree(p.pid, { force: true }), graceMs); // taskkill /F is outright already
     };
@@ -72,8 +75,10 @@ export function runCommand(command, cwd, env, timeoutMs, { signal, log, graceMs 
       // The shell has exited: a child that ignored the stop with its output redirected holds none of our pipes, and
       // would otherwise keep running in the worktree.
       if (stopped || timedOut) killTree(p.pid, { force: true });
-      const nothing = r.ok && fs.existsSync(nothingFile);
-      fs.rmSync(nothingFile, { force: true });
+      // The command wrote this path: it is a file when it means "nothing to run", and whatever else is there is only removed.
+      let nothing = false;
+      try { nothing = r.ok && fs.statSync(nothingFile).isFile(); } catch { /* not created */ }
+      try { fs.rmSync(nothingFile, { force: true, recursive: true }); } catch { /* left in the temp folder */ }
       resolve({ ...r, nothing, timedOut });
     };
     p.on('error', e => done({ ok: false, tail: `${tail}\n${e.message}` }));

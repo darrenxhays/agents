@@ -50,7 +50,8 @@ export const succeeds = async (dir, ...args) => (await runFull('git', ['-C', dir
  * itself. Made, checked and emptied on every call: anything in it would run as a hook. An empty folder works on
  * Windows too, where /dev/null doesn't.
  */
-export function noHooks(dir = path.join(HOME, 'no-hooks')) {
+export function noHooks(folder = path.join(HOME, 'no-hooks')) {
+  const dir = path.resolve(folder); // absolute: git resolves a relative core.hooksPath inside the worktree, where a PR could plant hooks
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const st = fs.lstatSync(dir);
   const uid = process.getuid?.();
@@ -67,7 +68,11 @@ export const hooksOff = () => ['-c', `core.hooksPath=${noHooks()}`];
 /** Environment that turns git hooks off for every git command a review session runs. */
 export function noHooksEnv(env = process.env, dir = noHooks()) {
   const n = Number.parseInt(env.GIT_CONFIG_COUNT, 10) > 0 ? Number.parseInt(env.GIT_CONFIG_COUNT, 10) : 0;
-  return { GIT_CONFIG_COUNT: String(n + 1), [`GIT_CONFIG_KEY_${n}`]: 'core.hooksPath', [`GIT_CONFIG_VALUE_${n}`]: dir };
+  const out = { GIT_CONFIG_COUNT: String(n + 1), [`GIT_CONFIG_KEY_${n}`]: 'core.hooksPath', [`GIT_CONFIG_VALUE_${n}`]: dir };
+  // An inherited GIT_CONFIG_PARAMETERS (what `git -c` sets) outranks the counted variables: when it is there, the
+  // override is appended to it too, single-quoted as git writes it, so the last word on core.hooksPath is Prowl's.
+  if (env.GIT_CONFIG_PARAMETERS) out.GIT_CONFIG_PARAMETERS = `${env.GIT_CONFIG_PARAMETERS} '${`core.hooksPath=${dir}`.replace(/'/g, "'\\''")}'`;
+  return out;
 }
 
 /**

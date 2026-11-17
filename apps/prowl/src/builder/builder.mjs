@@ -79,6 +79,7 @@ export function createBuilder(app, deps) {
   const pickup = () => ({ drafts: true, branches: true, checks: true, conflicts: true, ...(b().pickup || {}) });
   // A quick build without a ticket marks its cycle with labels on its PRs; every other build with its ticket's tags.
   const byLabels = w => w?.markers === 'labels';
+  const labelsOn = () => cfg().quickLabels !== false; // the labels switch (Quick reviews: GitHub labels) covers the Builder's labels too
 
   const current = key => records().find(r => r.key === key && !['done', 'stopped', 'ended'].includes(r.status));
   // Tickets being built, from the claim until their PRs open, Needs you included: the ones Max parallel builds counts.
@@ -344,6 +345,7 @@ export function createBuilder(app, deps) {
    */
   function labelPrs(w, prs, role) {
     const c = cfg();
+    if (!labelsOn()) return; // the labels switch is off: none is written
     const add = role === 'ask' ? askLabel(c) : role ? labelNames(c)[role] : '';
     labels.own('builder', w.uid, prs.map(p => p.url));
     for (const p of prs) labels.set('builder', w.uid, p, labelWrite(c, add, role ? ['building', 'ask', 'approved', 'changes'] : ['building', 'ask'], ['building', 'ask']));
@@ -351,6 +353,7 @@ export function createBuilder(app, deps) {
 
   /** Why a ticketless build's round waits (a PR labelled as under review or as asking for one, or a label write still queued), or ''. */
   async function labelHold(w, prs = w.prs) {
+    if (!labelsOn()) return ''; // …and none is read
     for (const p of prs) {
       if (labels.pending(p.url)) return `${prName(p)} has a label change still queued`;
       const on = await gh.prLabels(p);
@@ -465,7 +468,7 @@ export function createBuilder(app, deps) {
       if (p.draft && !pk.drafts) continue; // Pick up drafts off: left alone, as before
       const facts = await gh.prFacts(p);
       if (facts.state !== 'OPEN') continue;
-      const entry = { ...prRef(p), branch: facts.headBranch, head: facts.headSha, base: facts.base, draft: facts.draft, defaultBranch: facts.defaultBranch, mergeable: facts.mergeable,
+      const entry = { ...prRef(p), branch: facts.headBranch, head: facts.headSha, base: facts.base, draft: facts.draft, defaultBranch: facts.defaultBranch, mergeable: facts.mergeable, ...(facts.fork && { fork: true }),
         stat: { files: facts.files || 0, additions: facts.additions || 0, deletions: facts.deletions || 0 } };
       const why = prRefusal(facts, p, app.me, b().protectedBranches, { drafts: pk.drafts });
       if (why) {
@@ -544,7 +547,8 @@ export function createBuilder(app, deps) {
         else found.listed.push({ branch: x.branch, repo: x.repo, why: x.repo ? "linked on the ticket, in a repo Prowl can't work in" : 'linked on the ticket; not on GitHub, so Prowl only lists it' });
       }
     }
-    const taken = new Set([...found.prs, ...found.context].map(p => `${p.repo} ${p.branch}`.toLowerCase()));
+    // A fork's PR has its own branch of that name: it doesn't take the one in this repo.
+    const taken = new Set([...found.prs, ...found.context].filter(p => !p.fork).map(p => `${p.repo} ${p.branch}`.toLowerCase()));
     for (const { repo, branch } of want) {
       const id = `${repo} ${branch}`.toLowerCase();
       if (taken.has(id)) continue;
@@ -1032,8 +1036,9 @@ export function createBuilder(app, deps) {
     for (const p of rounds) await removeWorktree(p.clone, p.worktree).catch(() => {});
     for (const rec of recs) {
       if (rec.continued) { // detached at your branch: no branch of Prowl's, so commits never pushed would be left dangling
-        await keepContinued(w, rec).catch(e => log('warn', `${w.key}: couldn't keep the session's commits on your branch ${rec.branch} (${e.message})`));
-        await removeWorktree(rec.clone, rec.worktree).catch(() => {});
+        let kept = true;
+        await keepContinued(w, rec).catch(e => { kept = false; log('warn', `${w.key}: couldn't keep the session's commits on your branch ${rec.branch} (${e.message}); its worktree ${rec.worktree} is left in place, as they are only there`); });
+        if (kept) await removeWorktree(rec.clone, rec.worktree).catch(() => {}); // not kept: removing the detached worktree would leave them dangling
         continue;
       }
       let keep = false;
@@ -1262,6 +1267,9 @@ export function createBuilder(app, deps) {
       const was = w.pickupCarried[p.url];
       const facts = await gh.prFacts(p);
       if (facts.state !== 'OPEN') continue;
+      // This is the head looked at now: the survey's record follows it, so finishing doesn't go back to look again.
+      const surveyed = w.survey?.prs?.find(x => x.url === p.url);
+      if (surveyed && facts.headSha) surveyed.head = facts.headSha;
       const reasons = [];
       const [reviews, threads] = await Promise.all([gh.prReviews(p), gh.prThreads(p)]);
       if (rules.feedbackDue({ reviews, threads }, 0, b().fixFrom)) reasons.push('feedback');
@@ -1495,7 +1503,7 @@ export function createBuilder(app, deps) {
     if (why) return `It can't be asked now: ${why}`;
     item.thread = [...(item.thread || []), { from: 'you', text: question, at: Date.now() }];
     try {
-      w.discussion = Object.assign(session.discuss(cfg(), appDir, w, brief.resume.asks(item.question, question), room(w).budget), { itemId: item.id });
+      w.discussion = Object.assign(session.discuss(cfg(), appDir, w, brief.resume.asks(item.question, question), room(w).budget), { itemId: item.id, model: b().model || cfg().claude.model, effort: b().effort });
     } catch (e) {
       item.thread.pop();
       return `Couldn't ask it: ${e.message}`;
@@ -1513,7 +1521,7 @@ export function createBuilder(app, deps) {
     readActivity(d);
     const r = d._result;
     const cost = r?.total_cost_usd || 0;
-    w.turns.push({ n: w.turns.length + 1, startedAt: d.startedAt, endedAt: Date.now(), kind: 'ask', logPath: d.logPath, costUsd: cost, model: b().model || cfg().claude.model, effort: b().effort, models: modelCosts(r) });
+    w.turns.push({ n: w.turns.length + 1, startedAt: d.startedAt, endedAt: Date.now(), kind: 'ask', logPath: d.logPath, costUsd: cost, model: d.model, effort: d.effort, models: modelCosts(r) });
     w.costUsd = (w.costUsd || 0) + cost;
     w.sessionCostUsd = (w.sessionCostUsd || 0) + cost;
     const reply = String(r?.result || '').trim() || (r ? `(no reply: the session ended with ${r.subtype || 'an error'})` : '(no reply: the session ended without one; its log has more)');
@@ -1666,7 +1674,7 @@ export function createBuilder(app, deps) {
   async function gateLook(w) {
     let found;
     if (w.ref) found = rules.workState((await trackerOf(w).readItem(cfg(), w.ref)).tags, cfg());
-    else if (w.scope) {
+    else if (w.scope && labelsOn()) {
       const rows = [];
       for (const p of w.scope) rows.push({ name: prName(p), labels: await gh.prLabels(p) });
       found = rules.workState(rows, cfg());

@@ -23,7 +23,17 @@ export const prepDir = run => path.join(path.dirname(run.logPath), `${run.id}.pr
 export const prFolder = pr => `${pr.repo.replace('/', '__')}-${pr.number}`;
 
 const userName = () => { try { return os.userInfo().username.replace(/[^A-Za-z0-9._-]/g, '_') || 'user'; } catch { return 'user'; } };
-const inside = (dir, p) => { const rel = path.relative(path.resolve(dir), path.resolve(p)); return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel)); };
+/** `p` with its links resolved: its nearest existing ancestor's real path, then the rest (the folder may not exist yet). */
+function realPath(p) {
+  const rest = [];
+  for (let at = path.resolve(p); ; at = path.dirname(at)) {
+    try { return path.join(fs.realpathSync(at), ...rest); } catch { /* not there: try its parent */ }
+    if (path.dirname(at) === at) return path.resolve(p);
+    rest.unshift(path.basename(at));
+  }
+}
+// On real paths: /tmp is a link to /private/tmp on macOS, and a folder reached through a link is still inside.
+const inside = (dir, p) => { const rel = path.relative(realPath(dir), realPath(p)); return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel)); };
 
 /**
  * The folder review worktrees go in, never inside the Projects directory: that is the session's working directory,
@@ -280,7 +290,8 @@ export function blockingRead(review, disc, pr) {
   const details = review.details ?? github.reviewDetails(review, disc.issueComments);
   const list = detailsFindings(details, review.batchId ?? batchOf(review.body));
   const findings = [...new Set(list.map(f => f.ref).filter(r => FULL_REF.test(r)))];
-  const why = !details ? 'none' : part2Gone(review, disc, pr) ? 'part2' : !nothingHidden(details) ? 'hidden' : !list.length || findings.length < list.length ? 'headings' : '';
+  const cut = github.detailsBlock(review.body)?.closed === false; // its block never closes: the body was cut short, and what followed is gone
+  const why = !details ? 'none' : part2Gone(review, disc, pr) ? 'part2' : cut || !nothingHidden(details) ? 'hidden' : !list.length || findings.length < list.length ? 'headings' : '';
   return { url: review.url, findings, whole: !why, why };
 }
 

@@ -430,7 +430,7 @@ export function startTui(app, actions, io = {}) {
    * where it is, when the lines don't all fit (`statusTop`: as its first row). `owner`: a different one starts the
    * pane afresh. `front`: the scroll keys go to this pane (`arrows`: ↑ ↓ too).
    */
-  function pane(id, blocks, w, h, { follow = false, focus, reveal = false, status = true, statusTop = false, main = false, owner, front = false, arrows = false } = {}) {
+  function pane(id, blocks, w, h, { follow = false, focus, focusLine, reveal = false, status = true, statusTop = false, main = false, owner, front = false, arrows = false } = {}) {
     let st = ui.panes.get(id);
     if (!st || st.owner !== owner) { st = { at: null, ops: [], top: 0, room: h, total: 0, follow, focus: undefined, painted: false, owner }; ui.panes.set(id, st); }
     if (front) ui.front = { id, arrows, sig: frontSig() };
@@ -454,8 +454,10 @@ export function startTui(app, actions, io = {}) {
       const first = lines.findIndex(x => x.key === focus);
       if (first >= 0) {
         const end = first + lines.filter(x => x.key === focus).length - 1;
-        if (first < top) top = first;
-        else if (end >= top + room) top = clamp(Math.min(first, end - room + 1));
+        // `focusLine`: the wrapped line of that block to show (a search match far down a long paragraph); else the whole block.
+        const [from, to] = focusLine != null ? [Math.min(end, first + focusLine), Math.min(end, first + focusLine)] : [first, end];
+        if (from < top) top = from;
+        else if (to >= top + room) top = clamp(Math.min(from, to - room + 1));
       }
     }
     Object.assign(st, { at: (follow ? top >= last : top === 0) ? null : { key: lines[top].key, l: top - lines.findIndex(x => x.key === lines[top].key) },
@@ -941,7 +943,7 @@ export function startTui(app, actions, io = {}) {
       const verdictSeg = !res.result ? [] : [worst ? [SEV_STYLE[worst], `${worst} · ${counted.length}`.padEnd(18)] : [ST.green, 'none counted'.padEnd(18)]];
       const title = prTitle(it, url);
       return {
-        segs: [[ST.link, nameOf(url).padEnd(14), url], ['', ' '], ...verdictSeg, ['', title]], text: [url, title, entry?.summary].filter(Boolean).join(' '), url,
+        segs: [webLink(url) ? [ST.link, nameOf(url).padEnd(14), url] : ['', nameOf(url).padEnd(14)], ['', ' '], ...verdictSeg, ['', title]], text: [url, title, entry?.summary].filter(Boolean).join(' '), url,
         open: () => det.stack.push({ type: 'pr', url }),
         preview: () => {
           const doc = docOf('preview');
@@ -960,7 +962,7 @@ export function startTui(app, actions, io = {}) {
     const res = resultOf(it, det);
     const entry = res.result?.prs.find(p => p.url === win.url);
     const doc = docOf(`pr:${win.url}`, { pr: win.url });
-    doc.row('PR', [[ST.link, win.url, win.url], [ST.grey, `  ${prTitle(it, win.url)}`]]);
+    doc.row('PR', [...linkSegs(win.url), [ST.grey, `  ${prTitle(it, win.url)}`]]);
     if (it.branches?.[win.url]) doc.row('Branch', [branchSeg({ url: win.url }, it.branches[win.url])]);
     if (!entry) runFacts(doc, it, win.url);
     else {
@@ -1232,7 +1234,10 @@ export function startTui(app, actions, io = {}) {
         // The pane is told which block to keep in view; a new match or choice scrolls to it.
         const st = ui.panes.get(id);
         const reveal = Boolean(st) && st.wants !== focus && focus !== undefined;
-        body = pane(id, marked.blocks, W, bodyH(), { follow: Boolean(scr.follow) && !find, front: true, arrows: !scr.choices.length, focus: focusKey, reveal });
+        // The wrapped line the match in front is on, within its block.
+        const hit = find && det.findAt >= 0 ? marked.blocks.find(b => b.key === focusKey) : null;
+        const focusLine = hit ? Math.max(0, linesOf(hit, W).findIndex(l => l.some(seg => seg[0] === MARK_AT))) : undefined;
+        body = pane(id, marked.blocks, W, bodyH(), { follow: Boolean(scr.follow) && !find, front: true, arrows: !scr.choices.length, focus: focusKey, focusLine, reveal });
         ui.panes.get(id).wants = focus;
       } else {
         const items = scr.items;
@@ -2153,7 +2158,7 @@ export function startTui(app, actions, io = {}) {
     const o = m.options[n];
     if (!f || !o) return undefined;
     if (o.other) return typeValue(f);
-    if (o.current) return undefined;
+    if (getPath(app.cfg, f.key) === o.value) return undefined; // the value set now, in the config as it is now (the file may have changed while the list was open)
     setPath(app.cfg, f.key, o.value);
     return saved();
   }
@@ -2321,7 +2326,10 @@ export function startTui(app, actions, io = {}) {
     if (view() === STATS) { if (k === 't') ui.statsRange = (ui.statsRange + 1) % RANGES.length; return undefined; }
     if (view() === CONFIG) return configKey(k);
     if (view() === NEEDS) return needsKey(k);
-    const r = (view() === RUNNING ? (ui.side === 'reviewer' ? runningRows() : live(ui.side)) : view() === HISTORY ? history(ui.side) : [])[sel()[view()]];
+    const list = view() === RUNNING ? (ui.side === 'reviewer' ? runningRows() : live(ui.side)) : view() === HISTORY ? history(ui.side) : [];
+    // In Running the selected row is the remembered one: rows that came or went since the last frame don't shift what a key acts on.
+    const want = view() === RUNNING ? ui.picked[ui.side] : null;
+    const r = want ? list.find(x => rowId(x) === want.id) || (String(want.id).startsWith('preparing:') ? list.find(x => !x._wait && x.ticket === want.ticket) : undefined) : list[sel()[view()]];
     if (!r) return undefined;
     return ui.side === 'reviewer' ? reviewerKey(k, r) : builderKey(k, r);
   }

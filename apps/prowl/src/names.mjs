@@ -87,7 +87,9 @@ export function renamedWrite(cfg, op, outcome = '') {
   const role = op.add ? labelRole(cfg, op.add) : '';
   const add = role === 'done' ? outcome || five.changes : five[role] || op.add;
   const reviewer = op.side !== 'builder';
-  const w = !op.add ? labelWrite(cfg, '', reviewer ? ['inReview', 'approved', 'changes'] : ['building', 'ask'], reviewer ? ['inReview', 'done'] : ['building', 'ask'])
+  // A context PR's write: only the review request comes off. Its outcome label is its own, and stays.
+  const askOnly = !op.add && (op.remove || []).length > 0 && (op.remove || []).every(n => labelRole(cfg, n) === 'ask');
+  const w = askOnly ? labelWrite(cfg, '', ['ask'], ['ask']) : !op.add ? labelWrite(cfg, '', reviewer ? ['inReview', 'approved', 'changes'] : ['building', 'ask'], reviewer ? ['inReview', 'done'] : ['building', 'ask'])
     : reviewer ? labelWrite(cfg, add, ['inReview', 'approved', 'changes', ...(role === 'inReview' ? ['ask'] : [])], ['inReview', 'done', ...(role === 'inReview' ? ['ask'] : [])])
       : labelWrite(cfg, add, ['building', 'ask', 'approved', 'changes'], ['building', 'ask']);
   return { ...w, old: [...new Set([...w.old, ...(op.remove || []).filter(n => !(op.loose || []).includes(n))])] };
@@ -155,13 +157,18 @@ export function migrateNames(saved) {
   const clash = (tags, defaults, side, key) => {
     if (!tags || typeof tags !== 'object') return;
     const now = () => ({ ...defaults, ...tags });
-    for (const role of Object.keys(defaults)) {
-      if (!(role in tags)) continue;
-      const twin = Object.keys(defaults).find(other => other !== role && norm(now()[other]) === norm(tags[role]) && !(['approved', 'changes'].includes(role) && ['approved', 'changes'].includes(other)));
-      if (!twin) continue;
-      ((saved.tagsWere ??= {})[key] ??= {})[role] = tags[role];
-      notes.push(`${side}'s tag '${tags[role]}' read the same as another of its tags, so it is now '${defaults[role]}'`);
-      delete tags[role];
+    // Again after each reset: a name put back to its default can read the same as one that was fine until then.
+    for (let again = true; again;) {
+      again = false;
+      for (const role of Object.keys(defaults)) {
+        if (!(role in tags)) continue;
+        const twin = Object.keys(defaults).find(other => other !== role && norm(now()[other]) === norm(tags[role]) && !(['approved', 'changes'].includes(role) && ['approved', 'changes'].includes(other)));
+        if (!twin) continue;
+        ((saved.tagsWere ??= {})[key] ??= {})[role] = tags[role];
+        notes.push(`${side}'s tag '${tags[role]}' read the same as another of its tags, so it is now '${defaults[role]}'`);
+        delete tags[role];
+        again = true;
+      }
     }
   };
   clash(saved.tags, TAGS.reviewer, 'Reviewer', 'reviewer');
@@ -173,8 +180,10 @@ export function migrateNames(saved) {
 /** The role `t` had, when it is a name the move reset (`were`: that side's tagsWere), limited to `roles` if given; else ''. */
 export function wasRole(were, tags, t, ...roles) {
   const same = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
-  if (!were || !String(t ?? '').trim() || Object.values(tags).some(x => same(x, t))) return '';
-  return Object.keys(were).find(r => (!roles.length || roles.includes(r)) && same(were[r], t)) || '';
+  // On Jira a tag is on issues as a label: no colons, a dash for each run of spaces. A reset name is known in that spelling too.
+  const asLabel = s => String(s ?? '').trim().replace(/:/g, '').replace(/\s+/g, '-');
+  if (!were || !String(t ?? '').trim() || Object.values(tags).some(x => same(x, t) || same(asLabel(x), t))) return '';
+  return Object.keys(were).find(r => (!roles.length || roles.includes(r)) && (same(were[r], t) || same(asLabel(were[r]), t))) || '';
 }
 
 /**

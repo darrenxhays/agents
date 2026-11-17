@@ -34,8 +34,11 @@ export function createReviewer(app, deps) {
   const cfg = () => app.cfg;
   const on = () => app.sideOn('reviewer');
   const save = () => rv.saveState(side.state);
-  side.running = () => side.state.runs.filter(r => r.status === 'running' || r.status === 'stopping');
-  side.finished = () => side.state.runs.filter(r => r.status !== 'running' && r.status !== 'stopping').sort((a, b) => b.endedAt - a.endedAt);
+  // A review still being settled (its posting, dismissals and tag not all done) counts as running whatever its status
+  // says, so a launch that finds one saved part-way picks it up again.
+  const unsettled = r => r.status === 'running' || r.status === 'stopping' || r.phase === 'publishing';
+  side.running = () => side.state.runs.filter(unsettled);
+  side.finished = () => side.state.runs.filter(r => !unsettled(r)).sort((a, b) => b.endedAt - a.endedAt);
   // Reviews finished before Prowl recorded what a session ran on: read once from their logs, at launch.
   try { if (backfillUsage(side.state.runs.filter(r => !r.pr && r.status !== 'running' && r.status !== 'stopping'), deps.readLogUsage)) rv.saveState(side.state); } catch { /* Stats shows them as not recorded */ }
   /** What Stats shows, one entry per finished review that has an end time. */
@@ -251,12 +254,14 @@ export function createReviewer(app, deps) {
   /**
    * A review's row takes its stand-in's place: the setup's lines stay at the top of its Activity, and its PRs' sizes
    * go with it (the same object, so a size that arrives later still shows). The review waits at most 10 seconds for
-   * the sizes; ones that arrive after that are logged once.
+   * the sizes (sizesIn, before anything is claimed or launched); ones that arrive after that are logged once.
    */
-  async function takeOver(run, stand) {
+  async function sizesIn(stand) {
     const waited = Date.now() - stand.startedAt;
-    let all = false;
-    await Promise.race([stand._sizes.then(() => { all = true; }), new Promise(r => setTimeout(r, Math.max(0, (deps.sizeWaitMs ?? 10_000) - waited)))]);
+    await Promise.race([stand._sizes.then(() => { stand._sized = true; }), new Promise(r => setTimeout(r, Math.max(0, (deps.sizeWaitMs ?? 10_000) - waited)))]);
+  }
+  function takeOver(run, stand) {
+    const all = Boolean(stand._sized);
     run._activity = [...stand._activity, ...(run._activity || [])];
     run.stats = stand.stats;
     run.branches = stand.branches;
@@ -344,11 +349,11 @@ export function createReviewer(app, deps) {
     }
     // The board search can be a few seconds behind the ticket: read as it is now, one that no longer carries the
     // trigger tag is someone else's (claimed, or moved on), and is left out quietly.
-    ticket = await tracker.current(c, ticket);
-    if (!(ticket.tags || []).some(isTrigger)) return;
-    const free = hold();
+    const free = hold(); // held from before the read: a quick review admitted meanwhile can't take the last slot too
     const mark = {}; // what this ticket holds in settingUp
     try {
+      ticket = await tracker.current(c, ticket);
+      if (!(ticket.tags || []).some(isTrigger)) return;
       await prepareTicket(tracker, ticket, key, free, mark);
     } finally {
       free();
@@ -443,6 +448,7 @@ export function createReviewer(app, deps) {
     }
     /** The setup's worktrees go when the review doesn't start after all. */
     const unset = async () => { if (set) await dropPrep(set.run); };
+    if (stand) await sizesIn(stand); // before the claim: nothing is awaited between the session's start and its run being saved
     const to = toReview.length ? c.tags.inProgress : tagsNow().approved; // nothing to re-review: straight to approved, in one write a teammate's poller can't race
     try {
       await tracker.claim(c, ticket, t => isTrigger(t) || ours(t), to);
@@ -453,8 +459,8 @@ export function createReviewer(app, deps) {
       return log('error', `${ticket.key}: the claim failed (${e.message}) and may still have reached the ticket: if it is '${to}' now, put '${c.tags.trigger}' back`, key);
     }
     // Puts the trigger tag back. One the tracker refuses is kept in state.releases, which tick() retries each minute.
-    const release = async () => {
-      const r = { tracker: c.taskBoard, ticket: ticket.key, ref: ticket.ref, id: `claim-${ticket.key}`, pendingTag: c.tags.trigger };
+    const release = async (to2 = c.tags.trigger) => {
+      const r = { tracker: c.taskBoard, ticket: ticket.key, ref: ticket.ref, id: `claim-${ticket.key}`, pendingTag: to2 };
       await applyTag(r);
       if (r.pendingTag != null) { (state.releases ??= []).push(r); save(); }
     };
@@ -467,12 +473,17 @@ export function createReviewer(app, deps) {
       await unset();
       return release();
     }
+    if (stand?.stopped) { // Stop was confirmed while the claim was on its way: no session starts, and the claim's tag comes off
+      log('warn', `${ticket.key}: review stopped during its setup. Re-tag '${c.tags.trigger}' to run it again.`);
+      await unset();
+      return release('');
+    }
     hoot(`Starting reviews for ${ticket.title}, marking as '${c.tags.inProgress}'`);
     let run;
     try {
       if (prior && c.reReviewScope === 'delta' && !prior.reviewedHeads) log('info', `${ticket.key}: re-reviewing in full, as the last review is from before Prowl recorded the commits it reviewed`, `scope:${ticket.key}`);
       if (set) { ({ run } = set); launchPrepared(c, run); } else run = begin(c, opts);
-      await takeOver(run, stand);
+      takeOver(run, stand);
     } catch (e) {
       log('error', `${ticket.key}: could not start the review: ${e.message}`);
       await unset();
@@ -691,8 +702,14 @@ export function createReviewer(app, deps) {
           throw lasting('it was stopped while it was being set up');
         }
         if (!on()) throw new Error('the Reviewer was switched off before the review started');
+        await sizesIn(stand);
+        if (stand.stopped) {
+          log('warn', `${spec.key}: review stopped during its setup; nothing was reviewed`);
+          throw lasting('it was stopped while it was being set up');
+        }
+        if (!on()) throw new Error('the Reviewer was switched off before the review started');
         if (set) { ({ run } = set); launchPrepared(c, run); } else run = begin(c, opts);
-        await takeOver(run, stand);
+        takeOver(run, stand);
       } catch (e) {
         if (set) await dropPrep(set.run);
         throw e;
@@ -953,6 +970,7 @@ export function createReviewer(app, deps) {
       run.pendingTag = null;
       if (run.labels) settleLabels(run, retry);
     }
+    delete run.phase; // settled: from here its tag is pending in the saved state, and applyTag retries it
     save();
     if (run.pendingTag != null) await applyTag(run);
   }
@@ -1041,8 +1059,8 @@ export function createReviewer(app, deps) {
         failed(`couldn't write or publish its review: ${e.message}`);
       }
     }
-    delete run.phase;
-    save();
+    // Still saved as publishing: finish() ends the phase once the dismissals are made and the tag or labels are set, so
+    // a quit before then is picked up again at the next launch (nothing is posted or dismissed twice).
   }
 
   /** A quick review with labels, settled: each PR's outcome label and a wait on its PRs, a wait to retry it, or its labels off. */

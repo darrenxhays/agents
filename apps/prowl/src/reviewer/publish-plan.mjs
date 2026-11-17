@@ -230,10 +230,14 @@ export function planPublish(given, ctx) {
         const title = esc(flat(f.title));
         const ref = f.earlier?.ref?.trim() || f.id;
         const url = f.earlier?.url || '';
-        let note = f.outcome?.answer ? `answered: ${f.outcome.answer}` : flat(f.outcome?.note);
-        // A note that repeats the line's own title, ref and link is stripped down to the note.
-        for (const own of [title, flat(f.title), `(${ref})`, ref, url]) if (own) note = note.split(own).join('');
-        note = esc(note.replace(/^[\s:·,;-]+|[\s:·,;-]+$/g, '').replace(/\s+/g, ' ')) || 'only a person can resolve it';
+        let note;
+        if (f.outcome?.answer) note = esc(`answered: ${f.outcome.answer}`); // the answer's link, whole: a title that happens to be part of it is never cut out
+        else {
+          note = flat(f.outcome?.note);
+          // A note that repeats the line's own title, ref and link is stripped down to the note.
+          for (const own of [title, flat(f.title), `(${ref})`, ref, url]) if (own) note = note.split(own).join('');
+          note = esc(note.replace(/^[\s:·,;-]+|[\s:·,;-]+$/g, '').replace(/\s+/g, ' ')) || 'only a person can resolve it';
+        }
         return fillTemplate(T('Parked line'), { title, ref, note, link: url });
       };
       const list = fs => (fs.length ? fs.map(one).join('\n\n') : 'None.');
