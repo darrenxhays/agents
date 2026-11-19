@@ -2,6 +2,13 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.25.0
+- Label an open PR `prowl: review` to start a GitHub review, even without a board. This is on by default. Turn off **GitHub reviews** in Config or set `githubReviews` to `false`. Prowl needs triage or write access to label PRs. History shows any PR it skips because it couldn't label it.
+- A GitHub review reads the PR's ticket and the ticket's other PRs for context and leaves the ticket untouched. Label the PR again for another round. Prowl retries a failed review once.
+- Board reviews now label their PRs `prowl: in review` and then with the outcome, alongside the ticket's tags. A tagged ticket waits while one of the PRs it needs carries `prowl: in review` from another review. Remove that label if no review is running.
+- A ticketless build hands its PRs to the Reviewer through the Review label when `quickLabels` and `builder.requestReview` are both on.
+- Config groups settings into **Tags and labels** (**Labels** on Jira), **Models and efforts**, **Caps**, and **Files**. Change tag and label names in `config.json`. Press Enter on a name to open the file. Prowl manages the new review state automatically.
+
 ## 2.24.0
 - A repo's git hooks (husky's, say, or a `post-checkout` a PR adds) no longer run on your machine because Prowl checked a commit out: hooks are off in every worktree Prowl makes, and for every git command a review session runs. A Builder session's own commits still run the repo's commit hooks. If a repo's build needs something its post-checkout hook made, add that step to the repo's commands in Checks (Config).
 - A review whose session sends its reviewers off in the background is no longer failed and retried while they work: a session counts as ended only once its process has exited, not at the end of its first turn. The same goes for a Builder turn.

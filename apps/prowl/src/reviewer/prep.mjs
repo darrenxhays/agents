@@ -520,6 +520,7 @@ export async function prepareReview(cfg, appDir, run, { prior = null, progress =
   const userReview = path.join(CONFIG_DIR, 'review.md');
   const skillDir = path.join(appDir, 'skills', 'prowl-review');
   const prep = { dir, work: path.join(dir, 'work'), worktrees, skillDir, config: { review: fs.existsSync(userReview) ? userReview : path.join(skillDir, 'config', 'review.md') }, prs: [], comments: null, heads: { ...run.reviewedHeads }, priors: run.handover?.byPr || null };
+  for (const url of run.relatedUrls || []) delete prep.heads[url]; // context uses its live head; its last review is only a delta baseline
   progress('Preparing the PRs for the review session');
   const clones = new Map(); // a repo is cloned at most once, however many of its PRs are prepared
   const cloneOf = repo => { if (!clones.has(repo)) clones.set(repo, d.cloneFor(repo, cfg.workDir, (r, target) => progress(`Cloning ${r} into ${target}`))); return clones.get(repo); };
@@ -528,7 +529,7 @@ export async function prepareReview(cfg, appDir, run, { prior = null, progress =
   async function one(pr, role) {
     const p = { url: pr.url, repo: pr.repo, number: pr.number, role, author: pr.author || '', head: '', view: null, viewError: '', error: '', clone: '', worktree: '', mergeBase: '', diff: '', files: '', about: '', delta: null, conventions: [], replaced: '', facts: '' };
     try { p.view = await d.prView(pr); p.author ||= p.view.author; } catch (e) { p.viewError = e.message; }
-    const want = run.reviewedHeads?.[pr.url] || p.view?.head || '';
+    const want = prep.heads[pr.url] || p.view?.head || '';
     p.head = want;
     try {
       if (!want) throw new Error("its head commit couldn't be read");

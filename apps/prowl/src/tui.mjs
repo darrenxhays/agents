@@ -43,7 +43,7 @@ const HOVER = { row: bg(236), seg: `${ST.bold}${bg(238)}`, link: `\x1b[1;4;38;5;
 const SECTION = {
   Prowl: '\x1b[38;5;117m', 'Upkeep and display': '\x1b[38;5;117m',
   Boards: '\x1b[38;5;114m', 'Jira fields': '\x1b[38;5;114m', 'GitHub and projects': '\x1b[38;5;114m',
-  'Build tags': '\x1b[38;5;211m', 'Review tags': '\x1b[38;5;211m', 'Build labels': '\x1b[38;5;211m', 'Review labels': '\x1b[38;5;211m',
+  'Tags and labels': fg(211), Labels: fg(211), 'GitHub reviews': ACCENT.reviewer.fg, 'Models and efforts': fg(80), Caps: fg(215), Files: fg(117),
   'All sessions': '\x1b[38;5;80m', 'Quick reviews and builds': '\x1b[38;5;80m',
 };
 const sectionColor = s => (s.startsWith('Reviewer') ? ACCENT.reviewer.fg : s.startsWith('Builder') ? ACCENT.builder.fg : SECTION[s] || ST.grey);
@@ -315,6 +315,7 @@ export function startTui(app, actions, io = {}) {
   const latest = () => once('latest', () => {
     const [any, done] = [new Map(), new Map()];
     for (const r of finished()) {
+      if (r.status === 'skipped') continue;
       if (!any.has(r.ticket)) any.set(r.ticket, r);
       if (r.status === 'done' && !done.has(r.ticket)) done.set(r.ticket, r);
     }
@@ -537,7 +538,7 @@ export function startTui(app, actions, io = {}) {
       const n = app.boards().length;
       return [[], [[ST.grey, !isOn('reviewer') ? '  The Reviewer is off: e turns it on.'
         : n ? `  No reviews running. Watching ${plural(n, 'board')} for '${app.cfg.tags.trigger}'.`
-          : '  No boards configured yet: press 4 for Config, then a to add one.']]];
+          : app.cfg.githubReviews && app.cfg.githubOwner ? `  No reviews running. Watching ${app.cfg.githubOwner} for '${askLabel(app.cfg)}'.` : '  No boards configured yet: press 4 for Config, then a to add one.']]];
     }
     const at = selectRunning(runs);
     const rows = windowed(runs, at, Math.min(runs.length, Math.max(3, Math.floor(H / 3)))).map(({ item: r, i }) => {
@@ -548,7 +549,7 @@ export function startTui(app, actions, io = {}) {
         return onClick(spread([...left, ['', trunc(r.title, W - width(left) - width(right) - 1)]], right, W), pick(RUNNING, i));
       }
       const stopping = r.status === 'stopping';
-      const left = [cursor(i === at), [stopping ? ST.red : acc().fg, `${stopping ? '■' : spin()} `], [ST.bold, `${r.ticket}  `]];
+      const left = [cursor(i === at), [stopping ? ST.red : acc().fg, `${stopping ? '■' : spin()} `], [ST.bold, `${r.ticket}  `], ...(r.source === 'github' ? [[ST.cyan, 'GitHub review  ']] : [])];
       const right = [[ST.grey, r.status === 'preparing' ? `  ${plural(r.prs.length, 'PR')} · preparing${r.quick ? ' · quick' : ''} · ${dur(Date.now() - r.startedAt)} ` : `  ${plural(r.prs.length, 'PR')} · ${r.phase === 'checks' ? 'building and testing' : r.phase === 'publishing' ? 'posting its review' : r.reviewNo > 1 ? `re-review #${r.reviewNo}` : 'first review'} · ${dur(Date.now() - r.startedAt)} `]];
       const title = trunc(stopping ? `stopping… ${r.title}` : r.title, W - width(left) - width(right) - 1);
       return onClick(spread([...left, ['', title]], right, W), pick(RUNNING, i));
@@ -670,6 +671,7 @@ export function startTui(app, actions, io = {}) {
   }
 
   function verdict(r) {
+    if (r.status === 'skipped') return [ST.yellow, 'NOT REVIEWED'];
     if (r.status === 'failed') return [ST.red, 'FAILED'];
     if (r.status === 'stopped') return [ST.grey, 'STOPPED'];
     const v = String(r.summary?.verdict || 'NO VERDICT').toUpperCase();
@@ -704,10 +706,12 @@ export function startTui(app, actions, io = {}) {
     const flagged = waiting(r);
     const prs = prsOf(r);
     const rows = [];
+    if (r.source === 'github') rows.push([label('Source', lw), ['', 'GitHub review']]);
+    if (r.status === 'skipped') return [...rows, [label('PR', lw), [ST.link, prs[0].url, prs[0].url]], [label('Reason', lw), [ST.yellow, r.error]]];
     rows.push(r.status === 'done'
       ? [label('Report', lw), [ST.link, r.reportPath, pathToFileURL(r.reportPath).href]]
       : [label('Report', lw), [ST.grey, '(none)']]);
-    rows.push(r.quick ? [label('Ticket', lw), [ST.grey, '(none: a quick review)']] : [label('Ticket', lw), [ST.link, r.ticketUrl, r.ticketUrl]]);
+    rows.push(r.quick ? [label('Ticket', lw), [ST.grey, '(none: a quick review)']] : [label('Ticket', lw), r.ticketUrl ? [ST.link, r.ticketUrl, r.ticketUrl] : [ST.grey, r.githubTicket || '(none)']]);
     prs.slice(0, 4).forEach((p, i) => rows.push([label(i ? '' : 'PRs', lw), [ST.link, p.url, p.url],
       ...(flagged.includes(p.url) ? [[ST.yellow, isOwn(p, app.me) ? "  ⚑ needs a teammate's approval" : '  ⚑ needs your approval']] : []), [ST.grey, `  ${p.title}`]]));
     if (prs.length > 4) rows.push([label('', lw), [ST.grey, `+${prs.length - 4} more (o opens all)`]]);
@@ -718,6 +722,7 @@ export function startTui(app, actions, io = {}) {
     const also = (name, x) => (x && (x.model || x.effort) ? ` · ${name} ${[x.model, x.effort && `${x.effort} effort`].filter(Boolean).join(' · ')}` : '');
     const ranOn = modelEffort(r) ? ` · ${modelEffort(r)}${also('verifiers', r.verifiers)}${also('orchestrator', r.orchestrator)}` : '';
     rows.push([label('Status', lw), how, [ST.grey, ranOn], [ST.yellow, r.pendingTag != null ? '  · ticket tag update pending' : '']]);
+    for (const reason of reviewer.labelNotes?.(r) || []) rows.push([label('Labels', lw), [ST.yellow, reason]]);
     const split = breakdown([r]);
     if (split) rows.push([label('Models', lw), [ST.grey, split]]);
     return rows;
@@ -799,8 +804,8 @@ export function startTui(app, actions, io = {}) {
     }
   }
 
-  const kindOf = it => (ui.side === 'builder' ? 'build' : it.pr ? 'fix' : it.status === 'preparing' ? 'setup' : 'review');
-  const tabsOf = it => ({ build: ['Summary', 'PRs', 'Turns'], fix: ['Summary', ...(it.logPath ? ['Session'] : [])], setup: ['Summary'], review: ['Summary', 'PRs', 'Findings', 'Session'] }[kindOf(it)]);
+  const kindOf = it => (ui.side === 'builder' ? 'build' : it.pr ? 'fix' : it.status === 'skipped' ? 'skipped' : it.status === 'preparing' ? 'setup' : 'review');
+  const tabsOf = it => ({ build: ['Summary', 'PRs', 'Turns'], fix: ['Summary', ...(it.logPath ? ['Session'] : [])], setup: ['Summary'], skipped: ['Summary'], review: ['Summary', 'PRs', 'Findings', 'Session'] }[kindOf(it)]);
   const isLive = det => det.view === RUNNING;
   const parkOpts = it => ({ parkHumanOnly: it.parkHumanOnly });
   /** A review's result, or why there is none: { state: 'ok' | 'invalid' | 'missing' | 'none', result }. */
@@ -815,7 +820,7 @@ export function startTui(app, actions, io = {}) {
   }
 
   /** The reviews of a ticket, finished or running, oldest first. */
-  const chainOf = it => [...reviewer.state.runs.filter(r => !r.pr)].filter(r => r.ticket === it.ticket).sort((a, b) => a.startedAt - b.startedAt);
+  const chainOf = it => [...reviewer.state.runs.filter(r => !r.pr && r.status !== 'skipped')].filter(r => r.ticket === it.ticket).sort((a, b) => a.startedAt - b.startedAt);
   function chainStep(det, it, by) {
     const chain = chainOf(it);
     const to = chain[chain.findIndex(r => r.id === it.id) + by];
@@ -882,6 +887,7 @@ export function startTui(app, actions, io = {}) {
       it.prs.forEach((p, i) => doc.row(i ? '' : 'PRs', [[ST.link, p.url, p.url], [ST.grey, `  ${p.title || ''}`]]));
       doc.row('Status', [[ST.yellow, `${liveStatus(it).toLowerCase()} · for ${dur(Date.now() - it.startedAt)}`]]);
     } else for (const segs of details(it, 9)) doc.blocks.push({ key: doc.blocks.length, segs, hang: 11 });
+    if (kind === 'skipped') return doc.row('Skipped', [['', when(it.endedAt)]]);
     doc.blank().row('Started', [['', when(it.startedAt || it.createdAt)]]);
     if (!isLive(det) && it.endedAt) doc.row('Ended', [['', when(it.endedAt)]]);
     if (kind !== 'fix') {
@@ -953,6 +959,7 @@ export function startTui(app, actions, io = {}) {
   }
   const prTitle = (it, url) => [...(it.prs || []), ...(it.contextPrs || []), ...(it.leftOut || [])].find(p => p.url === url)?.title || '';
   const leftOutWhy = (it, entry) => {
+    if (it.relatedUrls?.includes(entry?.url)) return 'related PR, context only';
     const said = /^Not reviewed: (.*?)\.?$/.exec(String(entry?.coverage?.unverified || ''))?.[1];
     if (said) return said;
     if ((it.contextPrs || []).some(p => p.url === entry?.url)) return 'context only, unchanged since an earlier review cleared it';
@@ -1418,7 +1425,7 @@ export function startTui(app, actions, io = {}) {
         : [['C', 'critical', ST.red], ['H', 'high', ST.orange], ['M', 'medium', ST.yellow], ['L', 'low', ST.grey], ['N', 'nit', ST.grey]]
           .map(([l, k, style]) => [Number(s[k]) > 0 ? style : ST.dim, `${l}${s[k] ?? '?'} `]);
       const head = [
-        cursor(i === at), [ST.grey, `${stamp(r.endedAt)}  `], [ST.bold, r.ticket.padEnd(11)], [vs, vt.padEnd(18)], ...counts,
+        cursor(i === at), [ST.grey, `${stamp(r.endedAt)}  `], [ST.bold, r.ticket.padEnd(11)], [vs, vt.padEnd(18)], ...(r.source === 'github' ? [[ST.cyan, 'GitHub review  ']] : []), ...counts,
         [ST.grey, `${r.reviewNo > 1 || Number(s.fixed) > 0 ? `· fixed ${s.fixed ?? '?'} ` : ''}${r.reviewNo > 1 ? `· re-review #${r.reviewNo}` : ''}  `],
         ...(waiting(r).length ? [[ST.yellow, `⚑ ${plural(waiting(r).length, 'PR')} to approve  `]] : []),
         ...(reviewer.state.capped?.[r.ticket] && latest().any.get(r.ticket) === r ? [[ST.yellow, '⚑ round cap reached  ']] : []),
@@ -1438,13 +1445,17 @@ export function startTui(app, actions, io = {}) {
   function configRows() {
     const [one, add] = BOARD_HELP[app.cfg.taskBoard];
     let section = '';
+    let rule = '';
     return CONFIG_FIELDS.filter(f => !f.when || f.when(app.cfg)).flatMap(f => {
       f = JIRA(app.cfg) && f.jira ? { ...f, ...f.jira } : f;
       if (f.heading) { section = f.heading; return []; }
+      if (f.rule) { rule = f.rule; return []; }
+      const line = rule;
+      rule = '';
       return (f !== 'boards' ? [f] : [
         ...app.boards().map((b, i) => ({ board: i, label: `Board ${i + 1}`, help: `${one} enter edits · d deletes.` })),
         { addBoard: true, label: '+ Add board', help: add },
-      ]).map(r => ({ ...r, section }));
+      ]).map(r => ({ ...r, section, line, help: r.readonly ? `${r.help} Change it in the settings file.` : r.help }));
     });
   }
 
@@ -1635,6 +1646,7 @@ export function startTui(app, actions, io = {}) {
     if (ui.menu && menuAt < 0) ui.menu = null;
     const lines = fields.flatMap((f, i) => [
       ...(f.section !== fields[i - 1]?.section ? [...(i ? [{ gap: true }] : []), { top: f.section }] : []),
+      ...(f.line ? [{ line: f.line, f }] : []),
       { f, i },
       ...(i === menuAt ? ui.menu.options.map((opt, n) => ({ opt, n, f })) : []),
       ...(f.section !== fields[i + 1]?.section ? [{ bottom: f.section }] : []),
@@ -1642,8 +1654,13 @@ export function startTui(app, actions, io = {}) {
     const inner = W - 5; // between '  │ ' and '│'
     // The window is centred on the option under the cursor while a menu is open, else on the setting's row.
     const centre = ui.menu ? lines.findIndex(l => l.opt && l.n === ui.menu.at) : lines.findIndex(l => l.i === at);
-    for (const { item: { f, i, top, bottom, gap, opt, n } } of windowed(lines, centre, Math.max(1, H - 3 - helpH))) {
+    for (const { item: { f, i, top, bottom, gap, opt, n, line } } of windowed(lines, centre, Math.max(1, H - 3 - helpH))) {
       if (gap) { rows.push([]); continue; }
+      if (line) {
+        const name = trunc(line, Math.max(0, W - 10));
+        rows.push([[sectionColor(f.section), `  ├─ ${name} ${'─'.repeat(Math.max(0, W - name.length - 8))}┤`]]);
+        continue;
+      }
       if (opt) {
         // Under the value column; on a narrow terminal, as far left as still shows the longest option whole.
         const longest = Math.max(...ui.menu.options.map(o => o.label.length)) + 4; // its cursor and its tick
@@ -2147,7 +2164,7 @@ export function startTui(app, actions, io = {}) {
         return '';
       }, true);
     }
-    if (f.type === 'list') return openIt(CONFIG_PATH);
+    if (f.readonly || f.type === 'list') return openIt(CONFIG_PATH);
     if (f.type === 'bool') { setPath(app.cfg, f.key, !getPath(app.cfg, f.key)); return saved(); }
     if (f.type === 'enum') return openMenu(f);
     return typeValue(f);
@@ -2257,7 +2274,7 @@ export function startTui(app, actions, io = {}) {
     else if (k === 'x' && view() === HISTORY && r.pr) openIt(r.briefDir || r.pr.url);
     else if (k === 'x' && view() === HISTORY && r.status === 'done') openIt(r.reportPath);
     else if (k === 'v' && view() === HISTORY && !r.pr && r.prs?.length) { // not a row of the old fix feature
-      const n = r.prs.length + (r.contextPrs?.length || 0);
+      const n = r.prs.length + (r.contextPrs || []).filter(p => !r.relatedUrls?.includes(p.url)).length;
       ui.confirm = { text: `Review ${r.ticket} again? A quick review of the same ${plural(n, 'PR')} starts under ${r.ticket}; no tags change.`, yes: () => {
         flash(`Re-review of ${r.ticket}: looking up its PRs. The Log says how it goes.`);
         actions.reReview(r).catch(e => flash(`Couldn't start the review: ${e.message}`));

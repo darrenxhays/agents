@@ -6,8 +6,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { AGENT_MODELS, CHECKS_PATH, CONFIG_DIR, CONFIG_PATH, EFFORTS, MODEL_SHORT_NAMES, MODELS, modelValid } from './config.mjs';
-import { norm } from './match.mjs';
-import { fiveLabels, reviewTags, sameLabel } from './names.mjs';
 
 const isDir = p => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
 const https = v => /^https:\/\/\S+$/.test(v) || 'must be an https:// URL';
@@ -17,32 +15,14 @@ const opens = 'enter opens it. Updates never overwrite your edits.';
 const inFile = 'Edit them in the settings file: enter opens it.';
 const capped = "It fails with the cap named and isn't retried, so a runaway review isn't paid for twice.";
 
-const TAG_ROWS = { 'tags.trigger': 'Review trigger', 'tags.inProgress': 'Review in-progress', 'tags.approved': 'Review approved', 'tags.changes': 'Review changes', 'builder.tags.start': 'Build start', 'builder.tags.inProgress': 'Build in-progress' };
-/** A tag setting's check: no two tags of one side may read the same (letters and digits), except the two outcome tags. */
-const oneTag = key => (v, cfg) => {
-  const side = key.startsWith('builder.') ? { 'builder.tags.start': cfg.builder.tags.start, 'builder.tags.inProgress': cfg.builder.tags.inProgress }
-    : Object.fromEntries(Object.entries(reviewTags(cfg)).map(([role, name]) => [`tags.${role}`, name]));
-  const outcomes = ['tags.approved', 'tags.changes'];
-  const clash = Object.keys(side).find(k => k !== key && norm(side[k]) === norm(v) && !(outcomes.includes(k) && outcomes.includes(key)));
-  return clash ? `reads the same as the ${TAG_ROWS[clash]} ${JIRA(cfg) ? 'label' : 'tag'}` : true;
-};
 const sameAsLabel = 'The same name as the GitHub label, so a ticket and a PR read alike.';
 const jiraForm = 'Written without colons and with dashes for spaces (prowl-in-review).';
 
-const LABEL_ROWS = { ask: 'Review label', inReview: 'In review label', approved: 'Approved label', changes: 'Changes requested label', building: 'Building label' };
-/** A label setting's check: no two of Prowl's five labels may read the same (ignoring case and outer spaces). */
-const oneOfFive = role => (v, cfg) => {
-  const others = Object.entries(fiveLabels(cfg)).filter(([r]) => r !== role);
-  const clash = others.find(([, name]) => sameLabel(name, v || (role === 'ask' ? cfg.tags.trigger : '')));
-  return clash ? `reads the same as the ${LABEL_ROWS[clash[0]]}` : true;
-};
-
 export const CONFIG_FIELDS = [
   { heading: 'Prowl' },
-  { file: CONFIG_PATH, label: 'Settings file', help: `Every setting on this page, as JSON, each with a comment saying what it does. ${opens}` },
-  { switch: 'reviewer', label: 'Reviewer', help: 'Reviews the PRs of tickets tagged for review. enter turns it on or off, at once. Off: nothing new is claimed or started, and running reviews finish.' },
+  { switch: 'reviewer', label: 'Reviewer', help: 'Reviews labelled PRs and the PRs of tagged tickets. enter turns it on or off, at once. Off: nothing new is claimed or started, and running reviews finish.' },
   { switch: 'builder', label: 'Builder', help: 'Builds tickets tagged to start, opens their PRs and follows them through review. Its tab shows once it is on. enter turns it on or off, at once. Off: nothing new is claimed or started, and running sessions finish.' },
-  { key: 'pollSeconds', label: 'Poll interval (sec)', type: 'int', min: 30, max: 86400, help: 'How often the boards are checked. r polls the side in view now.' },
+  { key: 'pollSeconds', label: 'Poll interval (sec)', type: 'int', min: 30, max: 86400, help: 'How often GitHub and the boards are checked. r polls the side in view now.' },
   { key: 'dryRun', label: 'Dry run', type: 'bool', help: 'Log what would be reviewed or built, without changing tags or starting sessions.' },
 
   { heading: 'Upkeep and display' },
@@ -69,21 +49,28 @@ export const CONFIG_FIELDS = [
   { key: 'workDir', label: 'Projects directory', type: 'text', help: 'Sessions run here and load its CLAUDE.md, e.g. your projects root. Repos not cloned here are cloned before use; worktrees go in its .prowl-worktrees folder.', valid: v => isDir(v) || 'folder not found' },
 
   // In the order a ticket meets them: built, then reviewed. The Builder hands off by setting the review trigger tag.
-  { heading: 'Build tags', jira: { heading: 'Build labels' } },
-  { key: 'builder.tags.start', label: 'Build start tag', type: 'text', tag: true, valid: oneTag('builder.tags.start'), help: 'Tickets carrying this tag, or a near-miss spelling of it, get built by the Builder.',
+  { heading: 'Tags and labels', jira: { heading: 'Labels' } },
+  { rule: 'Build tags', jira: { rule: 'Build labels' } },
+  { key: 'builder.tags.start', label: 'Build start tag', type: 'text', tag: true, readonly: true, help: 'Tickets carrying this tag, or a near-miss spelling of it, get built by the Builder.',
     jira: { label: 'Build start label', help: `Issues carrying this label, or a near-miss spelling of it, get built by the Builder. ${jiraForm}` } },
-  { key: 'builder.tags.inProgress', label: 'Build in-progress tag', type: 'text', tag: true, valid: oneTag('builder.tags.inProgress'), help: `Set while the Builder builds a ticket or works on its feedback, and while it needs you. ${sameAsLabel}`,
+  { key: 'builder.tags.inProgress', label: 'Build in-progress tag', type: 'text', tag: true, readonly: true, help: `Set while the Builder builds a ticket or works on its feedback, and while it needs you. ${sameAsLabel}`,
     jira: { label: 'Build in-progress label', help: `Set while the Builder builds a ticket or works on its feedback, and while it needs you. ${sameAsLabel} ${jiraForm}` } },
 
-  { heading: 'Review tags', jira: { heading: 'Review labels' } },
-  { key: 'tags.trigger', label: 'Review trigger tag', type: 'text', tag: true, valid: oneTag('tags.trigger'), help: `Tickets carrying this tag, or a near-miss spelling of it, get reviewed. The Builder sets it once its PRs are open, and after each feedback round. ${sameAsLabel}`,
+  { rule: 'Review tags', jira: { rule: 'Review labels' } },
+  { key: 'tags.trigger', label: 'Review trigger tag', type: 'text', tag: true, readonly: true, help: `Tickets carrying this tag, or a near-miss spelling of it, get reviewed. The Builder sets it once its PRs are open, and after each feedback round. ${sameAsLabel}`,
     jira: { label: 'Review trigger label', help: `Issues carrying this label, or a near-miss spelling of it, get reviewed. The Builder sets it once its PRs are open, and after each feedback round. ${sameAsLabel} ${jiraForm}` } },
-  { key: 'tags.inProgress', label: 'Review in-progress tag', type: 'text', tag: true, valid: oneTag('tags.inProgress'), help: `Set when a review starts. While a ticket carries it or the trigger tag, the Builder starts no feedback round. ${sameAsLabel} Colour it yellow in board settings > Cards > Tag colors.`,
+  { key: 'tags.inProgress', label: 'Review in-progress tag', type: 'text', tag: true, readonly: true, help: `Set when a review starts. While a ticket carries it or the trigger tag, the Builder starts no feedback round. ${sameAsLabel} Colour it yellow in board settings > Cards > Tag colors.`,
     jira: { label: 'Review in-progress label', help: `Set when a review starts. While an issue carries it or the trigger label, the Builder starts no feedback round. ${sameAsLabel} ${jiraForm}` } },
-  { key: 'tags.approved', label: 'Review approved tag', type: 'text', tag: true, valid: oneTag('tags.approved'), help: `Set when a review finishes with every PR approved. Re-add the trigger tag to ask for a re-review. ${sameAsLabel}`,
+  { key: 'tags.approved', label: 'Review approved tag', type: 'text', tag: true, readonly: true, help: `Set when a review finishes with every PR approved. Re-add the trigger tag to ask for a re-review. ${sameAsLabel}`,
     jira: { label: 'Review approved label', help: `Set when a review finishes with every PR approved. Written as prowl-approved. Re-add the trigger label to ask for a re-review. ${sameAsLabel}` } },
-  { key: 'tags.changes', label: 'Review changes tag', type: 'text', tag: true, valid: oneTag('tags.changes'), help: `Set when a review finishes with at least one PR not approved. The Builder then works through the feedback; re-add the trigger tag to ask for a re-review. ${sameAsLabel}`,
+  { key: 'tags.changes', label: 'Review changes tag', type: 'text', tag: true, readonly: true, help: `Set when a review finishes with at least one PR not approved. The Builder then works through the feedback; re-add the trigger tag to ask for a re-review. ${sameAsLabel}`,
     jira: { label: 'Review changes label', help: `Set when a review finishes with at least one PR not approved. The Builder then works through the feedback; re-add the trigger label to ask for a re-review. Written as prowl-changes-requested. ${sameAsLabel}` } },
+  { rule: 'GitHub labels' },
+  { key: 'reviewLabel', label: 'Review label', type: 'text', empty: true, emptyShows: "(the Review trigger tag's name)", readonly: true, help: "The GitHub label that asks for a review of a PR. The Reviewer polls for it when GitHub reviews is on. A waiting quick review uses it for its next round, and a quick build without a ticket puts it on its PRs when it hands them on. Matched exactly, ignoring case. Empty: the Review trigger tag's name." },
+  { key: 'labels.inReview', label: 'In review label', type: 'text', readonly: true, help: 'Set on each PR while a review of it runs.' },
+  { key: 'labels.approved', label: 'Approved label', type: 'text', readonly: true, help: 'Set on a PR when its review ends with nothing blocking it.' },
+  { key: 'labels.changes', label: 'Changes requested label', type: 'text', readonly: true, help: 'Set on a PR when its review ends with a finding that blocks it.' },
+  { key: 'labels.building', label: 'Building label', type: 'text', readonly: true, help: 'Set on the PRs of a quick build without a ticket while the Builder works on them.' },
   { key: 'tagMatchMaxTypos', label: 'Tag typo tolerance', type: 'int', min: 0, max: 3, help: 'Typos (wrong, missing, extra or swapped letters) still treated as the review trigger or build start tag. Case, spaces and punctuation are always ignored. 0 = exact.',
     jira: { label: 'Label typo tolerance', help: 'Typos (wrong, missing, extra or swapped letters) still treated as the review trigger or build start label. Case, spaces and punctuation are always ignored. 0 = exact.' } },
 
@@ -92,67 +79,75 @@ export const CONFIG_FIELDS = [
   { key: 'allowMemoryWrites', label: 'Use memory', type: 'bool', help: "on: sessions use Claude Code's auto-memory like any session, and can add what they did to your memory files. off: they run with auto-memory off, so they neither read nor write it." },
   { key: 'caffeinate', label: 'Keep Mac awake', type: 'bool', when: () => process.platform === 'darwin', help: "on: the Mac doesn't idle-sleep while a session runs (caffeinate), since sleep stalls it and stretches it out. Closing the lid still sleeps it." },
 
+  { heading: 'GitHub reviews' },
+  { key: 'githubReviews', label: 'GitHub reviews', type: 'bool', help: 'Poll GitHub for open PRs carrying the Review label, even with no boards configured. Board reviews also label their PRs through the review.' },
+
   { heading: 'Quick reviews and builds' },
   { key: 'quickLabels', label: 'Quick reviews: GitHub labels', type: 'bool', help: "on: a quick review (n) labels its PRs 'prowl: in review', then 'prowl: approved' or 'prowl: changes requested', and waits: it re-reviews once every PR it didn't approve is labelled 'prowl: review' (with all approved, once one is labelled so and has new commits). Running shows the waits; s stops one. off: no labels, and a quick review runs once." },
-  { key: 'reviewLabel', label: 'Review label', type: 'text', empty: true, emptyShows: "(the Review trigger tag's name)", valid: oneOfFive('ask'), help: "The GitHub label that asks for a review of a PR. A waiting quick review re-reviews once its PRs carry it, and a quick build without a ticket puts it on its PRs when it hands them on. Matched exactly, ignoring case. Empty: the Review trigger tag's name." },
-  { key: 'labels.inReview', label: 'In review label', type: 'text', valid: oneOfFive('inReview'), help: 'Set on each PR while a quick review of it runs.' },
-  { key: 'labels.approved', label: 'Approved label', type: 'text', valid: oneOfFive('approved'), help: 'Set on a PR when its quick review ends with nothing blocking it.' },
-  { key: 'labels.changes', label: 'Changes requested label', type: 'text', valid: oneOfFive('changes'), help: 'Set on a PR when its quick review ends with a finding that blocks it.' },
-  { key: 'labels.building', label: 'Building label', type: 'text', valid: oneOfFive('building'), help: 'Set on the PRs of a quick build without a ticket while the Builder works on them.' },
   { key: 'quickName', label: 'Quick names', type: 'enum', values: ['auto', 'ask', 'number'], help: 'How a quick review or quick build without exactly one ticket is named. auto: a short model call names it from the paste. ask: you type the name after the paste. number: QUICK#n only. One ticket: always the ticket. enter lists them.' },
   { key: 'builder.quickBranchTemplate', label: 'Quick build branch names', type: 'text', help: 'For a quick build without a ticket: {slug} is its name. A clash adds -2, -3, …' },
 
-  { heading: 'Reviewer · Files' },
-  { file: path.join(CONFIG_DIR, 'review.md'), label: 'Review rules', help: `Reviewer stance, what reviewers look for, severity definitions, and the verdict each severity gives. Applies from the next review. ${opens}` },
-  { file: path.join(CONFIG_DIR, 'output.md'), label: 'Output templates', help: `How everything posted on GitHub looks: review-started comment, banner, review body, details file, comments, replies (the Builder's too), approvals-off comment. ${opens}` },
-
-  { heading: 'Reviewer · Sessions' },
-  { key: 'maxConcurrentReviews', label: 'Max parallel reviews', type: 'int', min: 1, max: 10, help: "Extra tickets stay tagged until a slot frees, so a teammate's poller can take them." },
+  { heading: 'Models and efforts' },
+  { rule: 'Review sessions' },
   { key: 'claude.model', label: 'Reviewer model', type: 'enum', values: [...MODELS, ...Object.keys(MODEL_SHORT_NAMES)], names: MODEL_SHORT_NAMES, other: true, valid: modelValid,
     help: "Model for review sessions, and for build sessions while the Builder's Model is empty. enter lists them: each current model's full ID, then the names Claude Code takes for the latest of each. Other… takes a name the list doesn't have, typed." },
   { key: 'claude.effort', label: 'Reviewer effort', type: 'enum', values: EFFORTS, help: 'Reasoning effort for review sessions. enter lists them.' },
   { key: 'claude.orchestratorModel', label: 'Orchestrator model', type: 'enum', values: ['', ...MODELS], empty: true, emptyShows: 'same as Reviewer model', help: "Model for the review session itself, which orchestrates: it reads the PRs, writes the brief and each PR's spec, routes findings to verifiers and writes the report. It runs many turns, so it is a large part of a review's cost. Same as Reviewer model: the session and its reviewers run on Reviewer model. Set to another, the session runs on it and each reviewer is launched on Reviewer model by its short name, so Reviewer model must then be sonnet, opus, haiku or fable, or one of the full IDs this list offers; with any other (an older ID, one with a suffix, another provider's name) the Log warns and the session stays on Reviewer model. What the session does itself moves with it: mapping a large batch, and checking a Low or Nit finding whose defect is plain from its quote. Verifier settings left on Claude Code default follow Reviewer model and effort. enter lists them; another model id can go in the settings file." },
   { key: 'claude.orchestratorEffort', label: 'Orchestrator effort', type: 'enum', values: ['', ...EFFORTS], empty: true, emptyShows: 'same as Reviewer effort', help: 'Reasoning effort for the review session itself (see Orchestrator model). Same as Reviewer effort: nothing changes. Set to another, each reviewer is launched at Reviewer effort. enter lists them.' },
+  { rule: 'Verifiers' },
   { key: 'claude.verifierModel', label: 'Verifier model', type: 'enum', values: [...AGENT_MODELS, ''], empty: true, emptyShows: 'Claude Code default', help: "Model for the subagents that check each finding before it's posted. Claude Code default: no model is set for them, so they run on the review session's model unless your Claude Code settings name a default subagent model. A finding no reviewer investigated is always checked by a verifier launched as reviewers are. enter lists them." },
   { key: 'claude.verifierEffort', label: 'Verifier effort', type: 'enum', values: [...EFFORTS, ''], empty: true, emptyShows: 'Claude Code default', help: "Reasoning effort for the verifier subagents. Claude Code default: none is set for them, and they run at Claude Code's usual effort for subagents. enter lists them." },
-  { key: 'ticketContext', label: 'Ticket text in reviews', type: 'bool', help: "on: the ticket's description (and, on Azure DevOps, its acceptance criteria) is added to the review's brief, so reviewers know the goal without signing in to the tracker. Up to about 6 KB." },
-  { key: 'reviewPrep', label: 'Prepare PRs before reviews', type: 'bool', help: "on: before a review's session starts, Prowl fetches each PR's head, checks it out in a worktree outside the Projects Directory (your clones' checkouts are never touched) and writes its diff, facts and comments to files, so reviewers read real code from disk. The worktrees are removed when the review ends. off: the session fetches everything itself." },
-  { key: 'reviewChecks', label: 'Build and test before reviews', type: 'bool', help: 'on: before a review, Prowl runs checks.json\'s steps for each PR (its review block, or its run commands) in a worktree of the repo, reruns a failed step at the merge base, and gives the review the results. A repo checks.json doesn\'t match, or marks "review": false, isn\'t built.' },
-
-  { heading: 'Reviewer · Caps' },
-  { key: 'claude.maxBudgetUsd', label: 'Spend cap per review ($)', type: 'int', min: 0, max: 100000, help: `Stops a review once it has spent this much. ${capped} 0 = no cap.` },
-  { key: 'claude.maxTurns', label: 'Turn cap per review', type: 'int', min: 0, max: 100000, help: `Stops a review after this many turns. ${capped} 0 = no cap.` },
-  { key: 'reviewTimeoutMinutes', label: 'Time cap per review (min)', type: 'int', min: 0, max: 10080, help: `Stops a review that runs longer than this, counted from when its session starts (Prowl's own setup isn't counted). ${capped} 0 = no cap.` },
-
-  { heading: 'Reviewer · Verdicts and rounds' },
-  { key: 'reviewOwnPrs', label: 'Review my own PRs', type: 'bool', help: "off: a ticket with any PR you authored is left for a teammate. on: it is reviewed like any other; GitHub won't let you approve or request changes on your own PR, so those get a comment review with the verdict." },
-  { key: 'approvals', label: 'Approve PRs', type: 'bool', help: 'on: a PR with no blocking findings gets a GitHub approval. off: Prowl comments that it found no blocking issues, and a human approves (text in Output templates); History flags those PRs with ⚑ until someone approves them.' },
-  { key: 'maxReviewRounds', label: 'Max review rounds', type: 'int', min: 0, max: 100, help: 'Reviews per ticket. Once a ticket has had this many, Prowl leaves it tagged and unclaimed for a person, and History flags it with ⚑ round cap reached. A PR no review has covered yet is still reviewed. 0 = no cap.' },
-  { key: 'reReviewScope', label: 'Re-review scope', type: 'enum', values: ['full', 'delta'], help: "full: a re-review reads each PR whole, with the whole last report. delta: only the commits since the last review, plus its still-open findings; the rest of the PR is context. enter lists them." },
-  { key: 'smallReReviewLines', label: 'Small re-review (lines)', type: 'int', min: 0, max: 100000, help: "Delta re-reviews only. A PR whose commits since the last review change at most this many lines (added plus deleted, in the PR's own files) gets its reviewer on Small re-review model; a larger one, or one force-pushed since, gets Model as usual. Decided per PR. 0 = off." },
+  { rule: 'Small re-reviews' },
   { key: 'smallReReviewModel', label: 'Small re-review model', type: 'enum', values: AGENT_MODELS, help: 'Model for the reviewer of a small delta re-review (Small re-review lines). Pick one smaller than Model, or there is nothing to save. Its effort is Small re-review effort. enter lists them.' },
   { key: 'smallReReviewEffort', label: 'Small re-review effort', type: 'enum', values: [...EFFORTS, ''], empty: true, emptyShows: 'Same as the reviewers', help: "Reasoning effort for the reviewer of a small delta re-review. Same as the reviewers: it runs at the effort every other reviewer does. A small fix still has to be checked for new problems, so don't set it lower than you'd trust. enter lists them." },
-  { key: 'parkHumanOnly', label: 'Park human-only findings', type: 'bool', help: "on: an earlier finding that only a person can settle outside the code (a CI pipeline, tracker or permissions config, a product decision) is parked: it gets no further reply, is listed under Parked in the details file, and doesn't count toward the verdict. off: it counts, and holds the verdict, until it is fixed. A thread a person answered (declined it, accepted the risk, deferred it to a ticket) is parked either way, and stays parked until the code is fixed or someone disputes the answer." },
-
-  { heading: 'Builder · Files' },
-  { file: path.join(CONFIG_DIR, 'build.md'), label: 'Build rules', help: `How build sessions investigate, plan, build and work through review feedback. Your projects' CLAUDE.md files win over it. ${opens}` },
-  { file: CHECKS_PATH, label: 'Checks', help: 'Commands Prowl runs in a worktree, per repo: the Builder before it pushes, and the Reviewer before a review (Build and test before reviews). The file has commented examples to copy. Nothing matches: no checks. Never overwritten once edited. enter opens it.' },
-
-  { heading: 'Builder · Sessions' },
-  { key: 'builder.assignedToMe', label: 'Only my tickets', type: 'bool', help: 'on: only tickets assigned to you are built. off: any ticket with the build start tag on your boards.' },
-  { key: 'builder.maxConcurrent', label: 'Max parallel builds', type: 'int', min: 1, max: 10, help: 'Tickets built at once, counted from the claim until their PRs open, Needs you included. Feedback rounds are not counted.' },
-  { key: 'builder.approvePlans', label: 'Approve plans', type: 'enum', values: ['auto', 'ask'], help: 'auto: Prowl approves a plan with no open questions; each open question goes to Needs you. ask: every plan waits in Needs you (enter with nothing typed approves it).' },
+  { rule: 'Builder' },
   { key: 'builder.model', label: 'Model', type: 'enum', values: ['', ...MODELS, ...Object.keys(MODEL_SHORT_NAMES)], names: { '': "(the Reviewer's Model)", ...MODEL_SHORT_NAMES }, empty: true, emptyShows: "(the Reviewer's Model)", other: true, valid: v => v === '' || modelValid(v),
     help: "Model for build sessions. enter lists them: the Reviewer's Model, each current model's full ID, then the names for the latest of each. Other… takes a name the list doesn't have, typed." },
   { key: 'builder.effort', label: 'Effort', type: 'enum', values: EFFORTS, help: 'Reasoning effort for build sessions. enter lists them.' },
-  { key: 'builder.mcpAllow', label: 'MCP tools allowed', type: 'list', help: `MCP tools a build session may use, by name or with * patterns. None by default: sessions start with no MCP servers. ${inFile}` },
 
-  { heading: 'Builder · Caps' },
+  { heading: 'Caps' },
+  { rule: 'Reviewer' },
+  { key: 'claude.maxBudgetUsd', label: 'Spend cap per review ($)', type: 'int', min: 0, max: 100000, help: `Stops a review once it has spent this much. ${capped} 0 = no cap.` },
+  { key: 'claude.maxTurns', label: 'Turn cap per review', type: 'int', min: 0, max: 100000, help: `Stops a review after this many turns. ${capped} 0 = no cap.` },
+  { key: 'reviewTimeoutMinutes', label: 'Time cap per review (min)', type: 'int', min: 0, max: 10080, help: `Stops a review that runs longer than this, counted from when its session starts (Prowl's own setup isn't counted). ${capped} 0 = no cap.` },
+  { key: 'maxReviewRounds', label: 'Max review rounds', type: 'int', min: 0, max: 100, help: 'Reviews per ticket. Once a ticket has had this many, Prowl leaves it tagged and unclaimed for a person, and History flags it with ⚑ round cap reached. A PR no review has covered yet is still reviewed. 0 = no cap.' },
+  { key: 'maxConcurrentReviews', label: 'Max parallel reviews', type: 'int', min: 1, max: 10, help: "Extra tickets stay tagged until a slot frees, so a teammate's poller can take them." },
+  { rule: 'Builder' },
   { key: 'builder.maxBudgetUsd', label: 'Spend cap per session ($)', type: 'int', min: 0, max: 100000, help: "Stops a session once all its turns have spent this much. It goes to Needs you and isn't retried. 0 = no cap." },
   { key: 'builder.ticketBudgetUsd', label: 'Spend cap per ticket ($)', type: 'int', min: 0, max: 100000, help: 'Every build session on one ticket, builds and rounds. At the cap the ticket goes to Needs you. 0 = no cap.' },
   { key: 'builder.dailyBudgetUsd', label: 'Spend cap per day ($)', type: 'int', min: 0, max: 100000, help: 'Build sessions since midnight. At the cap a ticket due a turn goes to Needs you. 0 = no cap.' },
   { key: 'builder.maxTurns', label: 'Turn cap per session turn', type: 'int', min: 0, max: 100000, help: 'Stops a session turn (the build, or one feedback round) after this many model turns (--max-turns). It goes to Needs you. 0 = no cap.' },
   { key: 'builder.timeoutMinutes', label: 'Time cap per session turn (min)', type: 'int', min: 0, max: 10080, help: 'Stops a session turn (the build, or one feedback round) that runs longer than this. It goes to Needs you. 0 = no cap.' },
+  { key: 'builder.maxRounds', label: 'Max feedback rounds', type: 'int', min: 1, max: 20, help: 'Feedback rounds per ticket. Then it goes to Needs you.' },
+  { key: 'builder.maxConcurrent', label: 'Max parallel builds', type: 'int', min: 1, max: 10, help: 'Tickets built at once, counted from the claim until their PRs open, Needs you included. Feedback rounds are not counted.' },
+  { key: 'builder.maxChangedLines', label: 'Max lines per push', type: 'int', min: 1, max: 1000000, help: 'A push that changes more lines than this goes to Needs you.' },
+
+  { heading: 'Files' },
+  { rule: 'Settings file' },
+  { file: CONFIG_PATH, label: 'Settings file', help: `Every setting on this page, as JSON, each with a comment saying what it does. ${opens}` },
+  { rule: 'Reviewer' },
+  { file: path.join(CONFIG_DIR, 'review.md'), label: 'Review rules', help: `Reviewer stance, what reviewers look for, severity definitions, and the verdict each severity gives. Applies from the next review. ${opens}` },
+  { file: path.join(CONFIG_DIR, 'output.md'), label: 'Output templates', help: `How everything posted on GitHub looks: review-started comment, banner, review body, details file, comments, replies (the Builder's too), approvals-off comment. ${opens}` },
+  { rule: 'Builder' },
+  { file: path.join(CONFIG_DIR, 'build.md'), label: 'Build rules', help: `How build sessions investigate, plan, build and work through review feedback. Your projects' CLAUDE.md files win over it. ${opens}` },
+  { file: CHECKS_PATH, label: 'Checks', help: 'Commands Prowl runs in a worktree, per repo: the Builder before it pushes, and the Reviewer before a review (Build and test before reviews). The file has commented examples to copy. Nothing matches: no checks. Never overwritten once edited. enter opens it.' },
+
+  { heading: 'Reviewer · Sessions' },
+  { key: 'ticketContext', label: 'Ticket text in reviews', type: 'bool', help: "on: the ticket's description (and, on Azure DevOps, its acceptance criteria) is added to the review's brief, so reviewers know the goal without signing in to the tracker. Up to about 6 KB." },
+  { key: 'reviewPrep', label: 'Prepare PRs before reviews', type: 'bool', help: "on: before a review's session starts, Prowl fetches each PR's head, checks it out in a worktree outside the Projects Directory (your clones' checkouts are never touched) and writes its diff, facts and comments to files, so reviewers read real code from disk. The worktrees are removed when the review ends. off: the session fetches everything itself." },
+  { key: 'reviewChecks', label: 'Build and test before reviews', type: 'bool', help: 'on: before a review, Prowl runs checks.json\'s steps for each PR (its review block, or its run commands) in a worktree of the repo, reruns a failed step at the merge base, and gives the review the results. A repo checks.json doesn\'t match, or marks "review": false, isn\'t built.' },
+
+  { heading: 'Reviewer · Verdicts and rounds' },
+  { key: 'reviewOwnPrs', label: 'Review my own PRs', type: 'bool', help: "off: a ticket with any PR you authored is left for a teammate. on: it is reviewed like any other; GitHub won't let you approve or request changes on your own PR, so those get a comment review with the verdict." },
+  { key: 'approvals', label: 'Approve PRs', type: 'bool', help: 'on: a PR with no blocking findings gets a GitHub approval. off: Prowl comments that it found no blocking issues, and a human approves (text in Output templates); History flags those PRs with ⚑ until someone approves them.' },
+  { key: 'reReviewScope', label: 'Re-review scope', type: 'enum', values: ['full', 'delta'], help: "full: a re-review reads each PR whole, with the whole last report. delta: only the commits since the last review, plus its still-open findings; the rest of the PR is context. enter lists them." },
+  { key: 'smallReReviewLines', label: 'Small re-review (lines)', type: 'int', min: 0, max: 100000, help: "Delta re-reviews only. A PR whose commits since the last review change at most this many lines (added plus deleted, in the PR's own files) gets its reviewer on Small re-review model; a larger one, or one force-pushed since, gets Model as usual. Decided per PR. 0 = off." },
+  { key: 'parkHumanOnly', label: 'Park human-only findings', type: 'bool', help: "on: an earlier finding that only a person can settle outside the code (a CI pipeline, tracker or permissions config, a product decision) is parked: it gets no further reply, is listed under Parked in the details file, and doesn't count toward the verdict. off: it counts, and holds the verdict, until it is fixed. A thread a person answered (declined it, accepted the risk, deferred it to a ticket) is parked either way, and stays parked until the code is fixed or someone disputes the answer." },
+
+  { heading: 'Builder · Sessions' },
+  { key: 'builder.assignedToMe', label: 'Only my tickets', type: 'bool', help: 'on: only tickets assigned to you are built. off: any ticket with the build start tag on your boards.' },
+  { key: 'builder.approvePlans', label: 'Approve plans', type: 'enum', values: ['auto', 'ask'], help: 'auto: Prowl approves a plan with no open questions; each open question goes to Needs you. ask: every plan waits in Needs you (enter with nothing typed approves it).' },
+  { key: 'builder.mcpAllow', label: 'MCP tools allowed', type: 'list', help: `MCP tools a build session may use, by name or with * patterns. None by default: sessions start with no MCP servers. ${inFile}` },
 
   { heading: 'Builder · Repos' },
   { key: 'builder.extraOwners', label: 'Other GitHub owners', type: 'list', help: `GitHub owners besides the GitHub org whose repos a session may ask for. ${inFile}` },
@@ -165,9 +160,8 @@ export const CONFIG_FIELDS = [
 
   { heading: 'Builder · Pushes and PRs' },
   { key: 'builder.protectedPaths', label: 'Protected paths', type: 'list', help: `Globs, e.g. .github/workflows/**. A push that changes one goes to Needs you. ${inFile}` },
-  { key: 'builder.maxChangedLines', label: 'Max lines per push', type: 'int', min: 1, max: 1000000, help: 'A push that changes more lines than this goes to Needs you.' },
   { key: 'builder.draftPrs', label: 'Open PRs as drafts', type: 'bool', help: 'on: PRs open as drafts, which the Reviewer leaves alone until you mark them ready. off: ready for review.' },
-  { key: 'builder.requestReview', label: 'Tag for review when done', type: 'bool', help: "on: once the PRs open, and after each feedback round, the Build in-progress tag is swapped for the Review trigger tag, so the Reviewer reviews them. off: the in-progress tag just comes off, and asking for a review is up to you." },
+  { key: 'builder.requestReview', label: 'Tag for review when done', type: 'bool', help: "When PRs open and after each feedback round, tag the ticket for review. A ticketless build puts the Review label on its PRs when quickLabels is on. Turning this off only clears the build marker." },
 
   { heading: 'Builder · Pick-up' },
   { key: 'builder.pickup.drafts', label: 'Pick up drafts', type: 'bool', help: "on: when the Builder claims a ticket, your draft PRs for it count as work started: continued, and given fix rounds. off: drafts are left alone, as they are by the Reviewer." },
@@ -178,7 +172,6 @@ export const CONFIG_FIELDS = [
   { heading: 'Builder · Follow-up' },
   { key: 'builder.followUp', label: 'Follow PRs', type: 'bool', help: 'on: after the PRs open, Prowl works through review feedback in rounds and flags READY TO MERGE. Merging stays with you.' },
   { key: 'builder.fixFrom', label: 'Fix comments from', type: 'enum', values: ['prowl', 'prowl+bots', 'everyone'], help: "Whose unresolved threads a round takes on: Prowl's own, Prowl's plus bots', or everyone's. Reviews requesting changes always count." },
-  { key: 'builder.maxRounds', label: 'Max feedback rounds', type: 'int', min: 1, max: 20, help: 'Feedback rounds per ticket. Then it goes to Needs you.' },
   { key: 'builder.waitForChecksMinutes', label: 'Wait for CI (min)', type: 'int', min: 0, max: 1440, help: "After a round's push, how long to wait for the required checks before marking the ticket done. A failing check gets one more turn. 0 = don't wait." },
   { key: 'builder.notify', label: 'Notifications', type: 'bool', help: 'on: a notification when PRs open, a ticket is ready to merge, or one needs you, sent as Notify via says.' },
 ];

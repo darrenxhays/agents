@@ -193,13 +193,14 @@ export function priorFindings(prior, result, urls) {
 }
 
 /** A review's run, with its prompt written to its prompt file: everything but the session, which launchReview() starts. */
-export function createReview(cfg, { tracker, ticket, prs, approvedPrs = [], leftOut = [], prior, me = '', heads = {}, ticketText = '', quick = false, checking = false, prepping = false, appDir = '' }) {
+export function createReview(cfg, { tracker, ticket, prs, approvedPrs = [], relatedPrs = [], source, leftOut = [], prior, me = '', heads = {}, ticketText = '', quick = false, checking = false, prepping = false, appDir = '' }) {
   const reviewNo = (prior?.reviewNo || 0) + 1;
   const id = runId(ticket.key, reviewNo);
   for (const dir of [REPORTS_DIR, LOGS_DIR, CONFIG_DIR]) fs.mkdirSync(dir, { recursive: true });
   const run = {
     id, tracker, ticket: ticket.key, ticketUrl: ticket.url, ref: ticket.ref, title: ticket.title, prs, reviewNo, priorId: prior?.id || null,
-    me, startedAt: Date.now(), status: 'running', pid: null, pendingTag: null, reviewedPrs: [], contextPrs: approvedPrs, leftOut,
+    me, startedAt: Date.now(), status: 'running', pid: null, pendingTag: null, reviewedPrs: [], contextPrs: [...approvedPrs, ...relatedPrs], leftOut,
+    ...(source && { source }), ...(relatedPrs.length && { relatedUrls: relatedPrs.map(p => p.url) }),
     ...(quick && { quick: true }), // asked for in Prowl (n, prowl --review): no tags to set
     ...(checking && { phase: 'checks' }), // Build and test before reviews: its PRs are built first, then launchReview() starts its session
     // Ends the body of each review the session posts, so finish() can tell its reviews from thread replies.
@@ -208,19 +209,17 @@ export function createReview(cfg, { tracker, ticket, prs, approvedPrs = [], left
     approved: Object.fromEntries([...approvedPrs, ...leftOut].filter(p => prior?.approved?.[p.url]).map(p => [p.url, prior.approved[p.url]])),
     // The approved PRs that only got Prowl's stamp (Approve PRs off, or your own PR) and still need a human's approval.
     approvals: cfg.approvals, awaitingHuman: [...approvedPrs, ...leftOut].map(p => p.url).filter(u => awaitingHuman(prior, cfg.approvals).includes(u)),
-    // PR URL -> its head commit as this review starts, for a delta re-review to start from. The context PRs are
-    // unchanged since they were last reviewed, so their head is their last reviewed commit too. A left-out PR keeps
-    // the commit it was last reviewed at.
+    // Delta re-reviews start at each PR's last reviewed head, including PRs read only for context this round.
     reviewedHeads: Object.fromEntries([
       ...[...prs, ...approvedPrs].filter(p => heads[p.url]).map(p => [p.url, heads[p.url]]),
-      ...leftOut.filter(p => prior?.reviewedHeads?.[p.url]).map(p => [p.url, prior.reviewedHeads[p.url]]),
+      ...[...relatedPrs, ...leftOut].filter(p => prior?.reviewedHeads?.[p.url]).map(p => [p.url, prior.reviewedHeads[p.url]]),
     ]),
     reportPath: path.join(REPORTS_DIR, `${id}.md`),
     logPath: path.join(LOGS_DIR, `${id}.ndjson`),
     promptPath: path.join(LOGS_DIR, `${id}.prompt.md`),
     // Result mode: the session writes a review result here and nothing to GitHub; Prowl checks it and posts everything itself.
     resultMode: 1, batchId: newBatchId(ticket.key, reviewNo), resultPath: path.join(REPORTS_DIR, `${id}.result.json`),
-    resultPrs: [...prs, ...approvedPrs, ...leftOut].map(p => p.url),
+    resultPrs: [...prs, ...approvedPrs, ...relatedPrs, ...leftOut].map(p => p.url),
     parkHumanOnly: Boolean(cfg.parkHumanOnly), // read as the review starts, like approvals: a change mid-review doesn't change this review
     // The verifier subagents' model and effort, as the prompt passes them ('' = Claude Code's default for subagents).
     verifiers: agentChoice(cfg.claude.verifierModel, cfg.claude.verifierEffort),
@@ -245,7 +244,7 @@ export function createReview(cfg, { tracker, ticket, prs, approvedPrs = [], left
   let handover = null;
   if (prepping && run.priorGiven.length) {
     try {
-      const why = Object.fromEntries([...approvedPrs.map(p => [p.url, 'context only, unchanged since an earlier review cleared it']), ...leftOut.map(p => [p.url, p.draft ? 'a draft now' : "context only (past Prowl's round cap)"])]);
+      const why = Object.fromEntries([...approvedPrs.map(p => [p.url, 'context only, unchanged since an earlier review cleared it']), ...relatedPrs.map(p => [p.url, 'related PR, context only']), ...leftOut.map(p => [p.url, p.draft ? 'a draft now' : "context only (past Prowl's round cap)"])]);
       handover = writeHandover(run, run.priorGiven, { leftOut: why });
       run.handover = { all: handover.all, byPr: handover.byPr };
       run.skeletonPath = handover.skeleton;
@@ -475,14 +474,18 @@ export function finalize(run) {
  * it, and for a re-review the previous findings. It describes findings and facts: it never names an action on GitHub.
  */
 export function buildPrompt({ ticket, title: rawTitle, ticketUrl, prs, contextPrs = [], leftOut = [], reviewNo, prior, priorReport = '', priorFindings: given = null, priorUnverified = {}, reReviewScope = 'full', heads = {},
-  ticketText = '', quick = false, batchId = '', resultPath = '', checker = '', verifierModel = '', verifierEffort = '', smallReReview = null, reviewers = null, checking = false, prepping = false, handover = null }) {
+  ticketText = '', quick = false, source, relatedUrls = [], batchId = '', resultPath = '', checker = '', verifierModel = '', verifierEffort = '', smallReReview = null, reviewers = null, checking = false, prepping = false, handover = null }) {
   const title = String(rawTitle ?? '').replace(/"/g, "'"); // someone else's words, shown in quotes: they can't close the quotes themselves
   const lines = [
     `/prowl:prowl-review ${[...prs, ...contextPrs].map(p => p.url).join(' ')}`,
     '',
     '## Context from Prowl, the review poller',
     '',
-    ...(quick ? [
+    ...(source === 'github' ? [
+      `- GitHub review ${reviewNo}${prior ? ' (re-review)' : ''}. The Review label on the PRs requested this review.`,
+      ticketUrl ? `- Ticket for context: ${ticket} "${title}" (${ticketUrl}).` : '- Take the goal of the work from the PRs themselves.',
+      '- Nobody is watching this session. Make the reasonable call and say so in the closing message.',
+    ] : quick ? [
       ticketUrl ? `- Ticket: ${ticket} "${title}" (${ticketUrl}). This is a quick review the user asked Prowl for, of these PRs together as one set.`
         : '- No ticket: this is a quick review the user asked Prowl for, of these PRs together as one set. Take the goal of the work from the PRs themselves.',
       ...(prior ? [`- This is review ${reviewNo} of these PRs, a RE-REVIEW: they were labelled for review again.`] : []),
@@ -516,10 +519,15 @@ export function buildPrompt({ ticket, title: rawTitle, ticketUrl, prs, contextPr
     ? "The previous review has no result to copy from, so these PRs' earlier findings are not carried: leave them out of the result, and a later review reads them from the PR."
     : handover ? "Leave their earlier findings alone: don't re-verify them. Each is in Prowl's result skeleton already, as `deferred` under its key: leave it there as it is, and add no copy."
     : "Leave their earlier findings alone: don't re-verify them. Each goes in the result as `deferred`, keeping every field as given except its id, a new `C-nn` (the skill's Step 5, *Left-out PRs*).";
-  if (contextPrs.length) {
+  const related = contextPrs.filter(p => relatedUrls.includes(p.url));
+  if (related.length) lines.push('', '## Related PRs for context', '',
+    `Read these for the batch brief and cross-PR contracts. Give them no spec or reviewer and post nothing on them. ${carried}`,
+    '', ...related.map(p => `- ${p.url}`));
+  const unchanged = contextPrs.filter(p => !relatedUrls.includes(p.url));
+  if (unchanged.length) {
     lines.push('', '## Unchanged since the last review: context only', '',
       `An earlier review cleared these PRs and they have no new commits since. Prowl leaves them out of this review (see Step 1): read them for the batch brief and the cross-PR contracts, but give them no spec or reviewer. ${carried}`,
-      '', ...contextPrs.map(p => `- ${p.url}`));
+      '', ...unchanged.map(p => `- ${p.url}`));
   }
   if (prior && leftOut.length) {
     lines.push('', '## Left out of this review', '',
@@ -529,7 +537,7 @@ export function buildPrompt({ ticket, title: rawTitle, ticketUrl, prs, contextPr
   if (prior) {
     // A delta re-review needs the commits the last review saw; reviews from before 2.8.0 didn't record them.
     const delta = reReviewScope === 'delta' && prior.reviewedHeads;
-    lines.push('', ...reReviewBrief(prior, { delta, prs, heads, small: delta ? smallStep(smallReReview, reviewers) : '', findings: given, report: priorReport, unverified: priorUnverified, prepping, handover }));
+    lines.push('', ...reReviewBrief(prior, { source, delta, prs, heads, small: delta ? smallStep(smallReReview, reviewers) : '', findings: given, report: priorReport, unverified: priorUnverified, prepping, handover }));
   }
   return `${lines.join('\n')}\n`;
 }
@@ -688,11 +696,12 @@ function findingsBlock(findings) {
  * the previous result's live findings; null for a previous review from before results, whose report's findings
  * sections stand in (`report`).
  */
-function reReviewBrief(prior, { delta, prs, heads, small, findings, report, unverified, prepping = false, handover = null }) {
+function reReviewBrief(prior, { source, delta, prs, heads, small, findings, report, unverified, prepping = false, handover = null }) {
   const index = handover ? findingsIndex(handover.keyed, handover) : null;
   const block = index ? { escaped: false, lines: index.lines } : findings ? findingsBlock(findings) : { escaped: false, lines: ['<previous-findings>', inTag('previous-findings', findingsOnly(report).trim()), '</previous-findings>'] };
-  const found = index ? `The previous review (review ${prior.reviewNo}, finished ${finished(prior)} UTC) left ${index.intro}. The ticket has been tagged for review again, so the authors believe they have addressed it.`
-    : `The previous review (review ${prior.reviewNo}, finished ${finished(prior)} UTC) found what is below${block.escaped ? ' (as JSON, with each `<` written `\\u003c`)' : findings ? ' (as JSON)' : ''}. The ticket has been tagged for review again, so the authors believe they have addressed it.`;
+  const requested = source === 'github' ? 'The PRs were labelled for another review.' : 'The ticket has been tagged for review again, so the authors believe they have addressed it.';
+  const found = index ? `The previous review (review ${prior.reviewNo}, finished ${finished(prior)} UTC) left ${index.intro}. ${requested}`
+    : `The previous review (review ${prior.reviewNo}, finished ${finished(prior)} UTC) found what is below${block.escaped ? ' (as JSON, with each `<` written `\\u003c`)' : findings ? ' (as JSON)' : ''}. ${requested}`;
   const hints = Object.entries(unverified || {});
   const tail = [
     '', ...block.lines,

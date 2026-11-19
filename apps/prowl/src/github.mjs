@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { run, runFull } from './proc.mjs';
+import { sameLabel } from './names.mjs';
 import { mentions } from './match.mjs';
 
 let login = '';
@@ -23,6 +24,35 @@ export async function prsMentioning(owner, key, state = '') {
   return JSON.parse(out)
     .filter(p => mentions(`${p.title} ${p.body}`, key)) // search is fuzzy; this keeps AB#123 from matching AB#1234
     .map(p => ({ url: p.url, title: p.title, number: p.number, repo: p.repository.nameWithOwner, author: p.author?.login || '', draft: Boolean(p.isDraft), state: p.state || '' }));
+}
+
+/** GitHub search can return similar labels. Only the configured name requests a review. */
+export function labeledFrom(rows, label) {
+  return rows.filter(p => p.labels.some(l => sameLabel(l.name, label))).map(p => ({
+    url: p.url, title: p.title, body: p.body || '', number: p.number, repo: p.repository.nameWithOwner,
+    author: p.author?.login || '', draft: Boolean(p.isDraft), labels: p.labels.map(l => l.name),
+  }));
+}
+
+/** Search the org once per poll and flag GitHub's limit before filtering loose matches. */
+export async function labeledPrs(owner, label) {
+  if (!owner?.trim()) throw new Error('no GitHub org is set to search for PRs in: set it in Config (4)');
+  const rows = JSON.parse(await run('gh', ['search', 'prs', '--owner', owner, '--state', 'open', '--label', label,
+    '--limit', '1000', '--json', 'url,title,body,author,number,repository,isDraft,labels']));
+  return { prs: labeledFrom(rows, label), capped: rows.length === 1000 };
+}
+
+/** A repo needs at least triage access to change the labels on its PRs. */
+export async function canLabel(repo) {
+  const permissions = JSON.parse((await run('gh', ['api', `repos/${repo}`, '--jq', '.permissions'])) || 'null');
+  return ['triage', 'push', 'maintain', 'admin'].some(role => permissions?.[role] === true);
+}
+
+/** Oldest-first label changes identify the first login to claim the current request. */
+export async function labelEvents(pr) {
+  const out = await run('gh', ['api', `repos/${pr.repo}/issues/${pr.number}/timeline?per_page=100`, '--paginate', '--jq',
+    '.[] | select(.event == "labeled" or .event == "unlabeled") | {id, event, label: .label.name, actor: .actor.login, at: .created_at}']);
+  return jsonLines(out).sort((a, b) => a.at.localeCompare(b.at));
 }
 
 /** The ticket keys with `key`'s prefix (AB# or PROJ-) that `text` mentions, other than `key`. */
@@ -78,7 +108,13 @@ export async function addLabel(pr, name, color = 'c5def5') {
   });
   if (missing) {
     await run('gh', ['api', '-X', 'POST', `repos/${pr.repo}/labels`, '-f', `name=${name}`, '-f', `color=${color}`, '-f', 'description=Set by Prowl', '--jq', '.name'])
-      .catch(e => { if (!/\(HTTP 422\)/.test(e.message)) throw e; }); // created meanwhile
+      .catch(e => {
+        if (/\(HTTP 422\)/.test(e.message)) return; // created meanwhile
+        if (/\(HTTP 403\)/.test(e.message) && !/rate limit|abuse/i.test(e.message)) {
+          throw new Error(`Label '${name}' is missing on ${pr.repo}. Someone with write access must create it. ${e.message}`);
+        }
+        throw e;
+      });
   }
   await run('gh', ['api', '-X', 'POST', `repos/${pr.repo}/issues/${pr.number}/labels`, '-f', `labels[]=${name}`, '--jq', 'length']);
 }

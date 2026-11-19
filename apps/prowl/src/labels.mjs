@@ -1,7 +1,5 @@
-// GitHub labels on PRs: the markers of a quick review's or a ticketless build's cycle (prowl: review, prowl: in
-// review, prowl: approved, prowl: changes requested, prowl: building; src/names.mjs). Both sides write them through
-// one queue, kept in labels.json, so writes to a PR land in the order they were asked for, whichever side asked.
-// Neither side imports the other.
+// GitHub labels mark board, GitHub and quick reviews, and the Builder's ticketless builds. Both sides use the
+// queue in labels.json so their writes to a PR land in order. Neither side imports the other.
 import fs from 'node:fs';
 import path from 'node:path';
 import { HOME, writeJson } from './config.mjs';
@@ -31,7 +29,7 @@ export function createLabels({ gh, log, file = LABELS_PATH, now = Date.now }) {
   state.refused ??= {}; // `${owner} ${url}` -> why GitHub refuses it, for that owner
   state.landed ??= {}; // `${owner} ${url}` -> the label it last put on there
   const save = () => writeJson(file, state, (k, v) => (k.startsWith('_') ? undefined : v));
-  let busy = false;
+  let inFlight;
 
   const q = {
     /** `owner` takes the labels of `urls` on `side` over: an older owner's writes there are dropped. */
@@ -44,12 +42,15 @@ export function createLabels({ gh, log, file = LABELS_PATH, now = Date.now }) {
      * Queues a write (names.labelWrite): `add` ('' for none) after taking off the names in `exact` (Prowl's own labels:
      * the same but for case and outer spaces), in `old` (older names: by letters and digits) and in `loose` (the old
      * trigger name: within `typos`). A label that is exactly one of `keep` (Prowl's five) only comes off through `exact`.
+     * Returns the queued write so a claim can check this attempt's _addState after drain, even if it reuses an owner.
      */
     set(side, owner, pr, { add = '', exact = [], old = [], loose = [], typos = 0, keep = [], color = '' }) {
       if (q.refused(owner, pr.url)) return;
       const names = list => list.filter(Boolean);
-      state.ops.push({ side, owner, url: pr.url, repo: pr.repo, number: pr.number, add, exact: names(exact), old: names(old), loose: names(loose), typos, keep: names(keep), color, at: now() });
+      const op = { side, owner, url: pr.url, repo: pr.repo, number: pr.number, add, exact: names(exact), old: names(old), loose: names(loose), typos, keep: names(keep), color, at: now() };
+      state.ops.push(op);
       save();
+      return op;
     },
     /** Once, at launch: each write queued before the labels had names of their own becomes `renamed(op)` (null leaves it). */
     rename(renamed) {
@@ -57,8 +58,9 @@ export function createLabels({ gh, log, file = LABELS_PATH, now = Date.now }) {
       state.ops = state.ops.map(o => { const n = renamed(o); if (!n) return o; changed = true; const { remove, ...rest } = o; return { ...rest, ...n }; });
       if (changed) save();
     },
-    /** True while a write to `url` is queued (by `owner`, or by anyone). */
-    pending: (url, owner = '') => state.ops.some(o => o.url === url && (!owner || o.owner === owner)),
+    /** True for a queued write, optionally by owner or explicitly removing a current label. */
+    pending: (url, owner = '', removes = '') => state.ops.some(o => o.url === url && (!owner || o.owner === owner)
+      && (!removes || (!superseded(o) && !sameLabel(o.add, removes) && o.exact?.some(n => sameLabel(n, removes))))),
     /** Why GitHub refuses `owner`'s writes on `url`, or ''. */
     refused: (owner, url) => state.refused[`${owner} ${url}`] || '',
     /** Forgets a refusal: the PR can be read again. */
@@ -73,27 +75,32 @@ export function createLabels({ gh, log, file = LABELS_PATH, now = Date.now }) {
     },
     /** Once a second: the first due write on each PR, one at a time. A write that fails waits a minute; the PR's later writes wait behind it. */
     tick() {
-      if (busy) return undefined;
+      if (inFlight) return inFlight;
       const heads = [];
       for (const o of state.ops) if (!heads.some(h => h.url === o.url)) heads.push(o);
       const due = heads.filter(o => now() >= (o._retryAt || 0));
       if (!due.length) return undefined;
-      busy = true;
-      return (async () => {
+      inFlight = (async () => {
         for (const o of due) await write(o);
-      })().finally(() => { busy = false; });
+      })().finally(() => { inFlight = undefined; });
+      return inFlight;
     },
-    /** Runs every write that's due until none is: for --once and the self-test. */
+    /** Waits for the current tick and runs all due writes, including claims queued during that tick. */
     async drain() {
-      for (let i = 0; i < 50 && state.ops.some(o => now() >= (o._retryAt || 0)); i++) await q.tick();
+      for (let tick = q.tick(); tick; tick = q.tick()) await tick;
     },
     state: () => state,
   };
 
+  function superseded(o) {
+    const owner = q.owner(o.side, o.url);
+    return owner && owner !== o.owner;
+  }
+
   async function write(o) {
     const done = () => { state.ops = state.ops.filter(x => x !== o); save(); };
     const pr = { url: o.url, repo: o.repo, number: o.number };
-    if (q.owner(o.side, o.url) && q.owner(o.side, o.url) !== o.owner) return done(); // a newer review or build has these labels now
+    if (superseded(o)) return done(); // a newer review or build has these labels now
     try {
       const on = await gh.prLabels(pr);
       const any = (list, same) => (list || []).some(same);
@@ -101,8 +108,14 @@ export function createLabels({ gh, log, file = LABELS_PATH, now = Date.now }) {
       const off = on.filter(l => !(o.add && sameLabel(l, o.add)) && (any(o.exact, n => sameLabel(l, n))
         || (!ours(l) && (any([...(o.old || []), ...(o.remove || [])], n => norm(l) === norm(n)) || any(o.loose, n => tagMatches(l, n, o.typos))))));
       for (const l of off) await gh.removeLabel(pr, l); // one already gone counts as removed
-      if (o.add && !on.some(l => sameLabel(l, o.add))) await gh.addLabel(pr, o.add, o.color || undefined);
-      if (o.add) state.landed[`${o.owner} ${o.url}`] = o.add;
+      if (o.add) {
+        if (!on.some(l => sameLabel(l, o.add))) {
+          o._addState = 'sent'; // a transport error from here can mean the label still reached GitHub
+          await gh.addLabel(pr, o.add, o.color || undefined);
+          o._addState = 'landed';
+        } else o._addState = 'present';
+        state.landed[`${o.owner} ${o.url}`] = o.add;
+      }
       done();
     } catch (e) {
       if (refusal(e)) {

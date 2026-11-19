@@ -47,7 +47,7 @@ async function api(rawOrg, route, { method = 'GET', body, type = 'application/js
   if (!res.ok || signIn || !(res.headers.get('content-type') || '').includes('json')) {
     let why = text.slice(0, 200);
     try { why = JSON.parse(text).message || why; } catch { /* not JSON */ }
-    throw new Error(`ADO ${method} ${route.split('?')[0]}: ${res.status} ${signIn ? 'not signed in (run az login)' : why}`);
+    throw Object.assign(new Error(`ADO ${method} ${route.split('?')[0]}: ${res.status} ${signIn ? 'not signed in (run az login)' : why}`), { status: res.status });
   }
   return JSON.parse(text);
 }

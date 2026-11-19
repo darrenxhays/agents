@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { LABELS, migrateNames, REVIEW_LABEL, TAGS } from './names.mjs';
+import { norm } from './match.mjs';
+import { fiveLabels, LABELS, migrateNames, REVIEW_LABEL, TAGS } from './names.mjs';
 
 export const HOME = process.env.PROWL_HOME || path.join(os.homedir(), '.prowl');
 export const CONFIG_PATH = path.join(HOME, 'config.json');
@@ -52,6 +53,7 @@ const DEFAULTS = {
   reviewPrep: true,
   reviewChecks: false,
   quickName: 'auto',
+  githubReviews: true,
   quickLabels: true,
   reviewLabel: REVIEW_LABEL,
   labels: { ...LABELS },
@@ -115,7 +117,7 @@ const NOTES = {
   'tags.changes': 'Set when a review finishes with a PR not approved. Re-add the trigger tag to ask for a re-review.',
   tagMatchMaxTypos: 'Typos still treated as the review trigger or build start tag. Case, spaces and punctuation are always ignored. 0 = exact.',
   githubOwner: 'GitHub org (or user) whose PRs are searched for the ticket key, and whose repos the Builder works in.',
-  pollSeconds: 'How often the boards are checked, in seconds (30 or more).',
+  pollSeconds: 'How often Prowl checks the boards and searches GitHub for the Review label, in seconds (30 or more).',
   maxConcurrentReviews: 'Reviews running at once. Extra tickets stay tagged until a slot frees.',
   workDir: 'Projects directory: sessions run here and load its CLAUDE.md. Missing repos are cloned here; worktrees go in its .prowl-worktrees folder.',
   claude: 'Review sessions (and build sessions, where the Builder leaves its own setting empty).',
@@ -144,10 +146,11 @@ const NOTES = {
   reviewPrep: 'true: Prowl checks each PR out in a worktree and writes its diff, facts and comments to files before a review\'s session starts. false: the session fetches everything itself.',
   reviewChecks: "true: build and test each PR with checks.json before its review, and give the review the results. A fork's PR is never built.",
   quickName: 'How a quick review or quick build without a ticket is named: "auto" (a short model call names it from the paste), "ask" (you type the name), or "number" (QUICK#n only).',
+  githubReviews: 'Poll for PRs carrying the Review label and label board reviews independently of quickLabels.',
   quickLabels: "true: a quick review labels its PRs 'prowl: in review', then 'prowl: approved' or 'prowl: changes requested', and re-reviews once every PR it didn't approve is labelled 'prowl: review'. false: no labels; a quick review runs once.",
-  reviewLabel: 'The GitHub label that asks for a review of a PR (quick reviews and ticketless quick builds). "" = the name of tags.trigger.',
-  labels: 'The GitHub labels Prowl sets on PRs, with quickLabels on. Matched exactly, ignoring case.',
-  'labels.inReview': 'A quick review of the PR is running.',
+  reviewLabel: 'The GitHub label that asks for a review of a PR. GitHub reviews poll for this exact name. Quick reviews use it for re-reviews and ticketless builds set it at hand-off. "" = the name of tags.trigger.',
+  labels: 'The GitHub labels Prowl sets on PRs. githubReviews governs polled and board reviews, quickLabels governs manual quick reviews. Matched exactly, ignoring case.',
+  'labels.inReview': 'A review of the PR is running.',
   'labels.approved': 'Its review ended with nothing blocking the PR.',
   'labels.changes': 'Its review ended with a finding that blocks the PR.',
   'labels.building': 'A quick build without a ticket is working on the PR.',
@@ -180,7 +183,7 @@ const NOTES = {
   'builder.protectedPaths': 'Globs: a push that changes one goes to Needs you, e.g. [".github/workflows/**", "infra/**"].',
   'builder.protectedBranches': 'Globs never pushed to, as well as each repo\'s default branch, e.g. ["main", "release/*"].',
   'builder.draftPrs': 'true: open PRs as drafts, which the Reviewer leaves alone until you mark them ready.',
-  'builder.requestReview': 'true: set tags.trigger once the PRs open and after each feedback round. false: only builder.tags.inProgress comes off.',
+  'builder.requestReview': 'When PRs open and after each feedback round, set tags.trigger on the ticket. For a ticketless build, set reviewLabel on its PRs if quickLabels is on. Turning this off only clears the build marker.',
   'builder.mcpAllow': 'MCP tools a build session may use, by name or * pattern. None by default. e.g. ["mcp__linear__get_issue", "mcp__sentry__*"].',
   'builder.notify': 'true: a notification (sent as notifyVia says) when PRs open, a ticket is ready to merge, or one needs you.',
   'builder.followUp': 'true: follow the PRs through review, fixing feedback in rounds.',
@@ -220,7 +223,7 @@ const nameNotes = []; // what the move to the prowl: tag names changed, for the 
 export const takeNameNotes = () => nameNotes.splice(0);
 
 /** The settings: config.json over the defaults. Throws, naming the setting, when the file can't be read or a value can't be used. */
-export function loadConfig() {
+export function loadConfig(warn = () => {}) {
   let saved = {};
   known = stamp(); // before the read: a file that doesn't load is tried again only once it changes
   try {
@@ -254,6 +257,20 @@ export function loadConfig() {
   if (!wrong.length && !['ado', 'jira'].includes(cfg.taskBoard)) wrong.push('taskBoard must be "ado" or "jira"');
   if (!wrong.length && cfg.pollSeconds < 30) wrong.push('pollSeconds must be 30 or more');
   if (wrong.length) throw new Error(`Can't use ${CONFIG_PATH}: ${wrong.join('; ')}`);
+  const checkNames = (group, names, normalize) => {
+    const seen = new Map();
+    for (const [key, name] of Object.entries(names)) {
+      const value = normalize(name);
+      const other = seen.get(value);
+      if (other && !(group === 'tags' && [other, key].every(k => ['approved', 'changes'].includes(k)))) {
+        const pathOf = k => group === 'labels' && k === 'ask' ? 'reviewLabel' : `${group}.${k}`;
+        warn(`config.json: '${pathOf(key)}' reads the same as '${pathOf(other)}' ('${name}')`);
+      } else seen.set(value, key);
+    }
+  };
+  checkNames('tags', cfg.tags, norm);
+  checkNames('builder.tags', cfg.builder.tags, norm);
+  checkNames('labels', fiveLabels(cfg), name => name.trim().toLowerCase());
   if (old || ownTags || command || moved || !fs.existsSync(CONFIG_PATH)) saveConfig(cfg);
   return cfg;
 }

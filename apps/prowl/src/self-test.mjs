@@ -711,7 +711,8 @@ async function reviewOnce(open, { runs = [], cfgOver = {}, me = 'octocat', switc
     retag: async (c, ref, drop, add) => { if (retagFails-- > 0) throw new Error('503 Service Unavailable'); seen.retags.push(add); },
     ticketText: async () => '', current: async (c, t) => t,
   };
-  const gh = { me: async () => me, openPrs: async () => open, headSha: async pr => `sha${pr.number}`, postComment: async () => '', humanApproved: async () => false,
+  const gh = { labeledPrs: async () => ({ prs: [], capped: false }), canLabel: async () => true, me: async () => me, openPrs: async () => open, headSha: async pr => `sha${pr.number}`, postComment: async () => '', humanApproved: async () => false,
+    prByRef: async pr => open.find(p => p.url === pr.url),
     cloneMissing: async () => { seen.claimsAtClone = seen.claims.length; if (switchOffAt === 'clone') app.on = false; return []; } };
   const side = createReviewer(app, { log: (level, msg) => { seen.logs.push(msg); return true; }, forget() {}, hoot() {}, appDir, trackers: { ado: tracker }, github: gh });
   side.state = { runs: structuredClone(runs), failures };
@@ -824,7 +825,7 @@ assert.deepEqual(await failRun({}, { capped: 'spend cap $50' }), [[''], 1, 'fail
   const logs = [];
   const retags = [];
   const app = { cfg: { ...loadConfig(), githubOwner: 'octo-org', workDir: rvTmp, quickName: 'number', quickLabels: false }, me: '', on: true, sideOn() { return this.on; }, tracker: () => ({}), boards: () => [], dryRun: () => false };
-  const gh = { me: async () => 'octocat', prByRef: async ({ number }) => prOf(number, { state: states[number] }), headSha: async pr => `sha${pr.number}`, cloneMissing: async () => [],
+  const gh = { labeledPrs: async () => ({ prs: [], capped: false }), me: async () => 'octocat', prByRef: async ({ number }) => prOf(number, { state: states[number] }), headSha: async pr => `sha${pr.number}`, cloneMissing: async () => [],
     reviewedSince: async () => true, isOpen: async () => true, postComment: async (pr, file) => comments.push([pr.number, JSON.parse(fs.readFileSync(file, 'utf8')).body]) };
   const comments = [];
   const side = createReviewer(app, { log: (level, msg) => { logs.push(msg); return true; }, forget() {}, hoot() {}, appDir, trackers: { ado: { retag: async (...a) => retags.push(a) } }, github: gh });
@@ -1041,8 +1042,8 @@ assert.ok(/Builder · off · ⚑ 1/.test(frame), 'the Needs-you count on its tab
 tui.key('4');
 const builderConfig = fits(tui.frame(80, 200), 'Config from the Builder');
 const builderBars = [...tui.ui.bars];
-const order = ['Prowl', 'Upkeep and display', 'Boards', 'GitHub and projects', 'Build tags', 'Review tags', 'All sessions', 'Quick reviews and builds', 'Reviewer · Files', 'Reviewer · Sessions', 'Reviewer · Caps',
-  'Reviewer · Verdicts and rounds', 'Builder · Files', 'Builder · Sessions', 'Builder · Caps', 'Builder · Repos', 'Builder · Branches', 'Builder · Pushes and PRs', 'Builder · Pick-up', 'Builder · Follow-up'];
+const order = ['Prowl', 'Upkeep and display', 'Boards', 'GitHub and projects', 'Tags and labels', 'All sessions', 'GitHub reviews', 'Quick reviews and builds',
+  'Models and efforts', 'Caps', 'Files', 'Reviewer · Sessions', 'Reviewer · Verdicts and rounds', 'Builder · Sessions', 'Builder · Repos', 'Builder · Branches', 'Builder · Pushes and PRs', 'Builder · Pick-up', 'Builder · Follow-up'];
 const cardLines = builderConfig.split('\n');
 const headings = cardLines.map(l => /^ {2}╭─ (.+?) ─*╮$/.exec(l.trimEnd())?.[1]).filter(Boolean);
 assert.deepEqual(headings, order, 'every setting of the app, each category in its own card');
@@ -1061,7 +1062,6 @@ frame = fits(tui.frame(80, 30), 'Builder off, nothing waiting');
 assert.ok(/Reviewer · on/.test(frame) && !/Builder · /.test(frame) && !frame.includes('tab side'), 'the Builder has no tab while it is off');
 tui.key('B');
 assert.ok(fits(tui.frame(80, 30), 'B').includes('turn it on in Config'), 'B says how to turn it on');
-tui.key('down');
 tui.key('down');
 tui.key('enter'); // the Builder's switch, in Config
 frame = fits(tui.frame(80, 30), 'Builder on');
@@ -1406,6 +1406,42 @@ tuiApp.cfg.hoot = true;
     t.paste(note);
     t.key('enter');
     assert.deepEqual(sent, [[field === 'ask' ? 'ask' : 'answer', note]], `a paste into a ${kind}'s "${field}" row is what is submitted`);
+  }
+
+  {
+    const { CONFIG_FIELDS } = await import('./fields.mjs');
+    const keys = CONFIG_FIELDS.filter(f => f.key).map(f => f.key);
+    const config = loadConfig();
+    const leaves = (v, pre = '') => Object.entries(v).flatMap(([k, x]) => {
+      const key = pre + k;
+      if (['namesVersion', 'tagsWere', 'ado.boards', 'jira.boards', 'builder.enabled', 'reviewer.enabled'].includes(key)) return [];
+      return x && typeof x === 'object' && !Array.isArray(x) && key !== 'builder.base' ? leaves(x, key + '.') : [key];
+    });
+    assert.deepEqual(keys.slice().sort(), [...leaves(config), 'jira.token'].sort(), 'one row per setting, with boards and switches drawn separately');
+    const skipped = { id: 's9', ticket: 'api#9', title: 'Add a cache', prs: [prOf(9)], status: 'skipped', source: 'github', endedAt: 1000, error: 'Labelling octo-org/r9 needs triage or write access' };
+    const [, history] = shellTui({ reviewer: { finished: () => [skipped], state: { runs: [skipped] } } });
+    history.key('2');
+    assert.ok(history.frame(110, 40).join(' ').includes('NOT REVIEWED'));
+    history.key('enter');
+    const detail = history.frame(110, 40).join(' ');
+    assert.ok(detail.includes(skipped.error) && detail.includes(skipped.prs[0].url) && !detail.includes('Findings'), 'skipped History details show the PR and reason without a session');
+    const opened = [];
+    const [, t] = shellTui({}, {}, { headless: true, open: file => opened.push(file) });
+    t.key('4');
+    for (let i = 0; i < keys.length && !t.frame(110, 50).join(' ').includes('❯ Review changes tag'); i++) t.key('down');
+    t.key('down');
+    const frame = t.frame(110, 50).join(' ');
+    assert.ok(frame.includes('├─ GitHub labels') && frame.includes('❯ Review label'), 'down skips the named line between the tag and label rows');
+    assert.ok(frame.includes('Change it in the settings file.'));
+    t.key('enter');
+    assert.deepEqual([opened, Boolean(t.ui.edit)], [[CONFIG_PATH], false], 'enter on a read-only label opens config.json');
+    config.tags.inProgress = config.tags.trigger;
+    config.labels.approved = config.reviewLabel.toUpperCase();
+    saveConfig(config);
+    const warnings = [];
+    loadConfig(msg => warnings.push(msg));
+    assert.ok(warnings.some(m => m.includes('tags.inProgress')) && warnings.some(m => m.includes('labels.approved')), 'hand-edited clashes are logged and the config still loads');
+    fs.writeFileSync(CONFIG_PATH, configText);
   }
 
   // A setting or a board typed while config.json is re-read (into a new app.cfg) is still saved, and a board removed.

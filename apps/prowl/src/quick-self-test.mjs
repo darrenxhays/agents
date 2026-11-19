@@ -13,8 +13,9 @@ import { guardFailures } from './guards.mjs';
 import { createLabels, httpStatus, matching, refusal } from './labels.mjs';
 import { acceptOffer, offerFor, sameBoard } from './offers.mjs';
 import { cleanName, notARef, parsePaste, ticketKey } from './paste.mjs';
-import { createReviewer } from './reviewer/reviewer.mjs';
-import { buildPrompt, postMarker } from './reviewer/reviews.mjs';
+import { labeledFrom } from './github.mjs';
+import { createReviewer, labelClaim, labelGroups } from './reviewer/reviewer.mjs';
+import { buildPrompt, createReview, postMarker, saveState } from './reviewer/reviews.mjs';
 
 const json = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
 const httpError = (code, why = 'Not Found') => new Error(`gh api repos/x failed: gh: ${why} (HTTP ${code})`);
@@ -26,6 +27,7 @@ export async function run(assert, { appDir }) {
   await numstat(assert);
   await boards(assert);
   await reviews(assert, appDir);
+  await githubReviews(assert, appDir);
 }
 
 // ---- What a paste holds ----
@@ -77,6 +79,17 @@ async function queue(assert) {
   await q.drain();
   assert.deepEqual(calls, [['remove', 1, 'Ready-for-review'], ['add', 1, 'In Review'], ['remove', 1, 'In Review'], ['add', 1, 'Reviewed']], 'in the order asked, a loose match taken off');
   assert.deepEqual([on['o/r#1'], q.landed('run1', pr(1).url), q.pending(pr(1).url)], [['bug', 'Reviewed'], 'Reviewed', false], 'landed');
+  // A claim can arrive while the once-a-second tick is writing another PR.
+  const readLabels = gh.prLabels;
+  gh.prLabels = async pr => { await tick(); return readLabels(pr); };
+  q.set('builder', 'active', pr(1), legacy('', []));
+  const writing = q.tick();
+  q.set('reviewer', 'claim', pr(2), legacy('In Review', []));
+  await q.drain();
+  assert.equal(q.landed('claim', pr(2).url), 'In Review', 'drain waits for the active tick and the claim after it');
+  await writing;
+  gh.prLabels = readLabels;
+  on['o/r#2'] = [];
   // A transient failure waits a minute, and the PR's later writes wait behind it; other PRs go on.
   calls.length = 0;
   fail = { 2: () => httpError(502, 'Bad Gateway') };
@@ -327,8 +340,14 @@ function reviewerGitHub() {
   const add = (n, extra = {}) => (prs[n] = { url: `https://github.com/octo-org/r${n}/pull/${n}`, title: extra.ticket ? `${extra.ticket}: PR ${n}` : `PR ${n}`, number: n, repo: `octo-org/r${n}`, author: 'teammate', draft: false, state: 'open', headSha: `sha${n}`, labels: [], ticket: '', ...extra });
   const of = pr => prs[pr.number];
   return {
-    prs, add,
-    me: async () => 'octocat',
+    prs, add, login: 'octocat', searches: 0, permissions: [], events: {},
+    async labeledPrs(owner, ask) {
+      this.searches++;
+      return { prs: Object.values(prs).filter(p => p.state === 'open' && p.labels.some(l => l.trim().toLowerCase() === ask.toLowerCase())), capped: false };
+    },
+    async canLabel(repo) { this.permissions.push(repo); return !Object.values(prs).some(p => p.repo === repo && p.noAccess); },
+    async labelEvents(pr) { return this.events[pr.url] || []; },
+    async me() { return this.login; },
     prByRef: async ({ number }) => {
       const p = prs[number];
       if (!p || p.gone) throw httpError(404);
@@ -343,8 +362,18 @@ function reviewerGitHub() {
     isOpen: async pr => of(pr).state === 'open',
     humanApproved: async () => false,
     prLabels: async pr => { if (of(pr).noLabels) throw httpError(403, 'Resource not accessible by integration'); return [...of(pr).labels]; },
-    addLabel: async (pr, name) => { of(pr).labels.push(name); },
-    removeLabel: async (pr, name) => { of(pr).labels = of(pr).labels.filter(l => l !== name); },
+    async addLabel(pr, name, color, actor = this.login) {
+      if (of(pr).labels.includes(name)) return;
+      of(pr).labels.push(name);
+      const events = (this.events[pr.url] ??= []);
+      events.push({ id: events.length + 1, event: 'labeled', label: name, actor, at: new Date().toISOString() });
+    },
+    async removeLabel(pr, name) {
+      if (!of(pr).labels.includes(name)) return;
+      of(pr).labels = of(pr).labels.filter(l => l !== name);
+      const events = (this.events[pr.url] ??= []);
+      events.push({ id: events.length + 1, event: 'unlabeled', label: name, actor: this.login, at: new Date().toISOString() });
+    },
   };
 }
 
@@ -583,4 +612,652 @@ async function reviews(assert, appDir) {
   await side.poll();
   assert.ok(logs.some(l => /AB#42: no longer waiting on its PRs: its tagged review started/.test(l)) && !only('AB#42').length, "the ticket's tagged review starting ends its quick review's wait");
   fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+// GitHub reviews use the real run and prompt, with an in-memory tracker, GitHub and session launch.
+async function githubReviews(assert, appDir) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'prowl-github-'));
+  const ask = 'prowl: review';
+  const busy = 'prowl: in review';
+  const approved = 'prowl: approved';
+  const changes = 'prowl: changes requested';
+  const gh = reviewerGitHub();
+  const cfg = { ...loadConfig(), githubOwner: 'octo-org', workDir: tmp, quickName: 'number', githubReviews: true, quickLabels: false, reviewPrep: false,
+    reviewChecks: false, reviewOwnPrs: false, maxConcurrentReviews: 1, ticketContext: true, tags: { trigger: ask, inProgress: busy, approved, changes } };
+  const tagged = [];
+  const comments = [];
+  gh.postComment = async (pr, file) => comments.push([pr.number, JSON.parse(fs.readFileSync(file)).body]);
+  const tickets = {};
+  const tracker = {
+    name: 'test', lookup: async (c, key) => {
+      if (key === 'DOWN-1') throw new Error('unavailable');
+      if (!tickets[key]) throw Object.assign(new Error('ticket not found'), { status: 404 });
+      return structuredClone(tickets[key]);
+    },
+    ticketText: async (c, t) => `Ticket text for ${t.key}`,
+    boardLabel: () => 'Team', findTickets: async () => ({ tickets: Object.values(tickets).filter(t => t.tags.includes(ask)), variants: [] }),
+    current: async (c, t) => t, claim: async (c, t, drop, add) => { tagged.push(add); t.tags = [add]; },
+    retag: async (c, ref, drop, add) => { tagged.push(add); tickets[ref].tags = add ? [add] : []; },
+  };
+  const app = { cfg, me: '', sideOn: () => true, tracker: () => tracker, boards: () => [], dryRun: () => false };
+  const logs = [];
+  const labels = createLabels({ gh, file: path.join(tmp, 'labels.json'), log: (s, l, m) => logs.push(m) });
+  const launchReviewer = () => {
+    const reviewer = createReviewer(app, { github: gh, labels, log: (l, m) => logs.push(m), forget() {}, hoot() {}, appDir,
+      trackers: { ado: tracker, jira: tracker }, sleep: async () => {}, sizeWaitMs: 0 });
+    reviewer.startReview = (c, dir, opts) => createReview(c, { ...opts, appDir: dir });
+    return reviewer;
+  };
+  let side = launchReviewer();
+  side.state = { runs: [], failures: {} };
+  const poll = async () => { await labels.drain(); await side.poll(); await labels.drain(); };
+  const add = (n, more = {}) => gh.add(n, { labels: [ask], ...more });
+  const writeResult = (r, ok) => {
+    // Use the legacy posted-review result; the same finish path sets tags, labels, waits and failure counts.
+    delete r.resultMode;
+    if (ok) fs.writeFileSync(r.reportPath, `---\nverdict: approve\napproved: ${r.prs.map(p => `${p.url}@${r.reviewedHeads[p.url]}`).join(' ')}\n---\n`);
+    r._result = ok ? { subtype: 'success' } : { subtype: 'error_during_execution', is_error: true, result: 'boom' };
+  };
+  const end = async (r, ok) => {
+    writeResult(r, ok);
+    await side.finish(r);
+    await labels.drain();
+  };
+  const ticket = key => (tickets[key] = { key, ref: key, title: `Work on ${key}`, url: `https://tracker.invalid/${key}`, tags: [] });
+  const rows = [' PROWL: REVIEW ', 'prowl-review', 'prowl: reveiw', busy].map((name, i) => ({
+    url: 'u', title: 't', body: 'b', number: i + 1, repository: { nameWithOwner: 'org/r' }, author: { login: 'alice' }, labels: [{ name }],
+  }));
+  assert.deepEqual(labeledFrom(rows, ask).map(p => [p.number, p.repo, p.author, p.body]), [[1, 'org/r', 'alice', 'b']]);
+  const timeline = [busy, ask, busy, busy].map((label, at) => ({ event: 'labeled', label, actor: String(at), at }));
+  assert.equal(labelClaim(timeline, cfg), timeline[2]);
+  assert.equal(labelClaim([...timeline, { event: 'labeled', label: ask }], cfg), null);
+  try {
+    for (const dry of [false, true]) {
+      const pr = add(dry ? 81 : 80);
+      const claim = { at: Date.now(), label: busy, repo: pr.repo, number: pr.number, ...(dry && { settle: 'approved' }) };
+      saveState({ runs: [], failures: {}, labelClaims: { [pr.url]: claim } });
+      const queueOpts = { gh, file: path.join(tmp, 'restart-labels.json'), log() {} };
+      createLabels(queueOpts).set('reviewer', `claim-${pr.url}`, pr, { add: dry ? approved : busy });
+      cfg.githubReviews = dry;
+      app.dryRun = () => dry;
+      const queue = createLabels(queueOpts);
+      const restarted = createReviewer(app, { github: gh, labels: queue, log() {}, forget() {}, hoot() {}, appDir });
+      restarted.dropQueuedClaims();
+      await restarted.poll();
+      await queue.drain();
+      assert.deepEqual([pr.labels, restarted.state.labelClaims[pr.url], queue.pending(pr.url)], [[ask], claim, false]);
+      pr.labels = [];
+    }
+    cfg.githubReviews = true;
+    app.dryRun = () => false;
+    const searchesBefore = gh.searches;
+    const one = add(1);
+    add(2, { draft: true }); add(3, { labels: [ask, busy] }); add(4, { author: 'octocat' }); add(5, { labels: ['prowl-review'] });
+    await poll();
+    let [r] = side.running();
+    assert.deepEqual([r.ticket, r.source, r.quick, r.prs.map(p => p.number), one.labels, gh.searches - searchesBefore], ['octo-org/r1#1', 'github', undefined, [1], [busy], 1], 'a label alone starts a GitHub review without a board');
+    assert.ok(comments[0][1].includes(one.url));
+    cfg.maxConcurrentReviews = 2;
+    one.labels = [ask]; // a teammate removed the in-review label while the session is still running
+    await poll();
+    assert.equal(side.running().length, 1, 'a running review still holds its PR without the in-review label');
+    one.labels = [busy];
+    cfg.maxConcurrentReviews = 1;
+    const another = add(6);
+    await poll();
+    assert.deepEqual([side.running().length, another.labels], [1, [ask]], 'no claim without a free slot');
+    another.labels = [];
+    await gh.addLabel(one, ask);
+    await end(r, true);
+    assert.deepEqual([one.labels, side.waits(), tagged], [[ask, approved], [], []], 'a new request survives completion');
+    await poll();
+    assert.deepEqual([side.running().length, one.labels], [0, [approved]], 'unchanged prior approval settles its claim');
+    const events = gh.labelEvents.bind(gh);
+    await gh.addLabel(one, ask);
+    gh.labelEvents = async pr => {
+      if (pr.url === one.url) one.headSha = 'pushed-during-claim';
+      return events(pr);
+    };
+    await poll();
+    [r] = side.running();
+    assert.deepEqual([r?.reviewedHeads[one.url], one.labels], [one.headSha, [busy]], 'a push during the claim gets reviewed at its new head');
+    await end(r, true);
+    gh.labelEvents = events;
+    const sibling = add(70);
+    const late = add(71);
+    sibling.body = `The other PRs for a build:
+- ${late.url}`;
+    const searchAll = gh.labeledPrs.bind(gh);
+    gh.labeledPrs = async (...args) => ({ prs: (await searchAll(...args)).prs.filter(p => p !== late), capped: false });
+    await poll();
+    assert.deepEqual([side.running(), sibling.labels, late.labels], [[], [ask], [ask]], 'wait for a labelled sibling missing from search');
+    gh.labeledPrs = searchAll;
+    await poll();
+    [r] = side.running();
+    assert.deepEqual(r.prs.map(p => p.number), [70, 71]);
+    await end(r, true);
+    await gh.addLabel(sibling, ask);
+    await gh.addLabel(late, ask);
+    gh.labelEvents = async pr => {
+      if (pr.url === late.url) sibling.headSha = 'pushed-while-claiming-sibling';
+      return events(pr);
+    };
+    await poll();
+    gh.labelEvents = events;
+    [r] = side.running();
+    assert.deepEqual([r?.prs.map(p => p.number), r?.reviewedHeads[sibling.url], sibling.labels, late.labels],
+      [[70], sibling.headSha, [busy], [approved]], 'a push to the first PR during the second claim gets reviewed');
+    await end(r, true);
+    late.headSha = 'changed';
+    await gh.addLabel(sibling, ask);
+    await gh.addLabel(late, ask);
+    const clone = gh.cloneMissing;
+    let labelsAtClone;
+    gh.cloneMissing = async (...args) => {
+      labelsAtClone = [...sibling.labels];
+      sibling.headSha = 'pushed-during-setup';
+      return clone(...args);
+    };
+    await poll();
+    gh.cloneMissing = clone;
+    assert.deepEqual(labelsAtClone, [approved], 'the unchanged PR is settled before setup of its sibling');
+    await end(side.running()[0], true);
+    const withdrawn = add(90, { labels: [ask, approved] });
+    const draft = add(91, { labels: [ask, changes] });
+    const closed = add(92, { labels: [ask, approved] });
+    const lost = add(93, { labels: [ask, changes] });
+    const remaining = add(94);
+    withdrawn.body = 'The other PRs for a build:\n' + [draft, closed, lost, remaining].map(p => `- ${p.url}`).join('\n');
+    gh.labelEvents = async pr => {
+      if (pr.url === remaining.url) {
+        await gh.removeLabel(withdrawn, ask);
+        draft.draft = true;
+        closed.state = 'closed';
+        await gh.removeLabel(lost, busy);
+      }
+      return events(pr);
+    };
+    const before = comments.length;
+    await poll();
+    gh.labelEvents = events;
+    [r] = side.running();
+    assert.deepEqual([r.ticket, r.title, r.prs.map(p => p.number), comments.slice(before).map(([n]) => n)],
+      [`${remaining.repo}#94`, remaining.title, [94], [94]], 'only the still-requested, claimed PR starts after the last sibling claim');
+    assert.deepEqual([withdrawn.labels, draft.labels, closed.labels, lost.labels, side.state.labelClaims],
+      [[approved], [ask, changes], [ask, approved], [ask, changes], {}], 'withdrawal releases only the claim and a missing claim is forgotten');
+    await end(r, true);
+    lost.body = `The other PRs for a build:\n- ${remaining.url}`;
+    await gh.addLabel(remaining, ask);
+    gh.labelEvents = async pr => {
+      if (pr.url === remaining.url) {
+        await gh.removeLabel(lost, busy);
+        await gh.removeLabel(remaining, ask);
+      }
+      return events(pr);
+    };
+    await poll();
+    gh.labelEvents = events;
+    assert.deepEqual([side.running(), lost.labels, remaining.labels, side.state.labelClaims], [[], [ask, changes], [approved], {}], 'no review starts when no eligible claim remains');
+    lost.labels = [];
+    const a = add(7); const b = add(8); const linked = add(9, { labels: [] });
+    a.body = `The other PRs for QUICK#4:\n\n- ${b.url}\n- ${linked.url}`;
+    assert.deepEqual(labelGroups([b, a], new Map()).map(g => [g.prs.length, g.linked]), [[2, [linked.url]]]);
+    await poll();
+    assert.equal(side.running().length, 0, 'wait one poll while linked PR labels arrive');
+    a.labels = []; b.labels = [];
+    gh.labeledPrs = async (...args) => ({ prs: [...(await searchAll(...args)).prs, { ...a, labels: [ask] }], capped: false });
+    await poll();
+    gh.labeledPrs = searchAll;
+    assert.deepEqual(side.state.deferredLinks, [], 'withdrawing the requests clears the sibling wait');
+    a.labels = [ask]; b.labels = [ask];
+    await poll();
+    assert.equal(side.running().length, 0, 'the fresh request gets one poll for its siblings');
+    side = launchReviewer();
+    await poll();
+    [r] = side.running();
+    assert.deepEqual([r.prs.map(p => p.number), r.contextPrs.map(p => p.number)], [[7, 8], [9]]);
+    assert.deepEqual(side.state.deferredLinks, [], 'the next launch starts the group and clears its wait');
+    const key = r.ticket;
+    await end(r, false);
+    assert.deepEqual([a.labels, b.labels, linked.labels, side.waits()], [[ask], [ask], [], []]);
+    a.labels = [];
+    await poll();
+    [r] = side.running();
+    assert.equal(r.ticket, key, 'the remaining PR reuses the prior GitHub key');
+    await end(r, false);
+    assert.deepEqual([side.state.failures[key], b.labels], [2, []], 'the second failure consumes the request');
+    for (const [board, k, n] of [['ado', 'AB#42', 20], ['jira', 'CART-12', 30]]) {
+      cfg.taskBoard = board;
+      ticket(k);
+      const p = add(n, { ticket: k, title: `fix(${k}): handle refunds`, body: 'Convert to ISO-8601' });
+      tickets[k].tags = [ask];
+      await poll();
+      assert.deepEqual([side.running(), p.labels], [[], [ask]], `the title defers to tagged ticket ${k}`);
+      const other = ticket(board === 'ado' ? 'AB#34' : 'CART-34');
+      p.body = `Follow-up to ${other.key}`;
+      for (const tag of [ask, busy]) {
+        tickets[k].tags = [tag];
+        await poll();
+        assert.deepEqual([side.running(), p.labels], [[], [ask]], `a real ticket in the body still leaves the PR to ${k} with ${tag}`);
+      }
+      p.body = 'Convert to ISO-8601';
+      tickets[k].tags = [];
+      add(n + 1, { repo: p.repo, url: `https://github.com/${p.repo}/pull/${n + 1}`, ticket: k, title: 'Edit UTF-8 output', body: `See [${k}](ticket).` });
+      const checks = gh.permissions.filter(repo => repo === p.repo).length;
+      const ctx = add(n + 2, { ticket: k, labels: [] });
+      await poll();
+      [r] = side.running();
+      assert.deepEqual([r.ticket, r.prs.map(pr => pr.number), r.contextPrs.map(pr => pr.number)], [k, [n, n + 1], [ctx.number]]);
+      assert.equal(gh.permissions.filter(repo => repo === p.repo).length, checks + 1, 'one permissions read per repo per poll');
+      const prompt = fs.readFileSync(r.promptPath, 'utf8');
+      assert.ok(prompt.includes(`Ticket text for ${k}`) && prompt.includes('Related PRs for context') && !prompt.includes('Unchanged since the last review: context only'));
+      assert.ok(comments.find(([num, body]) => num === n && body.includes(tickets[k].url)));
+      await end(r, true);
+      assert.deepEqual([p.labels, ctx.labels, tagged], [[approved], [], []]);
+      if (board === 'ado') {
+        tickets['AB#042'] = tickets[k];
+        const alias = add(95, { ticket: 'AB#042' });
+        const canonical = add(96, { ticket: k });
+        const both = add(97, { ticket: k, body: 'Also tracked as AB#042' });
+        await poll();
+        [r] = side.running();
+        assert.deepEqual([r.ticket, r.githubTicket, r.reviewNo, r.ticketUrl, r.prs.map(pr => pr.number)],
+          [k, k, 2, tickets[k].url, [alias.number, canonical.number, both.number]], 'both spellings resolve to one review in the existing ticket history');
+        await end(r, true);
+        delete tickets['AB#042'];
+      }
+    }
+    const unread = add(40, { ticket: 'GONE-1' });
+    await poll();
+    [r] = side.running();
+    assert.equal(r.ticket, `${unread.repo}#40`, 'a missing ticket leaves its PR ticketless');
+    await end(r, true);
+    const unavailable = add(55, { ticket: 'DOWN-1' });
+    await poll();
+    [r] = side.running();
+    assert.ok(r.ticket === 'DOWN-1' && logs.some(m => m.includes("couldn't read the ticket")));
+    assert.ok(comments.find(([num, body]) => num === 55 && body.includes(unavailable.url)), 'an unreadable ticket uses the PR-links template');
+    await end(r, true);
+    const checksum = add(56, { title: 'Use SHA-256' });
+    const otherChecksum = add(57, { body: 'Verify SHA-256' });
+    cfg.maxConcurrentReviews = 2;
+    await poll();
+    assert.deepEqual(side.running().map(run => [run.ticket, run.prs.length]), [[`${checksum.repo}#56`, 1], [`${otherChecksum.repo}#57`, 1]], 'a missing Jira key cannot join unrelated PRs');
+    for (const run of side.running()) await end(run, true);
+    cfg.maxConcurrentReviews = 1;
+    const denied = add(41, { noAccess: true });
+    const mixed = ticket('MIX-1');
+    denied.ticket = mixed.key; denied.body = mixed.key;
+    const allowed = add(52, { ticket: mixed.key });
+    await poll();
+    [r] = side.running();
+    assert.deepEqual([r.prs.map(p => p.number), r.contextPrs.map(p => p.number)], [[allowed.number], [denied.number]], 'a denied PR remains context for its group');
+    await end(r, true);
+    await poll(); await poll();
+    const skipped = side.finished().filter(r => r.status === 'skipped');
+    assert.deepEqual([side.running(), denied.labels, skipped.length], [[], [ask], 1]);
+    assert.match(skipped[0].error, /triage or write/);
+    denied.noAccess = false;
+    await poll();
+    assert.equal(side.state.noAccess[denied.url], undefined);
+    await end(side.running()[0], true);
+    const refusedPr = add(58, { labels: [] });
+    await gh.addLabel(refusedPr, ask);
+    const addLabel = gh.addLabel.bind(gh);
+    let attempts = 0;
+    gh.addLabel = async (pr, label, ...rest) => {
+      if (pr.number === 58 && label === busy) {
+        attempts++;
+        throw httpError(403, `Label '${busy}' is missing on ${pr.repo}. Someone with write access must create it.`);
+      }
+      return addLabel(pr, label, ...rest);
+    };
+    await poll(); await poll();
+    const owner = labels.owner('reviewer', refusedPr.url);
+    assert.deepEqual([attempts, side.state.noAccess[refusedPr.url], side.running(), refusedPr.labels], [1, 'refused', [], [ask]]);
+    assert.match(side.finished().find(run => run.prs[0].url === refusedPr.url).error, /write access must create/);
+    await gh.removeLabel(refusedPr, ask); await gh.addLabel(refusedPr, ask);
+    await poll();
+    assert.deepEqual([attempts, labels.owner('reviewer', refusedPr.url), Object.keys(labels.state().refused).filter(k => k.endsWith(refusedPr.url)).length], [2, owner, 1], 'a fresh request reuses the claim owner, even between polls');
+    await gh.removeLabel(refusedPr, ask);
+    await poll();
+    assert.equal(side.state.noAccess[refusedPr.url], undefined);
+    gh.addLabel = addLabel;
+    await gh.addLabel(refusedPr, ask); await poll();
+    assert.equal(side.running()[0].prs[0].url, refusedPr.url);
+    await end(side.running()[0], true);
+    const unwritten = add(68);
+    const readLabels = gh.prLabels;
+    gh.prLabels = async pr => {
+      if (pr.number === 68) throw httpError(502, 'Bad Gateway');
+      return readLabels(pr);
+    };
+    await poll();
+    assert.deepEqual([side.running(), side.state.labelClaims[unwritten.url], labels.pending(unwritten.url), unwritten.labels], [[], undefined, false, [ask]]);
+    assert.ok(logs.some(m => m.includes(unwritten.url) && m.includes('claim did not finish')));
+    gh.prLabels = readLabels;
+    await poll();
+    assert.deepEqual(side.running()[0].prs.map(p => p.number), [68], 'a claim that never wrote can retry next poll');
+    await end(side.running()[0], true);
+    const uncertain = add(69);
+    gh.addLabel = async (pr, label, ...rest) => {
+      await addLabel(pr, label, ...rest);
+      if (pr.number === 69 && label === busy) throw httpError(502, 'Bad Gateway');
+    };
+    await poll();
+    assert.ok(side.state.labelClaims[uncertain.url] && !side.running().length, 'a sent claim with no acknowledgement is still recoverable');
+    gh.addLabel = addLabel;
+    await poll();
+    assert.deepEqual([uncertain.labels, side.state.labelClaims[uncertain.url]], [[ask], undefined]);
+    uncertain.labels = [];
+    const occupied = add(84);
+    gh.prLabels = async pr => {
+      if (pr.url === occupied.url) {
+        await addLabel(pr, busy, undefined, 'teammate');
+        await gh.removeLabel(pr, ask);
+        await addLabel(pr, ask, undefined, 'teammate');
+      }
+      return readLabels(pr);
+    };
+    await poll();
+    gh.prLabels = readLabels;
+    assert.deepEqual([side.running(), side.state.labelClaims[occupied.url], occupied.labels, gh.events[occupied.url].length],
+      [[], undefined, [busy, ask], 3], 'a claim already on the PR at write time yields even when the request is newer');
+    const rival = add(42);
+    gh.labelEvents = async p => p.number === 42 ? [{ event: 'labeled', label: busy, actor: 'teammate', at: new Date().toISOString() }] : events(p);
+    await poll();
+    assert.deepEqual([side.running(), rival.labels, side.state.labelClaims], [[], [ask, busy], {}], 'a lost claim makes no further writes');
+    const held = add(43);
+    gh.labelEvents = async p => { if (p.number === 43) side.paused = true; return events(p); };
+    await poll();
+    assert.deepEqual([side.running(), held.labels, side.state.labelClaims], [[], [ask], {}], 'pause during the claim restores the request');
+    side.paused = false; gh.labelEvents = events;
+    gh.prs[4].labels = [];
+    app.me = gh.login = 'another-reviewer';
+    await poll();
+    assert.deepEqual([side.running()[0]?.prs[0].url, held.labels], [held.url, [busy]], 'a different login wins after the prior claim was released');
+    await end(side.running()[0], true);
+    app.me = gh.login = 'octocat';
+    for (const closed of [false, true]) {
+      const pr = closed ? add(73, { labels: [ask, approved] }) : add(72);
+      gh.labelEvents = async p => {
+        if (p.url === pr.url) {
+          if (closed) pr.state = 'closed';
+          else {
+            await gh.removeLabel(pr, ask);
+            await gh.addLabel(pr, approved, undefined, 'teammate');
+          }
+        }
+        return events(p);
+      };
+      await poll();
+      assert.deepEqual([side.running(), pr.labels, side.state.labelClaims], [[], closed ? [ask, approved] : [approved], {}], 'closing or withdrawing a request removes only the claim');
+    }
+    const drafted = add(82, { labels: [ask, changes, 'team'] });
+    gh.labelEvents = async pr => {
+      if (pr.url === drafted.url) drafted.draft = true;
+      return events(pr);
+    };
+    await poll();
+    assert.deepEqual([side.running(), drafted.labels, side.state.labelClaims], [[], [ask, changes, 'team'], {}], 'a PR drafted during the claim keeps its request and outcome');
+    gh.labelEvents = events;
+    for (const [n, actor, age] of [[44, 'octocat', 0], [45, 'other', 0], [46, '', 31], [47, '', 1]]) {
+      const pr = add(n, { labels: [busy] });
+      const at = Date.now() - age * 60_000;
+      side.state.labelClaims[pr.url] = { at, label: busy, number: n, repo: pr.repo };
+      if (actor) gh.events[pr.url] = [{ event: 'labeled', actor, at: new Date(at).toISOString(), label: busy }];
+    }
+    for (const [n, same] of [[59, true], [60, false]]) {
+      const pr = add(n, { labels: [busy] });
+      const at = new Date(Date.now() - 10 * 60_000).toISOString();
+      side.state.labelClaims[pr.url] = { at: Date.now(), label: busy, repo: pr.repo, number: n, seen: at };
+      gh.events[pr.url] = [{ event: 'labeled', label: busy, actor: 'octocat', at: same ? at : new Date().toISOString() }];
+    }
+    const gone = add(61, { gone: true, labels: [busy] });
+    side.state.labelClaims[gone.url] = { at: Date.now(), label: busy, repo: gone.repo, number: 61 };
+    gh.prs[59].headSha = 'pushed-while-down';
+    side.state.labelClaims[gh.prs[59].url].settle = 'approved';
+    await poll();
+    assert.deepEqual([gh.prs[59].labels, gh.prs[60].labels, side.state.labelClaims[gone.url]], [[ask], [busy], undefined], 'release respects the saved event and drops an unreadable PR after a lasting refusal');
+    assert.deepEqual([44, 45, 46, 47].map(n => gh.prs[n].labels), [[ask], [busy], [busy], [busy]]);
+    assert.deepEqual(Object.keys(side.state.labelClaims), [gh.prs[47].url], 'only the recent claim without a timeline event is kept');
+    gh.prs[44].labels = [];
+    await poll();
+    [r] = side.running();
+    assert.equal(r?.reviewedHeads[gh.prs[59].url], 'pushed-while-down', 'a recovered approval requests a review of the live head');
+    await end(r, true);
+    const taken = add(76, { labels: [] });
+    await gh.addLabel(taken, busy);
+    side.state.labelClaims[taken.url] = { at: Date.now(), label: busy, repo: taken.repo, number: taken.number };
+    const canLabel = gh.canLabel.bind(gh);
+    gh.canLabel = async repo => {
+      if (repo === taken.repo) await side.quickReview(taken.url);
+      return canLabel(repo);
+    };
+    cfg.quickLabels = true;
+    await poll();
+    [r] = side.running();
+    assert.deepEqual([r.quick, labels.owner('reviewer', taken.url), taken.labels], [true, r.id, [busy]], 'a quick review taking the PR during recovery keeps its labels');
+    await end(r, true);
+    gh.canLabel = canLabel;
+    cfg.quickLabels = false;
+    const dry = add(48);
+    app.dryRun = () => true;
+    await poll();
+    assert.ok(dry.labels.length === 1 && !side.running().length && logs.some(m => m.includes('would start a GitHub review')));
+    app.dryRun = () => false; dry.labels = [];
+    const lagged = add(49);
+    const read = gh.prByRef;
+    gh.prByRef = async pr => { if (pr.number === 49) lagged.labels = []; return read(pr); };
+    await poll();
+    assert.deepEqual([side.running(), lagged.labels], [[], []], 'a request lost since the search cannot be claimed');
+    gh.prByRef = read;
+    // A quick review takes the later group's PR after the search but before the poll gets to that group.
+    const first = add(62); const later = add(63);
+    cfg.maxConcurrentReviews = 3;
+    gh.prByRef = async pr => {
+      if (pr.url === first.url && !side.running().length) await side.quickReview(`${later.repo}#63`);
+      return read(pr);
+    };
+    await poll();
+    assert.deepEqual(side.running().map(run => [run.quick || false, run.prs[0].number]), [[true, 63], [false, 62]]);
+    assert.deepEqual([later.labels, gh.events[later.url]], [[ask], undefined], 'the later group is never claimed');
+    gh.prByRef = read;
+    for (const run of side.running()) await end(run, true);
+    later.labels = [];
+    const firstGroup = add(85);
+    const taggedLater = ticket('BOARD-86');
+    const covered = add(86, { ticket: taggedLater.key });
+    const ambiguous = add(87, { ticket: taggedLater.key, body: mixed.key });
+    gh.cloneMissing = async (...args) => {
+      taggedLater.tags = [ask];
+      return clone(...args);
+    };
+    app.boards = () => ['Team'];
+    await poll();
+    gh.cloneMissing = clone;
+    assert.deepEqual(side.running().map(run => [run.source, run.prs.map(p => p.number)]),
+      [['github', [firstGroup.number]], [undefined, [covered.number, ambiguous.number]]], 'a ticket tagged during the first setup gets a single board review');
+    for (const run of side.running()) await end(run, true);
+    cfg.maxConcurrentReviews = 1;
+    const retryTicket = ticket('BOARD-95');
+    const retryPr = add(95, { ticket: retryTicket.key, labels: [] });
+    retryTicket.tags = [ask];
+    await poll();
+    const failed = side.running()[0];
+    writeResult(failed, false);
+    await side.settle();
+    assert.deepEqual([retryTicket.tags, retryPr.labels, labels.pending(retryPr.url, failed.id)], [[ask], [busy], true]);
+    await side.poll(); // --once polls the board before draining the failed review's settlement
+    const [retry] = side.running();
+    await labels.drain();
+    assert.deepEqual([retry?.ticket, retryTicket.tags, retryPr.labels], [retryTicket.key, [busy], [busy]], 'the pending removal of our own label allows the board retry');
+    await end(retry, true);
+    retryTicket.tags = [ask];
+    retryPr.headSha = 'after-retry';
+    cfg.githubReviews = false;
+    const claimBeforeLabels = tracker.claim;
+    tracker.claim = async (...args) => { await claimBeforeLabels(...args); cfg.githubReviews = true; };
+    await poll();
+    tracker.claim = claimBeforeLabels;
+    assert.deepEqual([side.running(), retryTicket.tags, retryPr.labels], [[], [ask], [approved]], 'enabling GitHub reviews during the ticket claim defers the start until PR checks can run');
+    const priorEvents = gh.events[retryPr.url].length;
+    gh.cloneMissing = async (...args) => { cfg.githubReviews = false; return clone(...args); };
+    await poll();
+    gh.cloneMissing = clone;
+    const [tagsOnly] = side.running();
+    assert.deepEqual([tagsOnly.labels, retryTicket.tags, retryPr.labels], [undefined, [busy], [approved]], 'switching GitHub reviews off during setup starts the board review on tags alone');
+    cfg.githubReviews = true;
+    await end(tagsOnly, true);
+    assert.deepEqual([retryTicket.tags, gh.events[retryPr.url].length], [[approved], priorEvents], 'the board review also finishes on tags alone');
+    const boardTicket = ticket('BOARD-10');
+    const boardPr = add(50, { ticket: boardTicket.key });
+    const cleared = add(54, { ticket: boardTicket.key });
+    const boardDenied = add(51, { ticket: boardTicket.key, noAccess: true });
+    boardTicket.tags = [ask];
+    app.boards = () => ['Team'];
+    await gh.addLabel(boardPr, busy, undefined, 'teammate');
+    let clones = 0;
+    gh.cloneMissing = async () => { clones++; return []; };
+    await poll();
+    assert.equal(clones, 0, 'a teammate’s existing claim holds the board review before setup');
+    assert.deepEqual([side.running(), boardTicket.tags, boardPr.labels], [[], [ask], [ask, busy]], 'a teammate reviewing a PR holds its tagged ticket');
+    assert.ok(logs.some(m => m.includes(boardTicket.key) && m.includes(boardPr.url) && m.includes(busy) && m.includes('if no review is running')));
+    labels.own('reviewer', 'previous-context', [boardPr.url]);
+    labels.set('reviewer', 'previous-context', boardPr, { exact: [ask] });
+    await side.poll();
+    await labels.drain();
+    assert.deepEqual([clones, side.running(), boardTicket.tags, boardPr.labels], [0, [], [ask], [busy]], 'a queued context write leaves a teammate’s claim in force');
+    await gh.addLabel(boardPr, ask);
+    await gh.removeLabel(boardPr, busy);
+    gh.cloneMissing = async () => { await gh.addLabel(boardPr, busy, undefined, 'teammate'); return []; };
+    await poll();
+    assert.deepEqual([side.running(), boardTicket.tags], [[], [ask]], 'a teammate’s claim during setup still holds the board review');
+    gh.cloneMissing = clone;
+    await gh.removeLabel(boardPr, busy);
+    await poll();
+    [r] = side.running();
+    assert.deepEqual([r.source, boardTicket.tags, boardPr.labels, boardDenied.labels], [undefined, [busy], [busy], [ask]]);
+    assert.ok(logs.some(m => m.includes('BOARD-10') && m.includes(ask) && m.includes('r50#50') && m.includes('if no review is running')));
+    assert.match(side.labelNotes(r).join(' '), /triage or write/);
+    writeResult(r, true);
+    await side.settle();
+    assert.deepEqual([boardTicket.tags, cleared.labels, labels.pending(cleared.url, r.id), side.waits()], [[approved], [busy], true, []]);
+    boardTicket.tags = [ask];
+    const newPr = add(83, { ticket: boardTicket.key });
+    await gh.addLabel(cleared, ask);
+    await side.poll();
+    await labels.drain();
+    assert.deepEqual([side.running()[0].contextPrs.some(p => p.url === cleared.url), cleared.labels, boardPr.labels], [true, [approved], [approved]], '--once lands pending approvals before consuming context requests');
+    await end(side.running()[0], false);
+    assert.deepEqual([boardTicket.tags, newPr.labels], [[ask], []], 'the board tag alone requests its retry');
+    cfg.quickLabels = true;
+    cfg.maxConcurrentReviews = 2;
+    const existingQuick = await side.quickReview(cleared.url);
+    await poll();
+    const alongside = side.running().find(run => !run.quick);
+    assert.deepEqual([alongside?.prs.map(p => p.number), labels.owner('reviewer', cleared.url)], [[newPr.number], existingQuick.id],
+      'a quick review already running on approved context leaves the other PR free for its board review');
+    await end(existingQuick, true);
+    await end(alongside, true);
+    newPr.headSha = 'changed-again';
+    boardTicket.tags = [ask];
+    const claimTicket = tracker.claim;
+    tracker.claim = async (...args) => {
+      await side.quickReview(cleared.url);
+      await claimTicket(...args);
+    };
+    await poll();
+    tracker.claim = claimTicket;
+    const quick = side.running().find(run => run.quick);
+    const boardRun = side.running().find(run => !run.quick);
+    assert.ok(boardRun.contextPrs.some(pr => pr.url === cleared.url));
+    assert.equal(labels.owner('reviewer', cleared.url), quick.id, 'the running quick review keeps ownership of the board review’s context PR');
+    await end(quick, true);
+    assert.deepEqual(cleared.labels, [approved], 'the quick review can publish its outcome');
+    await end(boardRun, false);
+    boardTicket.tags = [ask];
+    cfg.maxConcurrentReviews = 1;
+    cfg.githubReviews = false;
+    const searches = gh.searches;
+    await poll();
+    [r] = side.running();
+    assert.deepEqual([r.labels, gh.searches, newPr.labels], [undefined, searches, []]);
+    await end(r, true);
+    const q = await side.quickReview(`${unread.repo}#40`);
+    await labels.drain();
+    assert.deepEqual([q.quick, unread.labels], [true, [busy]], 'quick labels remain independent');
+    await end(q, true);
+    cfg.githubReviews = true;
+    app.boards = () => [];
+    await gh.addLabel(unread, ask);
+    await poll();
+    assert.ok(side.waits().some(w => w.key === q.ticket) && !side.running().length && unread.labels.includes(ask), 'the quick wait owns a request on an unchanged approved PR');
+    const waitingTicket = ticket('WAIT-12');
+    add(74, { ticket: waitingTicket.key, labels: [] });
+    const removed = add(75, { ticket: waitingTicket.key, labels: [] });
+    const waiting = await side.quickReview(waitingTicket.key, { offered: true });
+    await end(waiting, true);
+    await poll();
+    removed.ticket = ''; removed.title = 'Standalone change';
+    await gh.addLabel(removed, ask);
+    gh.prs[74].flaky = true;
+    await poll();
+    assert.equal(side.running().length, 0, 'a failed wait lookup falls back to the last run');
+    gh.prs[74].flaky = false;
+    await poll();
+    [r] = side.running();
+    assert.deepEqual([r?.source, r?.prs[0].url, side.waits().some(w => w.key === waiting.ticket)], ['github', removed.url, true]);
+    await end(r, true);
+    const capped = add(64);
+    await poll();
+    [r] = side.running(); r.capped = 'time cap 1 min';
+    await end(r, false);
+    assert.deepEqual([r.status, capped.labels], ['failed', []]);
+    assert.ok(logs.some(m => m.includes(r.ticket) && m.includes('hit a cap')));
+    const unposted = add(65);
+    await poll();
+    gh.reviewedSince = async () => false;
+    [r] = side.running(); await end(r, true);
+    assert.deepEqual([r.status, r.unposted, unposted.labels], ['failed', [unposted.url], []], 'a posting failure is never retried automatically');
+    gh.reviewedSince = async () => true;
+    const stopped = add(66);
+    await poll();
+    [r] = side.running(); r.status = 'stopping';
+    fs.writeFileSync(r.resultPath, '{}');
+    assert.match(side.stopText(r), /GitHub review.*Prowl posts it.*Label its PRs again/);
+    await gh.addLabel(stopped, ask);
+    await end(r, false);
+    assert.deepEqual([r.status, stopped.labels], ['stopped', [ask]], 'a manual request made during the run survives a stop');
+    stopped.labels = [];
+    const related = add(67, { labels: [], ticket: mixed.key });
+    denied.headSha = 'new-context-head';
+    allowed.headSha = 'new';
+    await gh.addLabel(allowed, ask);
+    await poll();
+    [r] = side.running();
+    assert.ok(r.relatedUrls.includes(related.url));
+    assert.equal(r.reviewedHeads[denied.url], 'sha41', 'related context keeps its last reviewed head for a later delta');
+    assert.equal(r.reviewedHeads[related.url], undefined, 'new context has no reviewed head');
+    await end(r, true);
+    allowed.headSha = 'next';
+    const manual = await side.reReview(r);
+    assert.deepEqual(manual.paste.prs.map(p => p.number), [allowed.number], 'History re-reviews only the requested PRs');
+    await end(manual, true);
+    cfg.maxReviewRounds = 1;
+    first.headSha = 'new'; await gh.addLabel(first, ask);
+    await poll();
+    assert.ok(!side.running().length && first.labels.length === 0 && logs.some(m => m.includes('r62#62') && m.includes('round cap')));
+    cfg.maxReviewRounds = 0;
+    const search = gh.labeledPrs.bind(gh);
+    gh.labeledPrs = async (...args) => ({ ...await search(...args), capped: true });
+    await poll();
+    assert.ok(logs.some(m => m.includes('1000 PRs')));
+    gh.labeledPrs = search;
+    const noEvent = add(53);
+    let reads = 0;
+    gh.labelEvents = async pr => { if (pr.number === 53) { reads++; return []; } return events(pr); };
+    await poll();
+    assert.deepEqual([reads, side.running()[0]?.prs[0]?.url, noEvent.labels], [3, noEvent.url, [busy]], 'three empty timeline reads allow the review to start');
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 }

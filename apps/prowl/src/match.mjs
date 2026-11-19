@@ -41,6 +41,14 @@ export function swapTags(tags, drop, add) {
 export const mentions = (text, key) =>
   new RegExp(`(?<![a-z0-9])${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?!\\d)`, 'i').test(text || '');
 
+/** Candidate ticket keys in PR prose, including work item links. The tracker confirms which keys exist. */
+export function mentionedKeys(text, taskBoard) {
+  const matches = taskBoard === 'ado'
+    ? [...text.matchAll(/(?<![a-z0-9])ab#(\d+)|\/_workitems\/edit\/(\d+)/gi)].map(m => `AB#${m[1] || m[2]}`)
+    : [...text.matchAll(/(?<![a-z0-9])[a-z][a-z0-9_]+-\d+/gi)].map(m => m[0].toUpperCase());
+  return [...new Set(matches)];
+}
+
 /** Flat `key: value` front matter at the top of a markdown file (numbers parsed), or null. */
 export function frontMatter(md) {
   const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(md || '');

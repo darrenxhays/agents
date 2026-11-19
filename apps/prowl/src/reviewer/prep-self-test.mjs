@@ -8,7 +8,7 @@ import { loadConfig } from '../config.mjs';
 import { addWorktree, fetchRefs } from '../git.mjs';
 import { reviewDetails } from '../github.mjs';
 import { commentsLine, conventionFiles, detailsFindings, isOwnRoot, NO_ROOT, ownLines, ownRoot, parkedLines, parkedSource, prepareReview, prepDir, prFolder, readRoot, removePrep, renderExisting, renderPrior, sweepWorktrees, textBlock, tickPath } from './prep.mjs';
-import { fillPrep, overdue, PREP_SLOT, prepListing, prepSection, tidyLogs, timedFrom } from './reviews.mjs';
+import { createReview, fillPrep, overdue, PREP_SLOT, prepListing, prepSection, tidyLogs, timedFrom } from './reviews.mjs';
 
 const WIN = process.platform === 'win32';
 
@@ -254,7 +254,7 @@ export async function run(assert, { appDir }) {
     write(seed, 'unrelated.txt', 'u\n');
     g(seed, 'add', '-A'); g(seed, 'commit', '-m', 'more');
     const head2 = g(seed, 'rev-parse', 'HEAD');
-    g(seed, 'push', '-f', 'origin', 'HEAD:refs/pull/1/head');
+    g(seed, 'push', '-f', 'origin', 'HEAD:refs/pull/1/head', 'HEAD:refs/pull/2/head');
     g(clone, 'config', 'core.hooksPath', '.githooks'); // the PR brings a hook, and the clone is set to use it
     rn = runOf({ [pr.url]: head2 });
     prep = await prepareReview(cfg, appDir, rn, { prior: { reviewedHeads: { [pr.url]: head1 } }, deps: depsOf(head2) });
@@ -264,6 +264,17 @@ export async function run(assert, { appDir }) {
     assert.ok(fs.readFileSync(p.delta.patch, 'utf8').includes('+let z = 5;') && /^2\t1\tapi\/x\.js$/m.test(fs.readFileSync(p.delta.files, 'utf8')));
     assert.ok(!fs.existsSync(path.join(root, `read-${rn.id}`, 'pr-hook-ran')) && !fs.existsSync(path.join(root, 'pr-hook-ran')), "a hook the PR brings doesn't run");
     assert.ok(fs.readFileSync(p.facts, 'utf8').includes(`- Since the previous review: \`${head1}..${head2}\`, 4 lines in the PR's own files.`));
+    await removePrep(prep);
+    const sibling = { ...pr, url: 'https://github.com/acme/widgets/pull/2', number: 2 };
+    const prior = { ...rn, reviewNo: 1, endedAt: Date.now(), reviewedHeads: { [pr.url]: head1 } };
+    rn = createReview(cfg, { ticket: { key: 'AB#42', title: 'Read sibling context' }, source: 'github', prs: [sibling],
+      relatedPrs: [pr], heads: { [sibling.url]: head2 }, prior, prepping: true, appDir });
+    prep = await prepareReview(cfg, appDir, rn, { prior, deps: depsOf(head2) });
+    const context = prep.prs.find(p => p.role === 'context');
+    assert.equal(context.error, '', context.error);
+    assert.deepEqual([g(context.worktree, 'rev-parse', 'HEAD'), rn.reviewedHeads[pr.url]], [head2, head1],
+      'related context checks out its current commit and keeps the last reviewed commit for its next delta');
+    assert.ok(fs.readFileSync(context.facts, 'utf8').includes(`Head, the commit to read: \`${head2}\``));
     await removePrep(prep);
     rn = runOf({ [pr.url]: head2 });
     prep = await prepareReview(cfg, appDir, rn, { prior: { reviewedHeads: { [pr.url]: head2 } }, deps: depsOf(head2) });

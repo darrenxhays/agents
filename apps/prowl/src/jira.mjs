@@ -29,7 +29,7 @@ async function api(cfg, route, { method = 'GET', body } = {}) {
   if (!res.ok) {
     let why = text.slice(0, 200);
     try { const j = JSON.parse(text); why = [...(j.errorMessages || []), ...Object.values(j.errors || {})].join('; ') || why; } catch { /* not JSON */ }
-    throw new Error(`Jira ${method} ${route.split('?')[0]}: ${res.status} ${res.status === 401 ? 'not signed in: the API token is wrong or expired (run prowl --setup)' : why}`);
+    throw Object.assign(new Error(`Jira ${method} ${route.split('?')[0]}: ${res.status} ${res.status === 401 ? 'not signed in: the API token is wrong or expired (run prowl --setup)' : why}`), { status: res.status });
   }
   return text ? JSON.parse(text) : null;
 }

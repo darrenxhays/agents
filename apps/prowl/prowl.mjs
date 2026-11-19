@@ -98,9 +98,10 @@ if ((reviewPaste != null && !reviewPaste.trim()) || (buildPaste != null && !buil
 }
 let tui = null; // set once the TUI is up; until then (and with --once) logs go to stdout
 
+const configWarnings = [];
 let cfg;
 try {
-  cfg = loadConfig();
+  cfg = loadConfig(msg => configWarnings.push(msg));
 } catch (e) { // config.json doesn't parse, or a setting in it can't be used: the message names it
   console.error(`${e.message}\nFix it there, then start Prowl again.`);
   process.exit(1);
@@ -149,6 +150,7 @@ function log(side, level, msg, key) {
   return true;
 }
 const forget = (side, key) => lastByKey.delete(`${side}:${key}`);
+for (const line of configWarnings) log('prowl', 'warn', line, line);
 for (const line of takeNameNotes()) log('prowl', 'info', line); // once, at the launch that moved config.json to the prowl: tag names
 app.forget = forget;
 
@@ -168,7 +170,7 @@ const builder = createBuilder(app, sideDeps('builder'));
 // Label writes queued by a Prowl from before the labels had names of their own land under today's names.
 labels.rename(op => renamedWrite(app.cfg, op, (run => (run ? reviewer.outcomeLabel(run, op.url) : ''))(reviewer.state.runs.find(r => r.id === op.owner))));
 const sides = [reviewer, builder];
-const shell = createShell(app, sides, { log, reload: () => { app.cfg = loadConfig(); }, changed: configChanged });
+const shell = createShell(app, sides, { log, reload: () => { app.cfg = loadConfig(msg => log('prowl', 'warn', msg, msg)); }, changed: configChanged });
 
 // One instance per user: two would both finish the same sessions.
 const holder = lockHolder(LOCK);
@@ -197,6 +199,8 @@ fs.writeFileSync(LOCK, String(process.pid));
 process.on('exit', () => { try { if (Number(fs.readFileSync(LOCK, 'utf8')) === process.pid) fs.unlinkSync(LOCK); } catch { /* gone */ } });
 // A build left running would collide with the same checks run again next launch: every check command is killed outright.
 process.on('exit', () => { reviewer.abortChecks(); killChecks(); });
+
+reviewer.dropQueuedClaims();
 
 // Fix my PRs was removed in 2.12.0: stop its sessions and move its settings aside, once.
 let migrated = [];

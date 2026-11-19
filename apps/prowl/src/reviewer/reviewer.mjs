@@ -1,14 +1,14 @@
-// The Reviewer: polls the boards for tickets tagged for review and runs Claude Code's prowl-review skill on their open,
-// non-draft GitHub PRs. src/shell.mjs drives poll() and tick(); the Builder never reads its state (state.json).
+// The Reviewer polls GitHub for labelled PRs and the boards for tagged tickets, and runs prowl-review on their ready PRs.
+// src/shell.mjs drives poll() and tick(); the Builder never reads its state (state.json).
 import fs from 'node:fs';
 import path from 'node:path';
 import { CHECKS_PATH, CONFIG_DIR, readChecks, saveConfig, writeJson } from '../config.mjs';
 import * as github from '../github.mjs';
 import { createLabels, refusal } from '../labels.mjs';
-import { askLabel, labelNames, labelsOf, labelWrite, outcomeTag, pendingTag, reviewTags, tagReader } from '../names.mjs';
+import { askLabel, labelNames, labelsOf, labelWrite, outcomeTag, pendingTag, reviewTags, sameLabel, tagReader } from '../names.mjs';
 import { acceptOffer, offerFor } from '../offers.mjs';
 import { autoName, cleanName, notARef, parsePaste, ticketKey } from '../paste.mjs';
-import { frontMatter } from '../match.mjs';
+import { frontMatter, mentionedKeys, mentions } from '../match.mjs';
 import { fill, loadOutputTemplates, outputTemplate } from '../templates.mjs';
 import * as rv from './reviews.mjs';
 import { checkPlan, checksLine, prChecks } from './checks.mjs';
@@ -19,6 +19,42 @@ import { planPublish } from './publish-plan.mjs';
 import { publishReview } from './publish.mjs';
 import { prName, reportMd } from './render.mjs';
 import { approvable, checkResult, notCarried, verdictLabels } from './result.mjs';
+
+/** Group PRs by their resolved ticket key or, without one, by the Builder's list of sibling PRs. */
+export function labelGroups(prs, ticketByUrl) {
+  const groups = [];
+  for (const pr of prs) {
+    const ticket = ticketByUrl.get(pr.url) || '';
+    const list = /^The other PRs for [^\r\n]+:\r?\n(?:[ \t]*\r?\n)*((?:- https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+[ \t]*(?:\r?\n|$))+)/im.exec(pr.body || '');
+    const linked = new Set(list ? list[1].match(/https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/gi) : []);
+    const urls = new Set([pr.url, ...linked].map(u => u.toLowerCase()));
+    const matches = groups.filter(g => ticket ? g.ticket === ticket : !g.ticket && [...g.urls].some(u => urls.has(u)));
+    const group = matches.shift() || { ticket, prs: [], linked: new Set(), urls: new Set() };
+    if (!groups.includes(group)) groups.push(group);
+    for (const other of matches) {
+      group.prs.push(...other.prs);
+      for (const u of other.linked) group.linked.add(u);
+      for (const u of other.urls) group.urls.add(u);
+      groups.splice(groups.indexOf(other), 1);
+    }
+    group.prs.push(pr);
+    for (const u of urls) group.urls.add(u);
+    for (const u of linked) group.linked.add(u);
+  }
+  return groups.map(({ ticket, prs, linked }) => ({ ticket, prs, linked: [...linked].filter(u => !prs.some(p => u.toLowerCase() === p.url.toLowerCase())) }));
+}
+
+/** The first claim in the current request, in an oldest-first timeline. */
+export function labelClaim(events, cfg) {
+  const ask = askLabel(cfg);
+  const { inReview } = labelNames(cfg);
+  let claim = null;
+  for (const e of events) {
+    if ((e.event === 'labeled' && sameLabel(e.label, ask)) || (e.event === 'unlabeled' && sameLabel(e.label, inReview))) claim = null;
+    else if (!claim && e.event === 'labeled' && sameLabel(e.label, inReview)) claim = e;
+  }
+  return claim;
+}
 
 /**
  * The Reviewer side. `deps`: { log(level, msg, key), forget(key), hoot(text, mood), appDir, trackers, github, labels (the
@@ -42,7 +78,7 @@ export function createReviewer(app, deps) {
   // Reviews finished before Prowl recorded what a session ran on: read once from their logs, at launch.
   try { if (backfillUsage(side.state.runs.filter(r => !r.pr && r.status !== 'running' && r.status !== 'stopping'), deps.readLogUsage)) rv.saveState(side.state); } catch { /* Stats shows them as not recorded */ }
   /** What Stats shows, one entry per finished review that has an end time. */
-  side.spend = () => side.finished().filter(r => !r.pr && r.endedAt).map(r => ({ ticket: r.ticket, title: r.title, ticketUrl: r.ticketUrl || '', label: `${r.reviewNo > 1 ? `re-review #${r.reviewNo}` : 'first review'}${r.quick ? ' · quick' : ''}`,
+  side.spend = () => side.finished().filter(r => !r.pr && r.status !== 'skipped' && r.endedAt).map(r => ({ ticket: r.ticket, title: r.title, ticketUrl: r.ticketUrl || '', label: `${r.reviewNo > 1 ? `re-review #${r.reviewNo}` : 'first review'}${r.quick ? ' · quick' : r.source === 'github' ? ' · GitHub review' : ''}`,
     at: r.endedAt, costUsd: r.costUsd, failed: ['failed', 'stopped'].includes(r.status), parts: [{ at: r.endedAt, ms: r.endedAt - r.startedAt, costUsd: r.costUsd, models: r.models, model: r.model, effort: r.effort }] }));
   side.needs = () => []; // nothing waits on you: a review either runs, or leaves its ticket tagged for a person
   side.alive = () => side.running().some(rv.alive);
@@ -63,9 +99,13 @@ export function createReviewer(app, deps) {
   // looked up or named. Two reviews must never run on one PR at once and post over each other.
   const settingUp = new Map(); // a key of its own -> { ticket, prs }
   const naming = new Set(); // PR URLs
+  /** One review at a time owns a ticket key, including starts still checking their PRs. */
+  const keyHeld = (key, except) => side.running().some(r => r.ticket === key) || [...settingUp].some(([mark, r]) => mark !== except && r.ticket === key);
+  /** Only previously reviewed PRs count toward the round cap. */
+  const coveredBy = done => new Set(done.flatMap(r => [...r.prs, ...(r.contextPrs || []).filter(p => !r.relatedUrls?.includes(p.url))].map(p => p.url)));
 
   /** Why a quick review of `ready` can't start, or ''. `reserved`: also count PRs another quick review is naming. */
-  function heldBy(ready, reserved) {
+  function heldBy(ready, reserved, except) {
     const left = [...ready];
     const parts = [];
     const take = (has, what) => {
@@ -74,7 +114,9 @@ export function createReviewer(app, deps) {
       for (const p of held) left.splice(left.indexOf(p), 1);
       parts.push(`${held.map(p => `${p.repo}#${p.number}`).join(', ')} ${held.length > 1 ? 'are' : 'is'} ${what}`);
     };
-    for (const r of [...side.running(), ...settingUp.values()]) take(u => (r.prs || []).some(q => q.url === u), `under review in ${r.ticket}`); // its context PRs don't count
+    for (const r of [...side.running(), ...settingUp.values()]) {
+      if (r !== settingUp.get(except)) take(u => (r.prs || []).some(q => q.url === u), `under review in ${r.ticket}`); // its context PRs don't count
+    }
     if (reserved) take(u => naming.has(u), 'already being set up for a review');
     return parts.length ? `Quick review: ${parts.join('; ')}; start it again once ${parts.length > 1 ? 'they end' : 'that one ends'}` : '';
   }
@@ -187,7 +229,8 @@ export function createReviewer(app, deps) {
 
   /**
    * Creates a review and does its setup, with a stand-in in Running meanwhile: its PRs checked out in worktrees, and
-   * their facts, diffs and comments written to files. Nothing is claimed or saved yet. The whole setup has a
+   * their facts, diffs and comments written to files. A board ticket is claimed after setup. GitHub PR claims
+   * are already saved, and releaseClaims gives them back after a quit. The whole setup has a
    * 10-minute limit (a step can't be interrupted): past it the session sets itself up, and whatever the abandoned
    * setup checks out later is removed as soon as it finishes. `stand`: its Running row (standFor). Resolves { run, stand }.
    */
@@ -294,18 +337,26 @@ export function createReviewer(app, deps) {
     const pruned = rv.tidyLogs(cfg().logRetentionDays, side.running()); // on launch, then once per poll
     if (pruned) log('info', `Deleted ${pruned} review log file${pruned > 1 ? 's' : ''} older than ${cfg().logRetentionDays} days`);
     app.me ||= await gh.me();
+    const permissions = new Map();
+    if (githubOn() && !app.dryRun()) await releaseClaims(permissions);
     await checkHumanApprovals(); // before the board checks: a quick review needs neither boards nor an org
     await checkWaits();
+    if (githubOn()) await checkLabeled(permissions);
     const tracker = app.tracker();
     const boards = app.boards();
+    if (!cfg().githubOwner.trim() && (cfg().githubReviews || boards.length)) {
+      if (log('warn', 'No GitHub org configured: set it in Config (4).', 'github-org')) hoot('I need a GitHub org to search for PRs. Set it in Config (4).');
+      return;
+    }
+    forget('github-org');
     if (!boards.length) {
-      if (log('warn', `No ${tracker.name} boards configured: add one in Config (4).`, 'boards')) hoot(`I have no ${tracker.name} boards to watch yet. Add one in Config (4).`);
+      if (githubOn()) {
+        const msg = `Watching GitHub only: checking ${cfg().githubOwner} for '${askLabel(cfg())}'.`;
+        if (log('info', msg, 'github-only')) hoot(msg);
+      } else if (log('warn', `No ${tracker.name} boards configured: add one in Config (4).`, 'boards')) hoot(`I have no ${tracker.name} boards to watch yet. Add one in Config (4).`);
       return;
     }
-    if (!cfg().githubOwner) {
-      if (log('warn', 'No GitHub org configured: set it in Config (4).', 'boards')) hoot('I need a GitHub org to search for PRs. Set it in Config (4).');
-      return;
-    }
+    forget('github-only');
     hoot(`Checking ${boards.length > 1 ? 'the boards' : 'the board'} for new review tasks...`);
     const seen = new Set();
     let allRead = true;
@@ -319,7 +370,7 @@ export function createReviewer(app, deps) {
         for (const ticket of tickets) {
           if (seen.has(ticket.key)) continue;
           seen.add(ticket.key);
-          await consider(tracker, ticket);
+          await consider(tracker, ticket, permissions);
         }
       } catch (e) {
         allRead = false;
@@ -333,11 +384,10 @@ export function createReviewer(app, deps) {
     if (untagged.length) save();
   };
 
-  async function consider(tracker, ticket) {
+  async function consider(tracker, ticket, permissions) {
     const c = cfg();
     const key = `ticket:${ticket.key}`;
-    if (side.running().some(r => r.ticket === ticket.key)) return; // re-tagged mid-review: re-reviewed once this one ends
-    if (preparing.has(ticket.key)) return; // its review is being set up
+    if (keyHeld(ticket.key)) return; // re-tagged mid-review: re-reviewed once this one ends
     // ...and so is a ticket someone else's Prowl is reviewing: claiming it now would review its PRs twice at once.
     const busyTag = (ticket.tags || []).find(inReview);
     if (busyTag) {
@@ -352,17 +402,18 @@ export function createReviewer(app, deps) {
     // trigger tag is someone else's (claimed, or moved on), and is left out quietly.
     const free = hold(); // held from before the read: a quick review admitted meanwhile can't take the last slot too
     const mark = {}; // what this ticket holds in settingUp
+    settingUp.set(mark, { ticket: ticket.key, prs: [] });
     try {
       ticket = await tracker.current(c, ticket);
       if (!(ticket.tags || []).some(isTrigger)) return;
-      await prepareTicket(tracker, ticket, key, free, mark);
+      await prepareTicket(tracker, ticket, key, free, mark, permissions);
     } finally {
       free();
       settingUp.delete(mark);
     }
   }
 
-  async function prepareTicket(tracker, ticket, key, free, mark) {
+  async function prepareTicket(tracker, ticket, key, free, mark, permissions) {
     const { state } = side;
     const c = cfg();
     // Drafts are treated as if they weren't there: a draft often waits on the ticket's other PRs.
@@ -382,7 +433,7 @@ export function createReviewer(app, deps) {
     }
     const done = state.runs.filter(r => r.ticket === ticket.key && r.status === 'done').sort((a, b) => b.endedAt - a.endedAt);
     const prior = done[0];
-    const covered = new Set(done.flatMap(r => [...r.prs, ...(r.contextPrs || [])].map(p => p.url))); // PRs an earlier review covered
+    const covered = coveredBy(done); // PRs an earlier review covered
     const heads = {}; // PR URL -> its head commit now ('' if unreadable)
     for (const pr of prs) heads[pr.url] = await gh.headSha(pr).catch(() => '');
     // A re-review leaves out the PRs the last review approved that have no new commits since; they stay as context.
@@ -404,10 +455,26 @@ export function createReviewer(app, deps) {
       leftOut.push(...toReview.filter(p => !fresh.includes(p)));
       toReview = fresh;
     }
+    if (heldBy(toReview, true, mark)) return log('info', `${ticket.key}: waiting for another review of its PRs (${names(toReview)}) to finish`, key);
     settingUp.get(mark).prs = toReview; // the approved, unchanged ones are only context
     const skipped = approved.length ? ` (already approved, unchanged: ${approved.map(p => `${p.repo}#${p.number}`).join(', ')})` : '';
     if (app.dryRun()) return log('info', `${ticket.key}: would review ${toReview.map(p => p.url).join(' ') || 'nothing'}${skipped}`, key);
     if (!on()) return undefined; // switched off while this poll ran
+    const blockedByPr = async () => {
+      const label = labelNames(c).inReview;
+      for (const pr of toReview) {
+        if (labels.pending(pr.url, '', label)) continue; // a previous run's settlement can still be queued in --once
+        try {
+          if (!hasLabel(await gh.prByRef(pr), label)) continue;
+          log('info', `${ticket.key}: waiting for the review of ${pr.url} labelled '${label}' (if no review is running, take '${label}' off)`, key);
+        } catch (e) {
+          log('warn', `${ticket.key}: couldn't check the labels on ${pr.url} (${e.message}); leaving the ticket tagged`, key);
+        }
+        return true;
+      }
+      return false;
+    };
+    if (cfg().githubReviews && await blockedByPr()) return;
 
     // Everything slow comes before the claim, so nothing is awaited between the claim and the session's start: a
     // quit or crash while a repo clones then leaves the ticket tagged, not In Review with no review running.
@@ -450,6 +517,21 @@ export function createReviewer(app, deps) {
     /** The setup's worktrees go when the review doesn't start after all. */
     const unset = async () => { if (set) await dropPrep(set.run); };
     if (stand) await sizesIn(stand); // before the claim: nothing is awaited between the session's start and its run being saved
+    const boardLabels = [];
+    const labelNotes = {};
+    const checkedLabels = cfg().githubReviews;
+    if (checkedLabels) {
+      for (const pr of [...toReview, ...approved, ...leftOut.filter(p => !p.draft)]) {
+        try {
+          if (await mayLabel(pr, permissions)) { boardLabels.push(pr); continue; }
+          labelNotes[pr.url] = accessReason(pr);
+        } catch (e) {
+          labelNotes[pr.url] = `Couldn't check label access on ${pr.repo} (${e.message})`;
+        }
+        log('warn', `${ticket.key}: ${labelNotes[pr.url]}; the ticket's tags carry the review`, `board-label:${pr.url}`);
+      }
+      if (cfg().githubReviews && await blockedByPr()) return unset();
+    }
     const to = toReview.length ? c.tags.inProgress : tagsNow().approved; // nothing to re-review: straight to approved, in one write a teammate's poller can't race
     try {
       await tracker.claim(c, ticket, t => isTrigger(t) || ours(t), to);
@@ -466,6 +548,7 @@ export function createReviewer(app, deps) {
       if (r.pendingTag != null) { (state.releases ??= []).push(r); save(); }
     };
     if (!toReview.length) {
+      if (cfg().githubReviews && boardLabels.length) queueStartLabels(c, `board-${ticket.key}-${Date.now()}`, [], boardLabels);
       hoot(`Every PR for ${ticket.title} is already approved, marking as '${to}'`, 'cheer');
       return log('ok', `${ticket.key}: every PR is already approved and unchanged since; nothing to re-review`);
     }
@@ -479,6 +562,11 @@ export function createReviewer(app, deps) {
       await unset();
       return release('');
     }
+    if (cfg().githubReviews && !checkedLabels) {
+      log('info', `${ticket.key}: GitHub reviews switched on during the ticket claim; checking its PRs next poll`);
+      await unset();
+      return release();
+    }
     hoot(`Starting reviews for ${ticket.title}, marking as '${c.tags.inProgress}'`);
     let run;
     try {
@@ -491,6 +579,11 @@ export function createReviewer(app, deps) {
       return release();
     }
     state.runs.push(run);
+    if (cfg().githubReviews) {
+      run.labels = true;
+      run.labelNotes = labelNotes;
+      queueStartLabels(c, run.id, boardLabels.filter(p => toReview.includes(p)), boardLabels.filter(p => !toReview.includes(p)));
+    }
     preparing.delete(ticket.key);
     if (run.rolesNote) log('warn', rv.rolesWarning(run), 'roles');
     free(); // the run counts itself from here
@@ -505,6 +598,413 @@ export function createReviewer(app, deps) {
     return announce(run);
     } finally {
       preparing.delete(ticket.key); // whichever way it went, its stand-in goes
+    }
+  }
+
+  // ---- GitHub reviews: the Review label asks, the in-review label claims ----
+
+  /** Recheck before each claim in case the poll was paused or switched off during a read. */
+  const githubOn = () => on() && !side.paused && cfg().githubReviews && cfg().githubOwner.trim();
+  /** The live request and claim use the same exact label match as the search. */
+  const hasLabel = (pr, name) => pr.labels?.some(l => sameLabel(l, name));
+  /** The permission check's reason also appears in History for the skipped PR. */
+  const accessReason = pr => `Labelling ${pr.repo} needs triage or write access`;
+  /** GraphQL reports missing PRs and repositories without an HTTP error status. */
+  const lastingRefusal = e => refusal(e) || /Could not resolve to a (PullRequest|Repository)/i.test(e.message);
+  const sleep = deps.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms)));
+
+  /** Cache access per repo for the whole poll, including any board reviews that follow. */
+  function mayLabel(pr, permissions) {
+    const repo = pr.repo.toLowerCase();
+    if (!permissions.has(repo)) permissions.set(repo, gh.canLabel(pr.repo).catch(e => {
+      if (lastingRefusal(e)) return false;
+      throw e;
+    }));
+    return permissions.get(repo);
+  }
+
+  /** Reviewed PRs change owners. Context PRs use up their request after any pending outcome. */
+  function queueStartLabels(c, owner, reviewed, context) {
+    labels.own('reviewer', owner, reviewed.map(p => p.url));
+    for (const p of reviewed) labels.set('reviewer', owner, p, labelWrite(c, labelNames(c).inReview, ['ask', 'approved', 'changes'], ['ask', 'inReview', 'done']));
+    for (const p of context) {
+      if (side.running().some(r => r.prs?.some(q => q.url === p.url))) continue;
+      const previous = labels.owner('reviewer', p.url);
+      const contextOwner = previous && labels.pending(p.url, previous) ? previous : owner;
+      if (contextOwner !== previous) labels.own('reviewer', contextOwner, [p.url]);
+      labels.set('reviewer', contextOwner, p, labelWrite(c, '', ['ask'], ['ask']));
+    }
+  }
+
+  /** A stable queue owner lets later requests reuse the same PR's claim records. */
+  const claimOwner = url => `claim-${url}`;
+
+  /** At launch, leave interrupted claims to releaseClaims before any queued add can run. */
+  side.dropQueuedClaims = () => {
+    for (const url of Object.keys(side.state.labelClaims || {})) labels.drop(claimOwner(url), [url]);
+  };
+
+  /** Once settled or lost, a claim needs no further release checks. */
+  function forgetClaim(url) {
+    delete side.state.labelClaims[url];
+    save();
+  }
+
+  /** Hand the settlement to the durable label queue before forgetting the claim. */
+  function settleClaim(pr, claim, role) {
+    const c = cfg();
+    const add = role === 'ask' ? askLabel(c) : role === 'approved' ? labelNames(c).approved : '';
+    const write = role === 'withdrawn' ? labelWrite(c, '', [], [])
+      : labelWrite(c, add, ['ask', 'inReview', 'approved', 'changes'], ['ask', 'inReview', 'done']);
+    write.exact.push(claim.label); // a label renamed after the claim still comes off
+    const owner = claimOwner(pr.url);
+    labels.own('reviewer', owner, [pr.url]);
+    labels.set('reviewer', owner, pr, write);
+    forgetClaim(pr.url); // the durable queue now owns the settlement
+  }
+
+  /** Release orphaned claims only while the latest in-review event can still be attributed to this start. */
+  async function releaseClaims(permissions) {
+    for (const [url, claim] of Object.entries(side.state.labelClaims || {})) {
+      if (!githubOn() || app.dryRun()) break;
+      const pr = { url, repo: claim.repo, number: claim.number };
+      if (heldBy([pr], true) || labels.pending(url)) continue;
+      try {
+        const live = await gh.prByRef(pr);
+        if (live.state !== 'open' || !hasLabel(live, claim.label)) { forgetClaim(url); continue; }
+        const last = (await gh.labelEvents(pr)).findLast(e => e.event === 'labeled' && sameLabel(e.label, claim.label));
+        if (!last) { // allow 30 minutes for the timeline to catch up before abandoning an unverifiable claim
+          if (Date.now() - claim.at > 30 * 60_000) {
+            log('warn', `${url}: no timeline event for its claim after 30 minutes; leaving the labels alone`);
+            forgetClaim(url);
+          }
+          continue;
+        }
+        // Without a saved event time, allow five minutes of clock skew but leave later claims by the same login alone.
+        if (!sameLabel(last.actor, app.me) || (claim.seen ? last.at !== claim.seen : Math.abs(Date.parse(last.at) - claim.at) > 5 * 60_000)) {
+          forgetClaim(url);
+          continue;
+        }
+        if (!(await mayLabel(pr, permissions))) { log('warn', accessReason(pr)); forgetClaim(url); continue; }
+        if (heldBy([pr], true) || labels.pending(url)) continue;
+        if (githubOn() && !app.dryRun()) settleClaim(pr, claim, 'ask');
+      } catch (e) {
+        log('warn', `${url}: couldn't release its label claim (${e.message})`, `release:${url}`);
+        if (lastingRefusal(e)) forgetClaim(url);
+      }
+    }
+  }
+
+  /** One History row per request: true retries the permission check, 'refused' waits for a fresh request. */
+  function noteNoAccess(pr, key, refused = '', requestEvent = null) {
+    const error = refused || accessReason(pr);
+    log('warn', `${pr.url}: not reviewed. ${error}`, `access:${pr.url}`);
+    if (app.dryRun() || side.state.noAccess?.[pr.url]) return;
+    const at = Date.now();
+    (side.state.noAccess ??= {})[pr.url] = refused ? 'refused' : true;
+    side.state.runs.push({ id: `skip-${pr.repo}#${pr.number}-${at}`, ticket: key, title: pr.title, source: 'github', status: 'skipped',
+      startedAt: at, endedAt: at, prs: [pr], error, ...(requestEvent && { requestEvent }) });
+    save();
+  }
+
+  /** Forget a resolved denial so a new request can claim the PR or record its own refusal. */
+  function clearNoAccess(url) {
+    if (!side.state.noAccess?.[url] || app.dryRun()) return;
+    labels.clearRefusal(claimOwner(url), url);
+    delete side.state.noAccess[url];
+    forget(`access:${url}`);
+    save();
+  }
+
+  /** A later Review-label event also detects requests removed and renewed between two polls. */
+  async function requestRenewed(pr, c) {
+    const skipped = side.state.runs.findLast(r => r.status === 'skipped' && r.prs[0].url === pr.url);
+    const latest = (await gh.labelEvents(pr)).findLast(e => e.event === 'labeled' && sameLabel(e.label, askLabel(c)));
+    if (!latest || !skipped) return false;
+    return skipped.requestEvent ? (latest.id || latest.at) !== skipped.requestEvent : Date.parse(latest.at) > skipped.endedAt;
+  }
+
+  /** Leave a claimed PR alone even if it still carries the Review label. */
+  function alreadyLabeled(pr, c) {
+    const label = labelNames(c).inReview;
+    if (!hasLabel(pr, label)) return false;
+    log('info', `${pr.url}: already labelled '${label}', leaving it alone`, `in-review:${pr.url}`);
+    return true;
+  }
+
+  /** Resolve each key once for grouping. Keep a lone key on a tracker outage so its review retains the ticket's history. */
+  async function groupTickets(c, prs) {
+    const tickets = new Map();
+    const ticketByUrl = new Map();
+    for (const pr of prs) {
+      const keys = mentionedKeys(`${pr.title}\n${pr.body || ''}`, c.taskBoard);
+      for (const key of keys) {
+        if (tickets.has(key)) continue;
+        try {
+          const ticket = await app.tracker().lookup(c, key);
+          tickets.set(key, ticket);
+          if (ticket) tickets.set(ticket.key, ticket);
+        } catch (e) {
+          tickets.set(key, e.status === 404 ? null : undefined);
+          if (e.status !== 404) log('warn', `${key}: couldn't read the ticket (${e.message}); reviewing its labelled PRs without it`, `lookup:${key}`);
+        }
+      }
+      const found = keys.filter(key => tickets.get(key));
+      const possible = found.length ? [...new Set(found.map(key => tickets.get(key).key))] : keys.filter(key => tickets.get(key) !== null);
+      if (possible.length === 1) ticketByUrl.set(pr.url, possible[0]);
+      else {
+        const boardKey = found.find(k => github.titleNamesOnly(pr.title, k) && tickets.get(k).tags?.some(t => isTrigger(t) || inReview(t)));
+        if (boardKey) ticketByUrl.set(pr.url, tickets.get(boardKey).key);
+      }
+    }
+    return { groups: labelGroups(prs, ticketByUrl), tickets };
+  }
+
+  /** Search once and pass only ready, unclaimed PRs outside quick-review waits to the group checks. */
+  async function checkLabeled(permissions) {
+    const c = cfg();
+    let result;
+    try {
+      result = await gh.labeledPrs(c.githubOwner, askLabel(c));
+      forget('github-search');
+    } catch (e) {
+      return log('warn', `Couldn't search GitHub for '${askLabel(c)}' (${e.message}); trying again next poll`, 'github-search');
+    }
+    if (result.capped) log('warn', 'GitHub returned 1000 PRs. Some labelled PRs may be missing.', 'github-limit');
+    else forget('github-limit');
+    const asked = new Set(result.prs.map(p => p.url));
+    if (!result.capped) {
+      clearDeferredLinks(url => !asked.has(url));
+      for (const url of Object.keys(side.state.noAccess || {})) if (!asked.has(url)) clearNoAccess(url);
+    }
+    const waits = side.waits();
+    const waited = new Set(waits.flatMap(w => {
+      if (w._covered) return w._covered;
+      const run = side.state.runs.find(r => r.id === w.runId);
+      const previous = [...(run?.prs || []), ...(run?.contextPrs || [])];
+      return [...(w.waitingOn || []), ...previous.map(p => p.url),
+        ...(w.paste?.prs || []).map(p => `https://github.com/${p.repo}/pull/${p.number}`)].filter(u => !w.letGo?.[u]);
+    }));
+    const candidates = result.prs.filter(p => {
+      if (p.draft || waited.has(p.url) || heldBy([p], true) || labels.pending(p.url) || side.state.labelClaims?.[p.url]) return false;
+      if (waits.some(w => !w._covered && !w.letGo?.[p.url] && w.paste?.tickets?.some(key => mentions(`${p.title} ${p.body || ''}`, key)))) return false;
+      return !alreadyLabeled(p, c);
+    });
+    if (busy() >= c.maxConcurrentReviews) return;
+    const { groups, tickets } = await groupTickets(c, candidates);
+    for (const group of groups) {
+      if (!githubOn()) break;
+      try {
+        await considerLabeled(c, group, permissions, tickets);
+      } catch (e) {
+        log('warn', `${names(group.prs)}: GitHub review couldn't start (${e.message})`, `github:${group.prs[0].url}`);
+      }
+    }
+  }
+
+  function clearDeferredLinks(remove) {
+    const deferred = side.state.deferredLinks;
+    if (deferred?.some(remove) && !app.dryRun()) {
+      side.state.deferredLinks = deferred.filter(url => !remove(url));
+      save();
+    }
+  }
+
+  /** Add only the in-review label until the timeline shows which login claimed this request first. */
+  async function claimLabeled(c, pr, key) {
+    const claim = { at: Date.now(), label: labelNames(c).inReview, repo: pr.repo, number: pr.number };
+    (side.state.labelClaims ??= {})[pr.url] = claim; // a quit after the write must leave enough to release it
+    save();
+    const owner = claimOwner(pr.url);
+    labels.own('reviewer', owner, [pr.url]);
+    labels.clearRefusal(owner, pr.url); // a previous request's refusal cannot block a fresh claim
+    const write = labels.set('reviewer', owner, pr, labelWrite(c, claim.label, [], []));
+    await labels.drain();
+    const refused = labels.refused(owner, pr.url);
+    if (refused) {
+      const latest = (await gh.labelEvents(pr).catch(() => [])).findLast(e => e.event === 'labeled' && sameLabel(e.label, askLabel(c)));
+      noteNoAccess(pr, key, refused, latest?.id || latest?.at);
+      forgetClaim(pr.url);
+      return false;
+    }
+    if (write?._addState === 'present') {
+      forgetClaim(pr.url);
+      log('info', `${pr.url}: already labelled '${claim.label}', leaving it alone`, `in-review:${pr.url}`);
+      return false;
+    }
+    if (write?._addState !== 'landed') {
+      labels.drop(owner, [pr.url]); // a later retry must first check the request again
+      log('warn', `${pr.url}: its claim did not finish; checking again next poll`, `claim:${pr.url}`);
+      if (write?._addState !== 'sent') forgetClaim(pr.url); // a sent but unconfirmed claim still needs the release check
+      return false;
+    }
+    forget(`claim:${pr.url}`);
+    for (let i = 0; i < 3; i++) {
+      const event = labelClaim(await gh.labelEvents(pr).catch(() => []), c);
+      if (event) {
+        if (!sameLabel(event.actor, app.me)) {
+          forgetClaim(pr.url);
+          log('info', `${pr.url}: @${event.actor} claimed it first; leaving it for their review`);
+          return false;
+        }
+        claim.seen = event.at;
+        save();
+        break;
+      }
+      if (i < 2) await sleep(2000);
+    }
+    const live = await gh.prByRef(pr);
+    if (!hasLabel(live, claim.label)) { forgetClaim(pr.url); return false; }
+    const requested = live.state === 'open' && hasLabel(live, askLabel(c));
+    if (!requested || live.draft) {
+      settleClaim(pr, claim, 'withdrawn');
+      if (!requested) clearDeferredLinks(url => url === pr.url);
+      return false;
+    }
+    return live;
+  }
+
+  /** Reuse a prior ticketless run's key so retries and re-reviews share its history. */
+  function githubKey(prs) {
+    const prior = side.state.runs.findLast(r => r.source === 'github' && r.status !== 'skipped' && !r.githubTicket && prs.some(p => r.prs.some(q => p.url === q.url)));
+    return prior?.ticket || `${prs[0].repo}#${prs[0].number}`;
+  }
+
+  function leaveToBoard(prs, ticket) {
+    const tag = ticket?.tags?.find(t => isTrigger(t) || inReview(t));
+    if (!tag) return prs;
+    const covered = prs.filter(p => github.titleNamesOnly(p.title, ticket.key));
+    if (covered.length) log('info', `${ticket.key}: tagged '${tag}'; leaving ${names(covered)} to the board review. Take '${tag}' off if no review is running.`, `board-review:${ticket.key}`);
+    return prs.filter(p => !covered.includes(p));
+  }
+
+  /** Reserve the group while checking its live requests, then start a review only for claims this login won. */
+  async function considerLabeled(c, group, permissions, tickets) {
+    const { prs } = group;
+    if (heldBy(prs, true)) return;
+    if (!c.reviewOwnPrs && prs.some(p => rv.isOwn(p, app.me))) {
+      return log('info', `${names(prs)}: a PR is yours; leaving the GitHub review for a teammate`, `own:${prs[0].url}`);
+    }
+    if (busy() >= c.maxConcurrentReviews) return;
+    const key = group.ticket || githubKey(prs);
+    if (keyHeld(key)) return;
+    const free = hold();
+    const mark = {}; // reserve these PRs while checking live labels and settling claims
+    settingUp.set(mark, { ticket: key, prs });
+    const won = [];
+    let settle = 'ask';
+    try {
+      const ticket = tickets.get(group.ticket);
+      let open = [];
+      const context = [];
+      for (const pr of leaveToBoard(prs, ticket)) {
+        const allowed = await mayLabel(pr, permissions);
+        if (allowed && side.state.noAccess?.[pr.url] !== 'refused') clearNoAccess(pr.url);
+        let live;
+        try { live = await gh.prByRef(pr); }
+        catch (e) {
+          if (!allowed && lastingRefusal(e)) { noteNoAccess(pr, key); context.push(pr); continue; }
+          throw e;
+        }
+        if (!hasLabel(live, askLabel(c)) || live.state !== 'open') {
+          clearNoAccess(pr.url);
+          clearDeferredLinks(url => url === pr.url);
+          continue;
+        }
+        if (live.draft || alreadyLabeled(live, c)) continue;
+        if (side.state.noAccess?.[pr.url] === 'refused') {
+          if (!await requestRenewed(pr, c) || app.dryRun()) { context.push(live); continue; }
+          clearNoAccess(pr.url);
+        }
+        if (!allowed) { noteNoAccess(pr, key); context.push(live); }
+        else open.push(live);
+      }
+      if (!open.length || !githubOn()) return;
+      const links = group.linked.map(url => ({ url, ...github.parsePrRefs(url)[0] }));
+      const contextRefs = [...links];
+      if (group.ticket) {
+        try { contextRefs.push(...await gh.openPrs(c.githubOwner, key)); }
+        catch (e) { log('warn', `${key}: couldn't look up its other PRs (${e.message}); reviewing the labelled PRs`); }
+      }
+      const seen = new Set([...open, ...context].map(p => p.url.toLowerCase()));
+      let missingLink = false;
+      for (const ref of contextRefs) {
+        if (ref.draft || seen.has(ref.url.toLowerCase())) continue;
+        seen.add(ref.url.toLowerCase());
+        const live = await gh.prByRef(ref).catch(e => {
+          log('warn', `${key}: couldn't read context PR ${ref.url} (${e.message})`, `context:${ref.url}`);
+          return null;
+        });
+        if (live?.state === 'open' && !live.draft) {
+          if (!hasLabel(live, askLabel(c))) context.push(live);
+          if (!group.ticket) missingLink = true;
+        }
+      }
+      // Another group may have spent minutes in setup since these tickets were read for grouping.
+      const titleKeys = new Set(open.flatMap(p => mentionedKeys(p.title, c.taskBoard).filter(k => github.titleNamesOnly(p.title, k))));
+      for (const k of titleKeys) {
+        if (tickets.get(k) === null) continue; // a technical term such as SHA-256
+        try { open = leaveToBoard(open, await app.tracker().lookup(c, k)); }
+        catch (e) { log('warn', `${k}: couldn't recheck the ticket's tags (${e.message})`, `lookup:${k}`); }
+      }
+      if (!open.length) return;
+      if (app.dryRun()) return log('info', `${key}: would start a GitHub review of ${names(open)} (dry run)`);
+      if (missingLink && !open.some(p => side.state.deferredLinks?.includes(p.url))) {
+        (side.state.deferredLinks ??= []).push(...open.map(p => p.url));
+        save();
+        return log('info', `${key}: waiting one poll for the linked PRs to be labelled`);
+      }
+      const runKey = group.ticket || githubKey(open);
+      if (keyHeld(runKey, mark) || heldBy(open, true, mark)) return;
+      settingUp.set(mark, { ticket: runKey, prs: open });
+      for (const pr of open) {
+        if (!githubOn() || app.dryRun()) break;
+        const live = await claimLabeled(c, pr, group.ticket || githubKey([pr]));
+        if (live) {
+          clearNoAccess(pr.url);
+          won.push(live);
+        } else if (side.state.noAccess?.[pr.url]) context.push(pr);
+      }
+      if (!won.length || !githubOn() || app.dryRun()) return;
+      let ticketText = '';
+      if (ticket && c.ticketContext) {
+        try { ticketText = await app.tracker().ticketText(c, ticket); }
+        catch (e) { log('warn', `${key}: couldn't read the ticket's text (${e.message}); reviewing without it`); }
+      }
+      const ready = [];
+      for (const pr of won) {
+        const live = await gh.prByRef(pr);
+        const claim = side.state.labelClaims[pr.url];
+        const requested = live.state === 'open' && hasLabel(live, askLabel(c));
+        if (!hasLabel(live, claim.label)) forgetClaim(pr.url);
+        else if (!requested || live.draft) settleClaim(pr, claim, 'withdrawn');
+        else ready.push(live);
+        if (!requested) clearDeferredLinks(url => url === pr.url);
+      }
+      if (!ready.length || !githubOn() || app.dryRun()) return;
+      const wonKey = group.ticket || githubKey(ready);
+      if (wonKey !== runKey && keyHeld(wonKey, mark)) return;
+      settingUp.set(mark, { ticket: wonKey, prs: ready });
+      const title = ticket?.title || (ready.length === 1 ? ready[0].title : `${ready.length} PRs: ${ready[0].title}`);
+      const run = await startReady(c, { source: 'github', githubTicket: group.ticket, key: wonKey, title, ticketUrl: ticket?.url, ticketText, contextPrs: context }, ready, free);
+      if (run) {
+        clearDeferredLinks(url => group.prs.some(p => p.url === url));
+        settle = '';
+        const capped = won.filter(p => side.state.labelClaims[p.url]);
+        if (capped.length) log('warn', `${key}: ${names(capped)} reached the round cap. Label again after raising the cap.`);
+      }
+    } catch (e) {
+      if (e.lasting) {
+        settle = '';
+        log('warn', `${key}: ${e.message}. Label the PR again to request another review.`);
+      } else throw e;
+    } finally {
+      for (const pr of won) {
+        const claim = side.state.labelClaims[pr.url];
+        if (claim) settleClaim(pr, claim, settle);
+      }
+      settingUp.delete(mark);
+      free();
     }
   }
 
@@ -556,7 +1056,7 @@ export function createReviewer(app, deps) {
 
   /**
    * v in History: reviews a finished review's PRs again, as a quick review under the same ticket or name, as saved.
-   * Its PRs and context PRs are read again; one merged or closed since is left out. No tag is written and nothing is
+   * Its reviewed and approved-unchanged PRs are read again; one merged or closed since is left out. No tag is written and nothing is
    * claimed; its earlier done reviews under the same key make it a re-review. Rejects when it can't start.
    */
   side.reReview = async function reReview(past) {
@@ -566,7 +1066,7 @@ export function createReviewer(app, deps) {
     const free = hold();
     try {
       app.me ||= await gh.me();
-      const paste = { prs: [...past.prs, ...(past.contextPrs || [])].map(p => ({ repo: p.repo, number: p.number })), tickets: [] };
+      const paste = { prs: [...past.prs, ...(past.contextPrs || []).filter(p => !past.relatedUrls?.includes(p.url))].map(p => ({ repo: p.repo, number: p.number })), tickets: [] };
       const prs = await resolve(paste);
       for (const p of prs.filter(x => x.gone)) log('info', `${past.ticket}: ${p.repo}#${p.number} is ${p.state}; left out`);
       // The key is reused as saved, never parsed again (a QUICK#n stays that one). A ticket of the task board set
@@ -653,7 +1153,7 @@ export function createReviewer(app, deps) {
    */
   async function startQuick(c, spec, prs, free) {
     // One review of a key at a time: a tagged review of the ticket, or an earlier quick one, finishes first.
-    if (side.running().some(r => r.ticket === spec.key)) throw new Error(`${spec.key} is being reviewed already: try again once that review ends`);
+    if (keyHeld(spec.key)) throw new Error(`${spec.key} is being reviewed already: try again once that review ends`);
     const drafts = prs.filter(p => p.draft && !p.gone);
     if (drafts.length) throw lasting(`${names(drafts)} ${drafts.length > 1 ? 'are drafts' : 'is a draft'}: mark ${drafts.length > 1 ? 'them' : 'it'} ready, then paste again`);
     const open = prs.filter(p => !p.gone && !p.unreadable);
@@ -671,13 +1171,27 @@ export function createReviewer(app, deps) {
     }
   }
 
+  /** Start a reserved quick or GitHub review after applying prior approvals and the round cap. */
   async function startReady(c, spec, open, free) {
+    const githubReview = spec.source === 'github';
+    const active = githubReview ? () => githubOn() && !app.dryRun() : on;
     const done = side.state.runs.filter(r => r.ticket === spec.key && r.status === 'done').sort((a, b) => b.endedAt - a.endedAt);
     const prior = done[0];
-    const covered = new Set(done.flatMap(r => [...r.prs, ...(r.contextPrs || [])].map(p => p.url)));
-    const heads = Object.fromEntries(open.map(p => [p.url, p.headSha || '']));
-    for (const p of open) if (!heads[p.url]) heads[p.url] = await gh.headSha(p).catch(() => '');
-    const approved = open.filter(p => prior?.approved?.[p.url] && prior.approved[p.url] === heads[p.url]);
+    const covered = coveredBy(done);
+    const heads = {};
+    const approved = [];
+    for (const pr of open) {
+      const head = githubReview ? pr.headSha : pr.headSha || await gh.headSha(pr).catch(() => '');
+      if (githubReview && !active()) throw new Error('GitHub reviews are paused or switched off');
+      heads[pr.url] = head;
+      if (head && prior?.approved?.[pr.url] === head) {
+        approved.push(pr);
+        if (githubReview) {
+          settleClaim(pr, side.state.labelClaims[pr.url], 'approved');
+          await labels.drain();
+        }
+      }
+    }
     let toReview = open.filter(p => !approved.includes(p));
     const leftOut = [];
     if (toReview.length && rv.roundCapped(c, prior)) {
@@ -690,25 +1204,29 @@ export function createReviewer(app, deps) {
     const strip = pr => ({ url: pr.url, title: pr.title, number: pr.number, repo: pr.repo, author: pr.author, draft: false });
     const ticket = { key: spec.key, title: spec.title, url: spec.ticketUrl || '', ref: null };
     if (app.dryRun()) { log('info', `${spec.key}: would review ${toReview.map(p => p.url).join(' ')}`); return null; }
-    const stand = standFor(ticket, toReview.map(strip), true, [...approved, ...(prior ? leftOut : [])].map(strip)); // Running lists it from here
+    const related = spec.contextPrs || [];
+    const stand = standFor(ticket, toReview.map(strip), !githubReview, [...related, ...approved, ...leftOut].map(strip));
+    if (githubReview) stand.source = 'github';
     let run;
     try {
-      await cloneFor(c, stand, toReview);
-      const opts = { tracker: null, ticket, prs: toReview.map(strip), approvedPrs: approved.map(strip), leftOut: prior ? leftOut.map(strip) : [], prior, me: app.me, heads, quick: true };
-      // No claim here: its labels are written after the launch, as always.
-      const set = !stand.stopped && on() && prepping() ? await setUp(c, opts, prior, stand) : null;
+      await cloneFor(c, stand, [...toReview, ...related]);
+      const cleared = related.filter(p => p.headSha && prior?.approved?.[p.url] === p.headSha);
+      for (const p of cleared) heads[p.url] = p.headSha;
+      const opts = { tracker: null, ticket, prs: toReview.map(strip), approvedPrs: [...approved, ...cleared].map(strip), leftOut: leftOut.map(strip),
+        prior, me: app.me, heads, quick: !githubReview, source: spec.source, relatedPrs: related.filter(p => !cleared.includes(p)).map(strip), ticketText: spec.ticketText };
+      const set = !stand.stopped && active() && prepping() ? await setUp(c, opts, prior, stand) : null;
       try {
-        if (stand.stopped) {
-          log('warn', `${spec.key}: review stopped during its setup; nothing was reviewed`);
-          throw lasting('it was stopped while it was being set up');
-        }
-        if (!on()) throw new Error('the Reviewer was switched off before the review started');
+        const checkStart = () => {
+          if (stand.stopped) {
+            log('warn', `${spec.key}: review stopped during its setup; nothing was reviewed`);
+            throw lasting('it was stopped while it was being set up');
+          }
+          if (!active()) throw new Error(githubReview ? 'GitHub reviews are paused or switched off' : 'the Reviewer was switched off before the review started');
+          if (githubReview && busy() > cfg().maxConcurrentReviews) throw new Error('no free review slot');
+        };
+        checkStart();
         await sizesIn(stand);
-        if (stand.stopped) {
-          log('warn', `${spec.key}: review stopped during its setup; nothing was reviewed`);
-          throw lasting('it was stopped while it was being set up');
-        }
-        if (!on()) throw new Error('the Reviewer was switched off before the review started');
+        checkStart();
         if (set) { ({ run } = set); launchPrepared(c, run); } else run = begin(c, opts);
         takeOver(run, stand);
       } catch (e) {
@@ -718,23 +1236,20 @@ export function createReviewer(app, deps) {
     } finally {
       preparing.delete(spec.key);
     }
-    Object.assign(run, { paste: spec.paste, ...(labelsOn() && { labels: true }) });
+    if (githubReview) Object.assign(run, { source: 'github', githubTicket: spec.githubTicket, labels: true, relatedUrls: related.map(p => p.url) });
+    else Object.assign(run, { paste: spec.paste, ...(labelsOn() && { labels: true }) });
     side.state.runs.push(run);
     if (run.rolesNote) log('warn', rv.rolesWarning(run), 'roles');
     free(); // the run counts itself from here
     if (spec.fromWait) side.state.waits = side.waits().filter(x => x.key !== spec.key); // its own re-review: it waits again once this one ends
-    else endWaits(spec.key, 'a new review of it started');
+    else if (!githubReview) endWaits(spec.key, 'a new review of it started');
+    if (githubReview) for (const pr of toReview) delete side.state.labelClaims[pr.url];
     save();
-    if (run.labels) {
-      // This review has these PRs' labels now: an older quick review's writes to them are dropped.
-      labels.own('reviewer', run.id, [...toReview, ...approved].map(p => p.url));
-      // In review goes on; the ask, both outcomes and the old names come off. A context PR gets nothing: the review uses its ask up.
-      for (const p of toReview) labels.set('reviewer', run.id, p, labelWrite(c, labelNames(c).inReview, ['ask', 'approved', 'changes'], ['ask', 'inReview', 'done']));
-      for (const p of approved) labels.set('reviewer', run.id, p, labelWrite(c, '', ['ask'], ['ask']));
-    }
+    if (run.labels) queueStartLabels(c, run.id, toReview, githubReview ? [] : approved);
+    const kind = githubReview ? 'GitHub' : 'quick';
     const checking = run.phase === 'checks';
-    hoot(checking ? `Building and testing the PRs for ${spec.title} before reviewing them` : toReview.length > 1 ? `Starting a quick review of ${toReview.length} PRs` : `Starting a quick review of ${toReview[0].title}`);
-    log('ok', `${spec.key}: quick ${prior ? `re-review #${run.reviewNo}` : 'review'} started on ${names(toReview)}${rv.sizeNote(run.prs, run.stats)}${approved.length ? ` (already approved, unchanged: ${names(approved)})` : ''}${checking ? ', building and testing first' : ''}`);
+    hoot(checking ? `Building and testing the PRs for ${spec.title} before reviewing them` : toReview.length > 1 ? `Starting a ${kind} review of ${toReview.length} PRs` : `Starting a ${kind} review of ${toReview[0].title}`);
+    log('ok', `${spec.key}: ${kind} ${prior ? `re-review #${run.reviewNo}` : 'review'} started on ${names(toReview)}${rv.sizeNote(run.prs, run.stats)}${approved.length ? ` (already approved, unchanged: ${names(approved)})` : ''}${checking ? ', building and testing first' : ''}`);
     if (checking) runChecks(run);
     await announce(run);
     return run;
@@ -772,6 +1287,7 @@ export function createReviewer(app, deps) {
     if (!run) return endWait(wt, 'its last review is gone');
     if (!labelsOn()) return endWait(wt, 'Quick reviews: GitHub labels is off');
     const key = `wait:${wt.key}`;
+    delete wt._covered; // a failed lookup falls back to the last run for this poll
     const prs = await resolve(wt.paste);
     // A PR GitHub refuses (to read, or to label for this review) is let go, until it can be read again.
     wt.letGo ??= {};
@@ -782,6 +1298,7 @@ export function createReviewer(app, deps) {
       else delete wt.letGo[p.url];
     }
     const live = prs.filter(p => !p.gone && !wt.letGo[p.url]);
+    wt._covered = live.map(p => p.url);
     wt.waitingOn = [];
     if (!live.length) return endWait(wt, 'every PR is merged, closed or can no longer be read');
     if (wt.retry) return startAgain(wt, run, prs, 'retrying the review that failed');
@@ -840,6 +1357,11 @@ export function createReviewer(app, deps) {
   // blocking found, gets neither label.
   const outcomeLabel = (run, url) => (run.approved?.[url] ? labelNames(cfg()).approved : !run.resultMode || run.blocked?.includes(url) ? labelNames(cfg()).changes : '');
   side.outcomeLabel = outcomeLabel;
+  /** History includes both denied access at setup and refusals arriving later in the queue. */
+  side.labelNotes = run => [...(run.prs || []), ...(run.contextPrs || []), ...(run.leftOut || [])].flatMap(pr => {
+    const why = run.labelNotes?.[pr.url] || (run.labels && labels.refused(run.id, pr.url));
+    return why ? [`${pr.repo}#${pr.number}: ${why}`] : [];
+  });
 
   /**
    * The PRs' labels after a quick review: each PR's outcome (`outcome`), or none, with the in-review label, the
@@ -851,11 +1373,11 @@ export function createReviewer(app, deps) {
   }
 
   /**
-   * Posts the Review started comment (output.md) on each PR under review, so people can see Prowl has it. A quick
-   * review has no ticket to link to: it posts Quick review started, which links the PRs instead.
+   * Posts the started comment from output.md on each reviewed PR. Quick reviews and reviews without a ticket URL
+   * use the PR-links template so edited ticket templates never need rewriting.
    */
   async function announce(run) {
-    const text = run.quick
+    const text = run.quick || !run.ticketUrl
       ? fill(outputTemplate(appDir, 'Quick review started'), { prs: run.prs.map(p => `[${p.repo.split('/')[1]}#${p.number}](${p.url})`).join(', ') })
       : fill(outputTemplate(appDir, 'Review started'), { ticket: run.ticket, 'ticket link': run.ticketUrl });
     // The prowl-review marker keeps prowl-review from counting it as someone else's comment.
@@ -931,8 +1453,8 @@ export function createReviewer(app, deps) {
   }
 
   /**
-   * Settles a review whose session ended, then moves the ticket's tag on. A quick review has no tags; with labels, it
-   * labels its PRs Reviewed and waits on them, or retries once, or takes its labels off.
+   * Publish the result and settle its markers: tags for board reviews, PR labels for enabled reviews.
+   * GitHub retries use the Review label; a labelled quick review retries through its wait.
    */
   async function finish(run) {
     // A review left half-posted by an earlier launch: its session was settled then, and its posting carries on.
@@ -941,7 +1463,9 @@ export function createReviewer(app, deps) {
     if (!resumed) rv.finalize(run);
     const { tags } = cfg();
     const failures = run.quick ? (side.state.quickFailures ??= {}) : side.state.failures; // a quick review's apart from the ticket's
-    const again = run.quick ? 'n reviews PRs again' : `re-tag '${tags.trigger}' to try again`;
+    const githubReview = run.source === 'github';
+    const kind = githubReview ? 'GitHub review' : 'review';
+    const again = githubReview ? `label the PR again with '${askLabel(cfg())}'` : run.quick ? 'n reviews PRs again' : `re-tag '${tags.trigger}' to try again`;
     if (run.resultMode && (resumed || run.status === 'done')) await settleResult(run);
     if (run.resultMode && run.status === 'done') await dismissSuperseded(run); // before the tags and labels are written; never on a failed or stopped review
     else if (run.status === 'done') { // a review from before results: its session posted its reviews itself
@@ -953,24 +1477,23 @@ export function createReviewer(app, deps) {
       delete failures[run.ticket];
       run.pendingTag = outcomeTag(run, tagsNow());
       const s = run.summary || {};
-      log('ok', `${run.ticket}: review ${run.reviewNo} finished: ${s.verdict || 'no verdict'} (C${s.critical ?? '?'} H${s.high ?? '?'} M${s.medium ?? '?'} L${s.low ?? '?'} N${s.nit ?? '?'}) · ${run.reportPath}`);
-      hoot(run.quick ? `Done with ${run.ticket}` : `Done reviewing PRs for ${run.title}, marking as '${run.pendingTag}'`, 'cheer');
+      log('ok', `${run.ticket}: ${kind} ${run.reviewNo} finished: ${s.verdict || 'no verdict'} (C${s.critical ?? '?'} H${s.high ?? '?'} M${s.medium ?? '?'} L${s.low ?? '?'} N${s.nit ?? '?'}) · ${run.reportPath}`);
+      hoot(githubReview ? `Finished the GitHub review of ${run.title}` : run.quick ? `Done with ${run.ticket}` : `Done reviewing PRs for ${run.title}, marking as '${run.pendingTag}'`, 'cheer');
     } else if (run.status === 'failed') {
       failures[run.ticket] = (failures[run.ticket] || 0) + 1;
       retry = (!run.quick || run.labels) && rv.retryFailed(run, failures[run.ticket]); // one automatic retry, then wait for a human
       run.pendingTag = retry ? tags.trigger : '';
-      const why = run.capped ? 'Not retried, as it hit a cap' : run.unposted?.length && run.resultMode ? 'Not retried (review not posted): the Log says what GitHub refused. A re-tagged review runs again from the start'
+      const why = run.capped ? 'Not retried, as it hit a cap'
+        : run.unposted?.length && run.resultMode ? `Not retried (review not posted): the Log says what GitHub refused. A ${githubReview ? 're-labelled' : 're-tagged'} review runs again from the start`
         : run.unposted?.length ? 'Not retried, as a retry would most likely be blocked too' : run.quick && !run.labels ? 'Not retried' : 'Not retrying again';
-      const retried = run.quick ? 'Retrying it once, when a slot is free.' : `Re-tagged '${tags.trigger}' to retry once.`;
-      log('error', `${run.ticket}: review failed: ${run.error}. ${retry ? retried : `${why}; ${again}.`}`);
+      const retried = githubReview ? `Labelling its PRs '${askLabel(cfg())}' for one retry.` : run.quick ? 'Retrying it once, when a slot is free.' : `Re-tagged '${tags.trigger}' to retry once.`;
+      log('error', `${run.ticket}: ${kind} failed: ${run.error}. ${retry ? retried : `${why}; ${again}.`}`);
     } else {
       run.pendingTag = '';
-      log('warn', `${run.ticket}: review stopped. ${run.quick ? 'n reviews PRs again' : `Re-tag '${tags.trigger}' to run it again`}.`);
+      log('warn', `${run.ticket}: ${kind} stopped. ${run.quick ? again : again[0].toUpperCase() + again.slice(1)}.`);
     }
-    if (run.quick) {
-      run.pendingTag = null;
-      if (run.labels) settleLabels(run, retry);
-    }
+    if (run.quick || githubReview) run.pendingTag = null;
+    if (run.labels) settleLabels(run, retry);
     delete run.phase; // settled: from here its tag is pending in the saved state, and applyTag retries it
     save();
     if (run.pendingTag != null) await applyTag(run);
@@ -1064,8 +1587,20 @@ export function createReviewer(app, deps) {
     // a quit before then is picked up again at the next launch (nothing is posted or dismissed twice).
   }
 
-  /** A quick review with labels, settled: each PR's outcome label and a wait on its PRs, a wait to retry it, or its labels off. */
+  /** Set PR outcomes or release their labels. A GitHub retry restores the ask; only quick reviews create waits. */
   function settleLabels(run, retry) {
+    if (!run.quick) {
+      const c = cfg();
+      for (const pr of run.prs) {
+        if (run.labelNotes?.[pr.url]) continue;
+        const done = run.status === 'done';
+        const add = done ? outcomeLabel(run, pr.url) : run.source === 'github' && retry ? askLabel(c) : '';
+        const clearAsk = !done && run.source !== 'github'; // a fresh request made during a GitHub review survives it
+        const off = ['inReview', 'approved', 'changes', ...(clearAsk ? ['ask'] : [])];
+        labels.set('reviewer', run.id, pr, labelWrite(c, add, off, clearAsk ? ['ask', 'inReview', 'done'] : ['inReview', 'done']));
+      }
+      return;
+    }
     if (run.status !== 'done' && !retry) {
       relabel(run, run.prs, false); // not retried, or stopped: the in-review label comes off
       return endWaits(run.ticket, run.status === 'stopped' ? 'its review was stopped' : 'its review failed');
@@ -1184,13 +1719,20 @@ export function createReviewer(app, deps) {
 
   /** The question s asks before stopping `run`: a review that has written its report counts as done all the same. */
   side.stopText = run => {
+    const githubReview = run.source === 'github';
+    const again = 'Label its PRs again to request another review.';
     if (run.status === 'preparing') {
+      if (githubReview) return `Stop the GitHub review of ${run.ticket} while it is being set up? Its setup ends first, then no session starts. ${again}`;
       return run.quick ? `Stop the quick review ${run.ticket} while it is being set up? Its setup ends first (a clone or a fetch can't be interrupted), then no session starts.`
         : `Stop the review of ${run.ticket} while it is being set up? Its setup ends first (a clone or a fetch can't be interrupted), then no session starts. Its '${cfg().tags.trigger}' tag is removed; re-tag to run it again.`;
     }
     const done = rv.reportWritten(run);
     const wrote = run.resultMode ? 'review result, so it counts as done: Prowl posts it' : 'report, so it counts as done';
-    if (run.quick) return `Stop the quick review ${run.ticket}?${done ? ` It has written its ${wrote}${labelsOn() ? ' and its PRs are labelled as usual' : ''}.` : ''}`;
+    if (githubReview || run.quick) {
+      const review = githubReview ? 'GitHub review of' : 'quick review';
+      const result = done ? ` It has written its ${wrote}${githubReview || labelsOn() ? ' and its PRs are labelled as usual' : ''}.` : '';
+      return `Stop the ${review} ${run.ticket}?${result}${githubReview ? ` ${again}` : ''}`;
+    }
     return done ? `Stop the review of ${run.ticket}? It has written its ${wrote} and it is tagged as usual.`
       : `Stop the review of ${run.ticket}? Its '${cfg().tags.inProgress}' tag is removed; re-tag to run it again.`;
   };

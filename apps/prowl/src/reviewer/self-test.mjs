@@ -451,10 +451,10 @@ export async function run(assert, { appDir }) {
   const settleWith = async (result, ghOrOpts = {}) => {
       const { gh = fakeGh(), runOver = {}, failures = {} } = typeof ghOrOpts.prNow === 'function' ? { gh: ghOrOpts } : ghOrOpts;
       const cfg = { ...loadConfig(), githubOwner: 'acme', workDir: tmp };
-      const seen = { retags: [], logs: [] };
+      const seen = { retags: [], labels: [], logs: [] };
       const tracker = { name: 'Azure DevOps', retag: async (c, ref, drop, add) => { seen.retags.push(add); } };
       const app = { cfg, me: 'octocat', sideOn: () => true, tracker: () => tracker, boards: () => [], dryRun: () => false };
-      const side = createReviewer(app, { log: (level, msg) => { seen.logs.push(`${level} ${msg}`); return true; }, forget() {}, hoot() {}, appDir, trackers: { ado: tracker }, github: gh, labels: { own() {}, set() {}, refused: () => '', pending: () => false } });
+      const side = createReviewer(app, { log: (level, msg) => { seen.logs.push(`${level} ${msg}`); return true; }, forget() {}, hoot() {}, appDir, trackers: { ado: tracker }, github: gh, labels: { own() {}, set(side, owner, pr, write) { seen.labels.push([pr.url, write.add]); }, refused: () => '', pending: () => false } });
       const id = `AB42-settle-${Math.random().toString(36).slice(2, 8)}`;
       const run = { ...baseRun({ id, logPath: path.join(tmp, `${id}.ndjson`), reportPath: path.join(tmp, `${id}.md`) }), tracker: 'ado', ref: { id: 42 }, status: 'running', pid: null, resultMode: 1, batchId: BATCH, resultPath: path.join(tmp, `${id}.result.json`), resultPrs: [A],
         _result: { subtype: 'success', is_error: false, total_cost_usd: 1 }, ...runOver };
@@ -629,6 +629,14 @@ export async function run(assert, { appDir }) {
     s = await settle(resultOf([finding('F-01', { location: { path: 'src/a.js', line: 99 } })]), { gh: refusing });
     assert.ok(s.run.status === 'failed' && s.run.unposted[0] === A && s.run.error.startsWith('no review posted on acme/widgets#12 (acme/widgets#12: GitHub rejected the review') && s.run.error.endsWith(`the review result is in ${s.run.resultPath}`), s.run.error);
     assert.ok(fs.readFileSync(s.run.reportPath, 'utf8').includes('F-01 Title F-01') && s.seen.retags[0] === '' && s.seen.logs.some(l => l.includes('Not retried (review not posted): the Log says what GitHub refused. A re-tagged review runs again from the start')));
+    const third = 'https://github.com/acme/web/pull/8';
+    const urls = [A, B, third];
+    s = await settle(resultOf([finding('F-01')], [prEntry(A), prEntry(B), prEntry(third, { coverage: { axes: [], clean: [], unverified: 'Checks unavailable.' } })]),
+      { runOver: { source: 'github', labels: true, prs: urls.map(prOf), resultPrs: urls } });
+    assert.deepEqual([s.run.status, s.seen.labels, s.side.waits(), s.seen.retags], ['done', [[A, 'prowl: changes requested'], [B, 'prowl: approved'], [third, '']], [], []]);
+    s = await settle(resultOf([]), { gh: refusing, runOver: { source: 'github', labels: true } });
+    assert.deepEqual([s.run.status, s.run.unposted, s.seen.labels, s.side.waits(), s.seen.retags], ['failed', [A], [[A, '']], [], []]);
+    assert.ok(s.seen.logs.some(l => l.includes('Not retried (review not posted)') && l.includes('re-labelled')));
     // Left half-posted by an earlier launch: the next tick carries on, and nothing is posted twice.
     const gh = fakeGh();
     gh.threads[A] = [{ id: 'PRRT_C-01', commentId: 100, resolved: false, outdated: false }];

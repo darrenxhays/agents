@@ -139,7 +139,7 @@ export async function run(assert, { appDir }) { // eslint-disable-line no-unused
       ticketText: async () => '', lookup: async (c, key) => ({ ...ticket, key }), current: async (c, t) => t, boardOf: async () => null, readItem: async () => ticket,
       ...trackerOver,
     };
-    const gh = { me: async () => 'octocat', openPrs: async () => open, headSha: async pr => `sha${pr.number}`, postComment: async () => '', humanApproved: async () => false, cloneMissing: async () => [],
+    const gh = { labeledPrs: async () => ({ prs: [], capped: false }), canLabel: async () => true, me: async () => 'octocat', openPrs: async () => open, headSha: async pr => `sha${pr.number}`, postComment: async () => '', humanApproved: async () => false, cloneMissing: async () => [],
       prByRef: async ref => open.find(p => p.repo === ref.repo && p.number === ref.number) || (() => { throw new Error('HTTP 404'); })(), reviewedSince: async () => true, isOpen: async () => true, ...ghOver };
     const byKey = new Map(); // a message repeated for the same key is logged once, as in prowl.mjs
     const labelCalls = [];
