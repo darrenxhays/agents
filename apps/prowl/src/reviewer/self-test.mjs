@@ -129,10 +129,12 @@ export async function run(assert, { appDir }) {
     for (const severity of ['critical', 'high', 'medium']) {
       assert.deepEqual(eventFor({ severity }), { event: 'REQUEST_CHANGES', noBlocking: false, approval: null });
       assert.deepEqual(eventFor({ severity, own: true }), { event: 'COMMENT', noBlocking: false, approval: null });
+      assert.deepEqual(eventFor({ severity, requestChanges: false }), { event: 'COMMENT', noBlocking: false, approval: null }, 'Request changes off: blocking findings go in a comment review, with no approval');
     }
     for (const severity of ['low', 'nit', '']) {
       assert.deepEqual(eventFor({ severity }), { event: 'APPROVE', noBlocking: false, approval: 'approved' }, 'approvals on, nothing blocking: APPROVE whatever the labels say');
       assert.deepEqual(eventFor({ severity, approvals: false }), { event: 'COMMENT', noBlocking: true, approval: 'awaiting-human' });
+      assert.deepEqual(eventFor({ severity, requestChanges: false }), { event: 'APPROVE', noBlocking: false, approval: 'approved' }, 'Request changes off changes nothing for a PR with nothing blocking');
       assert.deepEqual(eventFor({ severity, own: true, approvals: true }), { event: 'COMMENT', noBlocking: false, approval: 'awaiting-human' }, 'your own PR: never the No blocking issues block');
     }
   }
@@ -165,6 +167,12 @@ export async function run(assert, { appDir }) {
     assert.deepEqual(notCarried(resultOf([], [prEntry(A, { earlierReviews: [{ url: `${A}#pullrequestreview-1`, findings: [ref] }] })]), A), [ref], "a blocking review's finding with no entry");
     rec = withheld(resultOf([finding('F-01', { severity: 'high' })], [prEntry(A, { coverage: { axes: ['x'], clean: [], unverified: 'hole' } })]));
     assert.deepEqual([rec.event, rec.verdict], ['REQUEST_CHANGES', 'REQUEST CHANGES'], 'a request for changes is unaffected, and keeps its label');
+    rec = plan(resultOf([finding('F-01', { severity: 'high' })]), { requestChanges: false }).prs[0];
+    assert.deepEqual([rec.event, rec.verdict, rec.approval, rec.ops.find(o => o.kind === 'review').payload.event], ['COMMENT', 'REQUEST CHANGES', null, 'COMMENT'], 'Request changes off: the same verdict and findings, posted as a comment');
+    assert.ok(rec.ops.find(o => o.kind === 'review').payload.body.includes('<!-- prowl-verdict changes -->\n\n<!-- prowl-review '), 'and it carries the hidden line the Builder reads as a request for changes');
+    const bodyOf = p => p.prs[0].ops.find(o => o.kind === 'review').payload.body;
+    assert.deepEqual([bodyOf(plan(resultOf([finding('F-01', { severity: 'high' })]))).includes('prowl-verdict'), bodyOf(plan(resultOf([]), { approvals: false })).includes('<!-- prowl-verdict clear -->\n\n<!-- prowl-review '), bodyOf(plan(resultOf([], [prEntry(A, { coverage: { axes: ['x'], clean: [], unverified: 'hole' } })]), { approvals: false })).includes('prowl-verdict')],
+      [false, true, false], 'a Request changes review has none; a comment that found nothing blocking says so; one not fully reviewed says neither');
     rec = withheld(resultOf([], [prEntry(A, { coverage: { axes: ['x'], clean: [], unverified: 'hole' } })]), { approvals: false });
     assert.ok(rec.approval === null && !reviewOp(rec).payload.body.includes('No blocking issues'), 'approvals off: no stamp either');
     const stamped = plan(resultOf([]), { approvals: false }).prs[0];
@@ -463,6 +471,14 @@ export async function run(assert, { appDir }) {
       await side.finish(run);
       return { run, seen, gh, side };
   };
+
+  // ---- Request changes off: the ticket's tag and the PRs' labels are the same as with it on ----
+  {
+    const blocking = resultOf([finding('F-01', { severity: 'high' })]);
+    const [onRun, offRun] = [await settleWith(blocking, { runOver: { labels: true } }), await settleWith(blocking, { runOver: { labels: true, requestChanges: false } })];
+    assert.deepEqual([offRun.seen.retags, offRun.seen.labels, offRun.run.blocked], [onRun.seen.retags, onRun.seen.labels, onRun.run.blocked], 'the same tag and labels either way');
+    assert.deepEqual([offRun.seen.retags, offRun.seen.labels.map(l => l[1]), offRun.run.status], [['prowl: changes requested'], ['prowl: changes requested'], 'done'], 'changes requested, though the review is a comment');
+  }
 
   // ---- A thread a person answered is parked (and what else is) ----
   {

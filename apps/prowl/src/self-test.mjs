@@ -1644,6 +1644,7 @@ await (await import('./builder/self-test.mjs')).run(assert);
 await (await import('./features-self-test.mjs')).run(assert, { appDir });
 await (await import('./reviewer/self-test.mjs')).run(assert, { appDir });
 await (await import('./reviewer/prep-self-test.mjs')).run(assert, { appDir });
+await (await import('./reviewer/memory-self-test.mjs')).run(assert, { appDir });
 await (await import('./details-self-test.mjs')).run(assert, { appDir });
 
 console.log(`self-test passed: ${count} asserts`);

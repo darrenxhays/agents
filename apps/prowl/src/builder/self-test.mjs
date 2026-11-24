@@ -677,6 +677,10 @@ async function pure(assert) {
   const thread = (at, extra = {}) => ({ id: 'T1', resolved: false, body: 'Handle empty carts', lastBody: 'Handle empty carts', lastAt: at, bot: false, ...extra });
   assert.equal(rules.feedbackDue({ reviews: [{ user: 'lead', state: 'CHANGES_REQUESTED', at: '2026-10-29T11:00:00Z' }] }, since, 'everyone'), 'lead requested changes');
   assert.equal(rules.feedbackDue({ reviews: [{ state: 'CHANGES_REQUESTED', at: '2026-10-29T09:00:00Z' }] }, since, 'everyone'), '', 'older than the last push: no round');
+  const asComment = { user: 'mate', assoc: 'MEMBER', state: 'COMMENTED', at: '2026-10-29T11:00:00Z', body: 'Findings.\n<!-- prowl-verdict changes -->\n<!-- prowl-review AB1-r1 review -->' };
+  assert.equal(rules.feedbackDue({ reviews: [asComment] }, since, 'everyone'), 'mate requested changes', 'a PR-Owl comment review with blocking findings (Request changes off) is feedback too');
+  assert.equal(rules.feedbackDue({ reviews: [{ ...asComment, body: 'Looks fine.' }] }, since, 'everyone'), '', 'any other comment review is not');
+  assert.equal(rules.feedbackDue({ reviews: [{ ...asComment, body: `Quoting it:\n${asComment.body}\nLooks fine to me.` }] }, since, 'everyone'), '', "nor one that only quotes such a review: the line counts at the body's end alone");
   assert.equal(rules.feedbackDue({ threads: [thread('2026-10-29T11:00:00Z')] }, since, 'everyone'), '1 unresolved thread');
   assert.equal(rules.feedbackDue({ threads: [thread('2026-10-29T11:00:00Z')] }, since, 'prowl'), '', "Fix comments from Prowl: someone else's thread isn't feedback");
   assert.equal(rules.feedbackDue({ threads: [thread('2026-10-29T11:00:00Z', { lastBody: 'Fixed\n<!-- prowl-fix AB#1 r1 T1 fixed -->' })] }, since, 'everyone'), '', 'Prowl replied last');
@@ -687,6 +691,13 @@ async function pure(assert) {
   assert.ok(!rules.mergeReady([{ ...approved, checks: [] }], now - 5 * 60_000, now), 'no required checks 5 minutes after a push: CI not started yet');
   assert.ok(rules.mergeReady([{ ...approved, checks: [] }], now - 11 * 60_000, now), 'after 10 minutes: a repo that requires none');
   assert.ok(!rules.mergeReady([{ ...approved, reviews: [...approved.reviews, { state: 'CHANGES_REQUESTED', at: '2026-10-29T11:30:00Z' }] }], since, now), "the latest review isn't an approval");
+  assert.ok(!rules.mergeReady([{ ...approved, reviews: [...approved.reviews, { ...asComment, at: '2026-10-29T11:30:00Z' }] }], since, now), 'nor when a PR-Owl comment review with blocking findings follows the approval');
+  const cleanStamp = { assoc: 'MEMBER', state: 'COMMENTED', at: '2026-10-29T11:45:00Z', body: 'No blocking issues.\n<!-- prowl-verdict clear -->\n\n<!-- prowl-review AB1-r2 review -->' };
+  assert.ok(rules.mergeReady([{ ...approved, reviews: [...approved.reviews, { ...asComment, at: '2026-10-29T11:30:00Z' }, cleanStamp] }], since, now), 'until a later PR-Owl comment review without them follows it');
+  assert.equal(rules.feedbackDue({ reviews: [asComment, cleanStamp] }, since, 'everyone'), '', 'which also ends the request for a round');
+  assert.equal(rules.feedbackDue({ reviews: [asComment, { ...cleanStamp, state: 'APPROVED', body: 'Fine.\n<!-- prowl-review AB1-r2 review -->' }] }, since, 'everyone'), '', "and so does a later PR-Owl approval");
+  assert.equal(rules.feedbackDue({ reviews: [asComment, { ...cleanStamp, body: 'NOT FULLY REVIEWED\n<!-- prowl-review AB1-r2 review -->' }] }, since, 'everyone'), 'mate requested changes', "a review that wasn't complete clears nothing");
+  assert.equal(rules.feedbackDue({ reviews: [asComment, { ...cleanStamp, assoc: 'NONE' }] }, since, 'everyone') && rules.feedbackDue({ reviews: [{ ...asComment, assoc: 'NONE' }] }, since, 'everyone'), '', "an outsider's comment review neither asks nor clears");
   const recs = [{ key: 'AB#1', costUsd: 3, turns: [{ startedAt: Date.now(), costUsd: 3 }] }, { key: 'AB#1', costUsd: 2, turns: [{ startedAt: 0, costUsd: 2 }] }, { key: 'AB#2', costUsd: 1, turns: [{ startedAt: Date.now(), costUsd: 1 }] }];
   assert.deepEqual([rules.ticketSpend(recs, 'AB#1'), rules.daySpend(recs)], [5, 4], 'every run on the ticket; sessions since midnight');
   assert.deepEqual([rules.spendLevel(6, 10), rules.spendLevel(7, 10), rules.spendLevel(10, 10), rules.spendLevel(1e6, 0)], ['', 'warn', 'over', '']);

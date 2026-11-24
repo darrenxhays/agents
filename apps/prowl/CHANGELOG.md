@@ -2,6 +2,15 @@
 
 Shown in Prowl on the first launch after an update. Newest first: one `## x.y.z` section per release, with a `- ` line per change, written for the people using Prowl.
 
+## 2.26.0
+- Reviews now share their memory across everyone's Prowl. When a review of a ticket ends, its "PR-Owl is reviewing this PR" comment on each PR it reviewed is edited to say it finished, and holds hidden hand-over notes. The next review of the ticket carries on from them, whoever's Prowl runs it: it takes the next review number, leaves out the PRs already approved and unchanged, reads only the new commits with **Re-review scope** on `delta`, and is given the findings still open. It works the same on Azure DevOps and Jira, and there is no setting. **What to do:** update every Prowl on your team together, as an older Prowl leaves no notes and reads none. Please don't edit or delete those comments.
+- **Max review rounds** now counts a ticket's reviews across every Prowl that leaves notes, not only your own.
+- A PR stays "approved, unchanged" only while PR-Owl's latest review on GitHub still approves that commit, whoever's Prowl posted it. A PR approved that way is left out even when your Prowl has no record of the review. **What to do:** to have an approved, unchanged PR reviewed again, dismiss PR-Owl's approval on GitHub, then tag the ticket or label the PR for review.
+- A note is believed only from the person who posted that PR-Owl review, who must be an owner, member or collaborator of the repo, and never from the author of one of the ticket's open PRs. So a review of your own PR, or by a teammate who also has a PR on the ticket, hands nothing over. A quick review under a name (not a ticket) leaves no notes.
+- New: **Request changes** (Config, Reviewer · Verdicts and rounds; on by default). Turn it off and a PR with blocking findings gets the same review as a comment instead of a *Request changes* review, so merging isn't blocked while the person whose Prowl reviewed it is away. The verdict, findings, tag and label are unchanged, on Azure DevOps and Jira alike. A request already on a PR stays until someone dismisses it. New setting: `requestChanges`.
+- Builder: a PR-Owl review with blocking findings that was posted as a comment (**Request changes** off, or a review of your own PR) now starts a feedback round like a *Request changes* review, and holds back READY TO MERGE. Before, only its unresolved threads did. This applies to reviews posted from this version on.
+- `output.md` has a new template, *Review finished*, for the edited comment. An edited copy without it uses the default's.
+
 ## 2.25.0
 - Label an open PR `prowl: review` to start a GitHub review, even without a board. This is on by default. Turn off **GitHub reviews** in Config or set `githubReviews` to `false`. Prowl needs triage or write access to label PRs. History shows any PR it skips because it couldn't label it.
 - A GitHub review reads the PR's ticket and the ticket's other PRs for context and leaves the ticket untouched. Label the PR again for another round. Prowl retries a failed review once.

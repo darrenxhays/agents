@@ -90,3 +90,32 @@ export function repliesToPost({ ticket, round, items = [], threads = [], pushed 
     })
     .filter(r => !posted.some(b => b.includes(r.marker)));
 }
+
+/**
+ * The hidden lines Prowl ends a comment review with, just before its review marker, so the Builder can read its
+ * verdict (GitHub shows only a plain comment): CHANGES_MARKER on one with blocking findings (Request changes off, or
+ * your own PR), CLEAR_MARKER on one that found nothing blocking (Approve PRs off, or your own PR). A review that
+ * wasn't complete carries neither.
+ */
+export const CHANGES_MARKER = '<!-- prowl-verdict changes -->';
+export const CLEAR_MARKER = '<!-- prowl-verdict clear -->';
+// Only at the body's end, where Prowl writes them: a review quoted inside someone's comment review doesn't count.
+const FOOTER = /(?:<!-- prowl-verdict (changes|clear) -->\s*)?<!-- prowl-review \S+ review -->\s*$/;
+/** 'changes', 'clear' or 'none' for a body that ends as a PR-Owl review does; '' for any other. */
+const verdictOf = r => { const m = FOOTER.exec(String(r?.body || '')); return m ? m[1] || 'none' : ''; };
+// Anyone can post a comment review on a public PR, footer included: only one by an owner, member or collaborator of the repo is read.
+const member = r => ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(r?.assoc);
+
+/** True for a review that asks for changes: GitHub's Request changes, or a PR-Owl comment review ending with CHANGES_MARKER. */
+export const requestsChanges = r => r?.state === 'CHANGES_REQUESTED' || (r?.state === 'COMMENTED' && member(r) && verdictOf(r) === 'changes');
+
+/**
+ * The reviews of a PR (`reviews`: [{ state, at, body, assoc }]) that ask for changes now: each Request changes
+ * review, and each PR-Owl comment review with blocking findings that no later PR-Owl review has cleared: an approval,
+ * or a comment review ending with CLEAR_MARKER. One that wasn't complete (NOT FULLY REVIEWED) clears nothing.
+ */
+export function changeRequests(reviews) {
+  const when = r => Date.parse(r.at) || 0;
+  const clears = x => member(x) && (x.state === 'APPROVED' ? Boolean(verdictOf(x)) : x.state === 'COMMENTED' && verdictOf(x) === 'clear');
+  return (reviews || []).filter(r => requestsChanges(r) && (r.state === 'CHANGES_REQUESTED' || !reviews.some(x => clears(x) && when(x) > when(r))));
+}

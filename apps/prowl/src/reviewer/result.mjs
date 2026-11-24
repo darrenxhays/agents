@@ -203,11 +203,11 @@ export function verdictLabels(reviewMd) {
 
 export const NOT_FULLY = 'NOT FULLY REVIEWED';
 
-/** The PR's review as GitHub takes it, from its highest counted severity. `own`: your own PR; `approvals`: Approve PRs. */
-export function eventFor({ severity, own = false, approvals = true }) {
+/** The PR's review as GitHub takes it, from its highest counted severity. `own`: your own PR; `approvals`: Approve PRs; `requestChanges`: Request changes (off: blocking findings go in a comment review, which doesn't block merging). */
+export function eventFor({ severity, own = false, approvals = true, requestChanges = true }) {
   const ok = approvable(severity);
   if (own) return { event: 'COMMENT', noBlocking: false, approval: ok ? 'awaiting-human' : null };
-  if (!ok) return { event: 'REQUEST_CHANGES', noBlocking: false, approval: null };
+  if (!ok) return { event: requestChanges ? 'REQUEST_CHANGES' : 'COMMENT', noBlocking: false, approval: null };
   return approvals ? { event: 'APPROVE', noBlocking: false, approval: 'approved' } : { event: 'COMMENT', noBlocking: true, approval: 'awaiting-human' };
 }
 

@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { HOME, readChecks, writeJson } from '../config.mjs';
 import { matchChecks, runChecks, TAIL } from '../checks.mjs';
-import { actionable, appendAnswer, parkedUrls, pastAnswers, readAnswers, repliesToPost, stripParked, validateFeedback } from '../feedback.mjs';
+import { actionable, appendAnswer, parkedUrls, pastAnswers, readAnswers, changeRequests, repliesToPost, stripParked, validateFeedback } from '../feedback.mjs';
 import { addWorktree, attrSource, fetchBranch, git, hooksOff, ownNumstat, push, remoteSha, removeWorktree, short, succeeds } from '../git.mjs';
 import * as github from '../github.mjs';
 import { branchRefusal, guardFailures, prRefusal } from '../guards.mjs';
@@ -1193,7 +1193,7 @@ export function createBuilder(app, deps) {
       for (const c of fix?.failing || []) failing.push({ ...c, log: await gh.failedLog(c.link).catch(() => '') });
       const details = await gh.detailsFromGitHub(pr).catch(() => '');
       const threads = actionable(await gh.prThreads(pr), b().fixFrom, parkedUrls(details));
-      const reviews = (await gh.prReviews(pr)).filter(r => r.state === 'CHANGES_REQUESTED' && (Date.parse(r.at) || 0) > (w.lastActivityAt || 0));
+      const reviews = changeRequests(await gh.prReviews(pr)).filter(r => (Date.parse(r.at) || 0) > (w.lastActivityAt || 0));
       answersText.push(details, ...threads.map(t => t.body), ...reviews.map(r => r.body));
       (w.branches ??= {})[pr.url] = facts.headBranch; // for the PR's details: a build that only follows PRs has no repo record of its own
       prs.push({ pr, repo: pr.repo, number: pr.number, url: pr.url, title: pr.title, branch: facts.headBranch, headSha: sha, worktree, clone: dir, details: stripParked(details), reviews, threads,

@@ -14,6 +14,7 @@ import * as rv from './reviews.mjs';
 import { checkPlan, checksLine, prChecks } from './checks.mjs';
 import { backfillUsage } from '../stats.mjs';
 import { fillSkeleton } from './handover.mjs';
+import { approverIn, buildNotes, noteBody, prowlApproved, recall } from './memory.mjs';
 import { prepareReview, removePrep, sweepWorktrees } from './prep.mjs';
 import { planPublish } from './publish-plan.mjs';
 import { publishReview } from './publish.mjs';
@@ -102,7 +103,21 @@ export function createReviewer(app, deps) {
   /** One review at a time owns a ticket key, including starts still checking their PRs. */
   const keyHeld = (key, except) => side.running().some(r => r.ticket === key) || [...settingUp].some(([mark, r]) => mark !== except && r.ticket === key);
   /** Only previously reviewed PRs count toward the round cap. */
-  const coveredBy = done => new Set(done.flatMap(r => [...r.prs, ...(r.contextPrs || []).filter(p => !r.relatedUrls?.includes(p.url))].map(p => p.url)));
+  const coveredBy = done => new Set(done.flatMap(r => [...[...r.prs, ...(r.contextPrs || []).filter(p => !r.relatedUrls?.includes(p.url))].map(p => p.url), ...(r.reviewedBefore || [])]));
+  /** True for a key that is a tracker's ticket (Azure DevOps or Jira) with its link known: not a quick review's name, nor a PR standing in for one. */
+  const isTicket = (key, url) => Boolean(url) && ['ado', 'jira'].some(board => ticketKey(key, board) === key); // either board's: a review outlives a change of Task board
+
+  /**
+   * What a review of `key` carries on from: { prior, reviewed, alsoApproved } (recall(), in memory.mjs). `cover`: the
+   * PRs it would cover, `heads` theirs; `known`: the ticket's other open PRs at hand; `partial`: the review covers
+   * only some of the ticket's PRs, so the others are looked up first.
+   */
+  function carryOn(c, key, ticketUrl, cover, heads, known, partial) {
+    const done = side.state.runs.filter(r => r.ticket === key && r.status === 'done').sort((a, b) => b.endedAt - a.endedAt);
+    const ticket = isTicket(key, ticketUrl);
+    return recall({ gh, log, me: app.me, key, ticket, own: done[0], runs: side.state.runs, covered: coveredBy(done), cover, heads, known,
+      lookup: ticket && partial ? () => gh.openPrs(c.githubOwner, key) : null });
+  }
 
   /** Why a quick review of `ready` can't start, or ''. `reserved`: also count PRs another quick review is naming. */
   function heldBy(ready, reserved, except) {
@@ -431,13 +446,12 @@ export function createReviewer(app, deps) {
       // Skip the whole ticket, not just your PRs: prowl-review reviews a ticket's PRs as one set.
       return log('info', `${ticket.key}: skipped, ${mine.map(p => `${p.repo}#${p.number}`).join(', ')} ${mine.length > 1 ? 'are' : 'is'} yours; leaving it for a teammate`, key);
     }
-    const done = state.runs.filter(r => r.ticket === ticket.key && r.status === 'done').sort((a, b) => b.endedAt - a.endedAt);
-    const prior = done[0];
-    const covered = coveredBy(done); // PRs an earlier review covered
     const heads = {}; // PR URL -> its head commit now ('' if unreadable)
     for (const pr of prs) heads[pr.url] = await gh.headSha(pr).catch(() => '');
+    // The ticket's last review, this Prowl's or a teammate's (from its hand-over notes), and the PRs earlier reviews covered.
+    const { prior, reviewed: covered, alsoApproved } = await carryOn(c, ticket.key, ticket.url, prs, heads, found, false);
     // A re-review leaves out the PRs the last review approved that have no new commits since; they stay as context.
-    const approved = prs.filter(pr => prior?.approved?.[pr.url] && prior.approved[pr.url] === heads[pr.url]);
+    const approved = prs.filter(pr => heads[pr.url] && [prior?.approved?.[pr.url], alsoApproved[pr.url]].includes(heads[pr.url]));
     let toReview = prs.filter(p => !approved.includes(p));
     // An earlier-reviewed PR turned back into a draft keeps its findings untouched (the prompt names it, so it isn't re-checked).
     const leftOut = open.filter(p => p.draft && covered.has(p.url));
@@ -494,7 +508,7 @@ export function createReviewer(app, deps) {
       if (!on()) return undefined; // switched off meanwhile: nothing is claimed yet
     }
     // Prowl's own setup comes before the claim too: a quit or crash during it leaves the ticket tagged, with nothing to give back.
-    const opts = { tracker: c.taskBoard, ticket, prs: toReview, approvedPrs: approved, leftOut: prior ? leftOut : [], prior, me: app.me, heads, ticketText };
+    const opts = { tracker: c.taskBoard, ticket, prs: toReview, approvedPrs: approved, leftOut: prior ? leftOut : [], prior, me: app.me, heads, ticketText, alsoApproved, reviewedBefore: prior?.shared ? [...covered] : null };
     let set = null;
     if (stand && prepping()) {
       try {
@@ -1175,16 +1189,14 @@ export function createReviewer(app, deps) {
   async function startReady(c, spec, open, free) {
     const githubReview = spec.source === 'github';
     const active = githubReview ? () => githubOn() && !app.dryRun() : on;
-    const done = side.state.runs.filter(r => r.ticket === spec.key && r.status === 'done').sort((a, b) => b.endedAt - a.endedAt);
-    const prior = done[0];
-    const covered = coveredBy(done);
     const heads = {};
+    for (const pr of open) heads[pr.url] = githubReview ? pr.headSha : pr.headSha || await gh.headSha(pr).catch(() => '');
+    const { prior, reviewed: covered, alsoApproved } = await carryOn(c, spec.key, spec.ticketUrl, open, heads, spec.contextPrs || [], true);
     const approved = [];
     for (const pr of open) {
-      const head = githubReview ? pr.headSha : pr.headSha || await gh.headSha(pr).catch(() => '');
+      const head = heads[pr.url];
       if (githubReview && !active()) throw new Error('GitHub reviews are paused or switched off');
-      heads[pr.url] = head;
-      if (head && prior?.approved?.[pr.url] === head) {
+      if (head && [prior?.approved?.[pr.url], alsoApproved[pr.url]].includes(head)) {
         approved.push(pr);
         if (githubReview) {
           settleClaim(pr, side.state.labelClaims[pr.url], 'approved');
@@ -1200,7 +1212,7 @@ export function createReviewer(app, deps) {
       leftOut.push(...toReview.filter(p => !fresh.includes(p)));
       toReview = fresh;
     }
-    if (!toReview.length) throw lasting(`every PR is already approved, with no new commits since review ${prior.reviewNo}`);
+    if (!toReview.length) throw lasting(`every PR is already approved, with no new commits since ${prior ? `review ${prior.reviewNo}` : "PR-Owl's last review"}`);
     const strip = pr => ({ url: pr.url, title: pr.title, number: pr.number, repo: pr.repo, author: pr.author, draft: false });
     const ticket = { key: spec.key, title: spec.title, url: spec.ticketUrl || '', ref: null };
     if (app.dryRun()) { log('info', `${spec.key}: would review ${toReview.map(p => p.url).join(' ')}`); return null; }
@@ -1213,7 +1225,7 @@ export function createReviewer(app, deps) {
       const cleared = related.filter(p => p.headSha && prior?.approved?.[p.url] === p.headSha);
       for (const p of cleared) heads[p.url] = p.headSha;
       const opts = { tracker: null, ticket, prs: toReview.map(strip), approvedPrs: [...approved, ...cleared].map(strip), leftOut: leftOut.map(strip),
-        prior, me: app.me, heads, quick: !githubReview, source: spec.source, relatedPrs: related.filter(p => !cleared.includes(p)).map(strip), ticketText: spec.ticketText };
+        prior, me: app.me, heads, quick: !githubReview, source: spec.source, relatedPrs: related.filter(p => !cleared.includes(p)).map(strip), ticketText: spec.ticketText, alsoApproved, reviewedBefore: prior?.shared ? [...covered] : null };
       const set = !stand.stopped && active() && prepping() ? await setUp(c, opts, prior, stand) : null;
       try {
         const checkStart = () => {
@@ -1309,16 +1321,23 @@ export function createReviewer(app, deps) {
     // trigger name, and only once Prowl's own labels on the PR have landed.
     const underReview = p => labelsOf(c, p.labels, 'inReview')[0] || '';
     const ready = p => labelsOf(c, p.labels, 'ask').length > 0 && !labels.pending(p.url);
+    // Whether PR-Owl's approval of `p` still stands on GitHub; one whose reviews can't be read keeps what is recorded.
+    const stands = async p => {
+      try { return prowlApproved(await gh.allReviews(p), p.headSha, { marker: rv.postMarker(approverIn(side.state.runs, run, p.url)), me: app.me }); } catch { return true; }
+    };
     const notes = [];
-    for (const p of live.filter(x => underReview(x) && approvedNow(x))) notes.push(`${p.repo}#${p.number} is labelled '${underReview(p)}', but it is approved and only context: it doesn't hold the wait`);
+    const taken = []; // labelled in review, and approved here, but no longer on GitHub: a teammate's review has it
+    for (const p of live.filter(x => underReview(x) && approvedNow(x))) if (!(await stands(p))) taken.push(p);
+    for (const p of live.filter(x => underReview(x) && approvedNow(x) && !taken.includes(x))) notes.push(`${p.repo}#${p.number} is labelled '${underReview(p)}', but it is approved and only context: it doesn't hold the wait`);
     wt.notes = notes;
-    const reviewing = live.filter(p => underReview(p) && !approvedNow(p));
+    const reviewing = live.filter(p => underReview(p) && (!approvedNow(p) || taken.includes(p)));
     if (reviewing.length) {
       wt.waitingOn = reviewing.map(p => p.url);
       return log('info', `${wt.key}: waiting: ${names(reviewing)} ${reviewing.length > 1 ? 'are' : 'is'} labelled '${underReview(reviewing[0])}'`, key);
     }
     const waitedOn = live.filter(p => !run.approved?.[p.url]); // the PRs it didn't approve, and new ones
     let go;
+    let dismissed = false;
     if (waitedOn.length) {
       wt.waitingOn = waitedOn.filter(p => !ready(p)).map(p => p.url);
       go = waitedOn.every(ready);
@@ -1326,11 +1345,18 @@ export function createReviewer(app, deps) {
       // Every PR approved: Ready for Review with new commits since the approval re-reviews; Ready for Review alone waits.
       wt.waitingOn = live.map(p => p.url);
       go = live.some(p => ready(p) && !approvedNow(p));
+      // Asked for again with no new commits: it goes ahead only when PR-Owl's approval no longer stands on GitHub (dismissed, say).
+      for (const p of go ? [] : live.filter(x => ready(x) && !underReview(x))) { // one a teammate's review has is theirs
+        if (await stands(p)) continue;
+        dismissed = true;
+        go = true;
+        break;
+      }
       if (!go && live.some(ready)) log('info', `${wt.key}: '${ask}' is on, but no PR has new commits since it was approved; still waiting`, key);
     }
     save();
     if (!go) return undefined;
-    return startAgain(wt, run, prs, waitedOn.length ? `every PR it didn't approve is labelled '${ask}'` : `labelled '${ask}', with new commits`);
+    return startAgain(wt, run, prs, waitedOn.length ? `every PR it didn't approve is labelled '${ask}'` : dismissed ? `labelled '${ask}', and PR-Owl's approval no longer stands on GitHub` : `labelled '${ask}', with new commits`);
   }
 
   /** The re-review of a wait, once a slot is free. A start that can't go better by waiting ends the wait, naming why. */
@@ -1386,7 +1412,8 @@ export function createReviewer(app, deps) {
     writeJson(file, { body });
     for (const pr of run.prs) {
       try {
-        await gh.postComment(pr, file);
+        const url = await gh.postComment(pr, file);
+        if (/#issuecomment-\d+$/.test(String(url))) { (run.startedComments ??= {})[pr.url] = url; save(); } // the comment its hand-over note goes in
       } catch (e) {
         log('warn', `${run.ticket}: couldn't post the review-started comment on ${pr.repo}#${pr.number} (${e.message})`);
       }
@@ -1467,8 +1494,10 @@ export function createReviewer(app, deps) {
     const kind = githubReview ? 'GitHub review' : 'review';
     const again = githubReview ? `label the PR again with '${askLabel(cfg())}'` : run.quick ? 'n reviews PRs again' : `re-tag '${tags.trigger}' to try again`;
     if (run.resultMode && (resumed || run.status === 'done')) await settleResult(run);
-    if (run.resultMode && run.status === 'done') await dismissSuperseded(run); // before the tags and labels are written; never on a failed or stopped review
-    else if (run.status === 'done') { // a review from before results: its session posted its reviews itself
+    if (run.resultMode && run.status === 'done') {
+      await dismissSuperseded(run); // before the tags and labels are written; never on a failed or stopped review
+      await handOver(run).catch(e => log('warn', `${run.ticket}: couldn't leave its hand-over notes (${e.message})`));
+    } else if (run.status === 'done') { // a review from before results: its session posted its reviews itself
       const unchecked = await checkPosted(run).catch(() => run.prs.map(p => p.url)); // announce any PR posted since the last check
       if (run.marker) rv.failUnposted(run, await missingReviews(run, unchecked)); // reviews started before 2.12.0 have none
     }
@@ -1497,6 +1526,38 @@ export function createReviewer(app, deps) {
     delete run.phase; // settled: from here its tag is pending in the saved state, and applyTag retries it
     save();
     if (run.pendingTag != null) await applyTag(run);
+  }
+
+  /**
+   * Leaves a finished, published review's hand-over notes: on each PR it posted a review on, its Review started
+   * comment is edited to say it finished and to hold the note (a new comment, when that one was never posted). Only
+   * for a review of a ticket. One try per PR: a failure is a warning, and the review is still done.
+   */
+  async function handOver(run) {
+    if (run.handedOver || !isTicket(run.ticket, run.ticketUrl)) return;
+    const result = rv.readResult(run);
+    if (!result) { run.handedOver = true; return save(); }
+    run.handingOver ??= []; // the PRs tried so far: a quit part-way carries on with the rest, and tries none twice
+    const done = side.state.runs.filter(r => r.ticket === run.ticket && r.status === 'done');
+    const notes = buildNotes(run, result, coveredBy([...new Set([...done, run])]));
+    const line = fill(outputTemplate(appDir, 'Review finished'), { n: String(run.reviewNo), ticket: run.ticket, 'ticket link': run.ticketUrl });
+    const file = path.join(path.dirname(run.logPath), `${run.id}.handover.json`);
+    for (const pr of run.prs.filter(p => run.published?.[`review:${p.url}`] && !notes[p.url])) log('warn', `${run.ticket}: no hand-over note on ${prName(pr.url)}: the ticket has too many PRs for one to fit`);
+    for (const pr of run.prs.filter(p => notes[p.url] && !run.handingOver.includes(p.url))) {
+      run.handingOver.push(pr.url);
+      save();
+      try {
+        writeJson(file, { body: noteBody(line, notes[pr.url]) });
+        const id = /#issuecomment-(\d+)$/.exec(run.startedComments?.[pr.url] || '')?.[1];
+        if (id) await gh.editComment(pr, id, file);
+        else await gh.postComment(pr, file);
+      } catch (e) {
+        log('warn', `${run.ticket}: couldn't leave its hand-over note on ${prName(pr.url)} (${e.message}); a teammate's Prowl reviews it next without it`);
+      }
+    }
+    run.handedOver = true;
+    delete run.handingOver;
+    save();
   }
 
   /**

@@ -300,9 +300,9 @@ export async function detailsFromGitHub(pr) {
   return detailsFromBodies(reviews, comments, `${pr.repo.split('/')[1]}-${pr.number}`);
 }
 
-/** The PR's reviews, leaving out bare thread replies (which GitHub also files as reviews): [{ user, state, at, body }]. */
+/** The PR's reviews, leaving out bare thread replies (which GitHub also files as reviews): [{ user, state, at, body, assoc (its author's tie to the repo) }]. */
 export async function prReviews(pr) {
-  return jsonLines(await run('gh', ['api', `repos/${pr.repo}/pulls/${pr.number}/reviews`, '--paginate', '--jq', '.[] | select(.body != "" or .state != "COMMENTED") | {user: .user.login, state, at: .submitted_at, body}']));
+  return jsonLines(await run('gh', ['api', `repos/${pr.repo}/pulls/${pr.number}/reviews`, '--paginate', '--jq', '.[] | select(.body != "" or .state != "COMMENTED") | {user: .user.login, state, at: .submitted_at, body, assoc: .author_association}']));
 }
 
 /** The default branch of `repo` (owner/name). */
@@ -466,14 +466,20 @@ export const replyOn = async (pr, commentId, file) => (await ghApi(['-X', 'POST'
 /** Posts a conversation comment on the PR from `file` ({ body }). Resolves with its URL. */
 export const commentOn = async (pr, file) => (await ghApi(['-X', 'POST', `repos/${pr.repo}/issues/${pr.number}/comments`, '--input', file, '--jq', '.html_url'])).trim();
 
+/** Replaces the body of conversation comment `id` in the PR's repo with the one in `file` ({ body }). Resolves with its URL. */
+export const editComment = async (pr, id, file) => (await ghApi(['-X', 'PATCH', `repos/${pr.repo}/issues/comments/${id}`, '--input', file, '--jq', '.html_url'])).trim();
+
+/** The PR's conversation comments: [{ id, user, body, url }]. */
+export const issueComments = pr => apiLines([`repos/${pr.repo}/issues/${pr.number}/comments`, '--paginate', '--jq', '.[] | {id, user: .user.login, body, url: .html_url}']);
+
 /** Resolves a review thread, or reopens it. */
 export async function setThreadResolved(threadId, resolved) {
   const m = resolved ? 'resolveReviewThread' : 'unresolveReviewThread';
   await ghApi(['graphql', '-f', `query=mutation($id:ID!){${m}(input:{threadId:$id}){thread{isResolved}}}`, '-f', `id=${threadId}`]);
 }
 
-/** Every submitted review on the PR, thread replies included: [{ id, user, state, at, body, commit, url }]. */
-export const allReviews = pr => apiLines([`repos/${pr.repo}/pulls/${pr.number}/reviews`, '--paginate', '--jq', '.[] | {id, user: .user.login, state, at: .submitted_at, body, commit: .commit_id, url: .html_url}']);
+/** Every submitted review on the PR, thread replies included: [{ id, user, state, at, body, commit, url, assoc (its author's tie to the repo: OWNER, MEMBER, COLLABORATOR, …) }]. */
+export const allReviews = pr => apiLines([`repos/${pr.repo}/pulls/${pr.number}/reviews`, '--paginate', '--jq', '.[] | {id, user: .user.login, state, at: .submitted_at, body, commit: .commit_id, url: .html_url, assoc: .author_association}']);
 
 /** Dismisses review `id` on the PR, from `file` ({ message, event: "DISMISS" }). It needs write access, and branch protection can restrict who may. */
 export async function dismissReview(pr, id, file) {

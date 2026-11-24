@@ -193,7 +193,7 @@ export function priorFindings(prior, result, urls) {
 }
 
 /** A review's run, with its prompt written to its prompt file: everything but the session, which launchReview() starts. */
-export function createReview(cfg, { tracker, ticket, prs, approvedPrs = [], relatedPrs = [], source, leftOut = [], prior, me = '', heads = {}, ticketText = '', quick = false, checking = false, prepping = false, appDir = '' }) {
+export function createReview(cfg, { tracker, ticket, prs, approvedPrs = [], relatedPrs = [], source, leftOut = [], prior, me = '', heads = {}, ticketText = '', quick = false, checking = false, prepping = false, appDir = '', alsoApproved = {}, reviewedBefore = null }) {
   const reviewNo = (prior?.reviewNo || 0) + 1;
   const id = runId(ticket.key, reviewNo);
   for (const dir of [REPORTS_DIR, LOGS_DIR, CONFIG_DIR]) fs.mkdirSync(dir, { recursive: true });
@@ -206,7 +206,12 @@ export function createReview(cfg, { tracker, ticket, prs, approvedPrs = [], rela
     // Ends the body of each review the session posts, so finish() can tell its reviews from thread replies.
     marker: postMarker(id),
     // PR URL -> the head commit Prowl approved it at; the skipped and left-out PRs carry over, and finalize() adds this review's.
-    approved: Object.fromEntries([...approvedPrs, ...leftOut].filter(p => prior?.approved?.[p.url]).map(p => [p.url, prior.approved[p.url]])),
+    // `alsoApproved`: approved on GitHub by PR-Owl as it is now, though no review this Prowl knows of says so.
+    approved: Object.fromEntries([...approvedPrs, ...leftOut].map(p => [p.url, prior?.approved?.[p.url] || alsoApproved[p.url]]).filter(([, sha]) => sha)),
+    // PR URL -> the id of the review that gave each carried approval, so a later review can check it is still PR-Owl's latest.
+    approvedBy: Object.fromEntries([...approvedPrs, ...leftOut].filter(p => prior?.approved?.[p.url]).map(p => [p.url, prior.approvedBy?.[p.url] || prior.id])),
+    // The PRs earlier reviews had covered, when the previous review was a teammate's (read from its hand-over notes).
+    ...(reviewedBefore && { reviewedBefore }),
     // The approved PRs that only got Prowl's stamp (Approve PRs off, or your own PR) and still need a human's approval.
     approvals: cfg.approvals, awaitingHuman: [...approvedPrs, ...leftOut].map(p => p.url).filter(u => awaitingHuman(prior, cfg.approvals).includes(u)),
     // Delta re-reviews start at each PR's last reviewed head, including PRs read only for context this round.
@@ -220,6 +225,7 @@ export function createReview(cfg, { tracker, ticket, prs, approvedPrs = [], rela
     // Result mode: the session writes a review result here and nothing to GitHub; Prowl checks it and posts everything itself.
     resultMode: 1, batchId: newBatchId(ticket.key, reviewNo), resultPath: path.join(REPORTS_DIR, `${id}.result.json`),
     resultPrs: [...prs, ...approvedPrs, ...relatedPrs, ...leftOut].map(p => p.url),
+    requestChanges: cfg.requestChanges !== false, // Request changes, off: a PR with blocking findings gets a comment review
     parkHumanOnly: Boolean(cfg.parkHumanOnly), // read as the review starts, like approvals: a change mid-review doesn't change this review
     // The verifier subagents' model and effort, as the prompt passes them ('' = Claude Code's default for subagents).
     verifiers: agentChoice(cfg.claude.verifierModel, cfg.claude.verifierEffort),
@@ -232,12 +238,14 @@ export function createReview(cfg, { tracker, ticket, prs, approvedPrs = [], rela
   if (roles.reviewers) run.orchestrator = { ...roles.session, reviewers: { model: cfg.claude.model, effort: cfg.claude.effort } };
   if (roles.why) run.rolesNote = roles.why;
   // A re-review is given the previous result's live findings; a previous review from before results, its report's findings.
-  const priorResult = prior ? readResult(prior) : null;
+  // A teammate's previous review (prior.shared) has no files here: its hand-over notes carry its findings.
+  const priorResult = prior && !prior.shared ? readResult(prior) : null;
+  const shared = prior?.shared ? prior.handover : null;
   let priorReport = '';
-  if (prior && !priorResult) {
+  if (prior && !priorResult && !shared) {
     try { priorReport = fs.readFileSync(prior.reportPath, 'utf8'); } catch { priorReport = '(the previous report file is missing)'; }
   }
-  run.priorGiven = priorResult ? priorFindings(prior, priorResult, run.resultPrs) : [];
+  run.priorGiven = shared ? shared.findings.filter(f => run.resultPrs.includes(f.pr)) : priorResult ? priorFindings(prior, priorResult, run.resultPrs) : [];
   run.priorRefs = {};
   for (const g of run.priorGiven) (run.priorRefs[g.pr] ??= []).push(g.ref);
   // A prepared re-review gets them as files, with the start of its result; when its folder can't be written, in the prompt.
@@ -250,8 +258,9 @@ export function createReview(cfg, { tracker, ticket, prs, approvedPrs = [], rela
       run.skeletonPath = handover.skeleton;
     } catch { handover = null; }
   }
-  const priorUnverified = Object.fromEntries(prs.map(p => [p.url, String((priorResult?.prs || []).find(x => x.url === p.url)?.coverage?.unverified || '').trim()]).filter(([, text]) => text));
-  fs.writeFileSync(run.promptPath, buildPrompt({ ...run, prior, priorReport, priorFindings: priorResult ? run.priorGiven : null, handover, priorUnverified, reReviewScope: cfg.reReviewScope, heads, ticketText,
+  const unverifiedOf = url => (shared ? shared.unverified.filter(u => u.url === url).map(u => u.text).join(' ') : (priorResult?.prs || []).find(x => x.url === url)?.coverage?.unverified);
+  const priorUnverified = Object.fromEntries(prs.map(p => [p.url, String(unverifiedOf(p.url) || '').trim()]).filter(([, text]) => text));
+  fs.writeFileSync(run.promptPath, buildPrompt({ ...run, prior, priorReport, priorFindings: priorResult || shared ? run.priorGiven : null, handover, priorUnverified, reReviewScope: cfg.reReviewScope, heads, ticketText,
     prepping,
     checker: checkerCommand(appDir || path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..'), run.resultPath, run.batchId, run.resultPrs),
     verifierModel: cfg.claude.verifierModel, verifierEffort: cfg.claude.verifierEffort,
@@ -700,8 +709,11 @@ function reReviewBrief(prior, { source, delta, prs, heads, small, findings, repo
   const index = handover ? findingsIndex(handover.keyed, handover) : null;
   const block = index ? { escaped: false, lines: index.lines } : findings ? findingsBlock(findings) : { escaped: false, lines: ['<previous-findings>', inTag('previous-findings', findingsOnly(report).trim()), '</previous-findings>'] };
   const requested = source === 'github' ? 'The PRs were labelled for another review.' : 'The ticket has been tagged for review again, so the authors believe they have addressed it.';
-  const found = index ? `The previous review (review ${prior.reviewNo}, finished ${finished(prior)} UTC) left ${index.intro}. ${requested}`
-    : `The previous review (review ${prior.reviewNo}, finished ${finished(prior)} UTC) found what is below${block.escaped ? ' (as JSON, with each `<` written `\\u003c`)' : findings ? ' (as JSON)' : ''}. ${requested}`;
+  // A teammate's review, known from its hand-over notes: their login is from GitHub, never free text.
+  const cut = prior.handover?.cut || 0;
+  const by = prior.shared ? `, run by @${String(prior.me).replace(/[^\w-]/g, '')}'s Prowl, whose hand-over note on the PRs is where what follows comes from${cut ? ` (${cut} of its findings didn't fit in the note, so take those from the PRs' open PR-Owl threads)` : ''}` : '';
+  const found = index ? `The previous review (review ${prior.reviewNo}, finished ${finished(prior)} UTC${by}) left ${index.intro}. ${requested}`
+    : `The previous review (review ${prior.reviewNo}, finished ${finished(prior)} UTC${by}) found what is below${block.escaped ? ' (as JSON, with each `<` written `\\u003c`)' : findings ? ' (as JSON)' : ''}. ${requested}`;
   const hints = Object.entries(unverified || {});
   const tail = [
     '', ...block.lines,

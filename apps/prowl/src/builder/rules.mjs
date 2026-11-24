@@ -3,7 +3,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { globRe } from '../checks.mjs';
-import { actionable, questionShape } from '../feedback.mjs';
+import { actionable, changeRequests, questionShape } from '../feedback.mjs';
 import { checksState } from '../github.mjs';
 import { insideRoots } from '../fence.mjs';
 import { labelRole, tagReader } from '../names.mjs';
@@ -222,11 +222,11 @@ export const spendLevel = (spent, cap) => (!(cap > 0) ? '' : spent >= cap ? 'ove
 const at = s => Date.parse(s) || 0;
 
 /**
- * Why a followed PR needs a round, or '': a review requesting changes, or an unresolved thread from whoever `fixFrom`
+ * Why a followed PR needs a round, or '': a review requesting changes (or a PR-Owl comment review with blocking findings), or an unresolved thread from whoever `fixFrom`
  * covers, newer than `since` (the Builder's last push or round). `reviews` and `threads` as github.mjs reads them.
  */
 export function feedbackDue({ reviews = [], threads = [] }, since, fixFrom) {
-  const asked = reviews.filter(r => r.state === 'CHANGES_REQUESTED' && at(r.at) > since);
+  const asked = changeRequests(reviews).filter(r => at(r.at) > since);
   if (asked.length) return `${asked.at(-1).user || 'a reviewer'} requested changes`;
   const open = actionable(threads, fixFrom).filter(t => at(t.lastAt) > since);
   return open.length ? `${open.length} unresolved thread${open.length > 1 ? 's' : ''}` : '';
@@ -239,7 +239,8 @@ export function feedbackDue({ reviews = [], threads = [] }, since, fixFrom) {
  */
 export function mergeReady(prs, lastPushAt, now = Date.now()) {
   return prs.length > 0 && prs.every(p => {
-    const latest = p.reviews.filter(r => r.state !== 'COMMENTED').sort((a, b) => at(a.at) - at(b.at)).at(-1);
+    const asking = changeRequests(p.reviews);
+    const latest = p.reviews.filter(r => r.state !== 'COMMENTED' || asking.includes(r)).sort((a, b) => at(a.at) - at(b.at)).at(-1);
     if (latest?.state !== 'APPROVED' || p.threads.some(t => !t.resolved)) return false;
     return p.checks.length ? checksState(p.checks) === 'green' : now - lastPushAt >= 10 * 60_000;
   });

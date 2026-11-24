@@ -1,6 +1,7 @@
 // What Prowl posts on GitHub for a review, worked out from its result: per PR, the replies on earlier threads, the
 // threads to reopen and resolve, the review with its inline comments, and the details file. Pure: publish.mjs makes
 // the calls, and runs planPublish() again before each one, so later posts can link what earlier ones produced.
+import { CHANGES_MARKER, CLEAR_MARKER } from '../feedback.mjs';
 import { cut, esc, fenceFor, fillTemplate, flat, LIMIT, place, prName, short, stateNote, TRIMMED } from './render.mjs';
 import { approvable, bySeverity, counts, eventFor, findingsOn, isCounted, isParked, notCarried, notChecked, NOT_FULLY, SEVERITIES, supersededTally, worst } from './result.mjs';
 
@@ -103,7 +104,7 @@ const anchorAt = (lines, { text, nth }) => { let seen = 0; return lines.findInde
 
 /**
  * Everything to post for a review, and what it comes to. `ctx`:
- *   run: the review ({ id, ticket, ticketUrl, me, approvals, parkHumanOnly, prs, priorRefs, published, publishFallback, split }),
+ *   run: the review ({ id, ticket, ticketUrl, me, approvals, requestChanges, parkHumanOnly, prs, priorRefs, published, publishFallback, split }),
  *   templates: outputTemplates() (get(heading)), labels: verdictLabels(),
  *   prs: { [url]: { state ('open' | 'merged' | 'closed'), title, author, files (commentable(), or null when they
  *     couldn't be read), threads ([{ id, commentId, resolved, outdated, lastBody, lastProwlBody }], or null) } },
@@ -138,7 +139,7 @@ export function planPublish(given, ctx) {
     rec.notChecked = notChecked(result, p.url, opts);
     rec.notCarried = notCarried(result, p.url, run.priorRefs?.[p.url] || []);
     const own = Boolean(run.me && String(p.author || info.author || '').toLowerCase() === run.me.toLowerCase());
-    const base = eventFor({ severity: rec.severity, own, approvals: run.approvals !== false });
+    const base = eventFor({ severity: rec.severity, own, approvals: run.approvals !== false, requestChanges: run.requestChanges !== false });
     const withheld = Boolean(base.approval) && (rec.notChecked.length > 0 || rec.notCarried.length > 0);
     rec.withheld = !withheld ? '' : [rec.notChecked.length && "something wasn't checked", rec.notCarried.length && `${rec.notCarried.length} earlier finding${rec.notCarried.length > 1 ? 's' : ''} not carried over`].filter(Boolean).join(', and ');
     rec.event = base.event === 'APPROVE' && (withheld || rec.fallback === 'head') ? 'COMMENT' : base.event;
@@ -256,7 +257,7 @@ export function planPublish(given, ctx) {
     // The hidden note: what this review's verifiers found not to be defects, for a later review to read first. Never moved to part 2.
     const note = stateNote(bySeverity(mine.filter(f => ds.get(f).state)));
     const bodyWith = block => [banner, noBlocking && T('No blocking issues (approvals off)'), fillTemplate(T('Review body'), { summary: clip(esc(flat(entry.summary)), share(0.05)), 'finding lines': lines, 'details block': block }),
-      note, reviewMarker(run.id)].filter(Boolean).join('\n\n');
+      note, rec.event === 'COMMENT' && (rec.approval ? CLEAR_MARKER : !approvable(rec.severity) && CHANGES_MARKER), reviewMarker(run.id)].filter(Boolean).join('\n\n');
     const block = (heading, text, fence) => fillTemplate(T(heading), { 'details file name': name, 'details fence': fence, 'details file': text });
     const part2Body = (text, fence) => `${block('Details part 2', text, fence)}\n${part2Marker(run.id)}`;
     const part2Url = pub[`part2:${p.url}`] || '';

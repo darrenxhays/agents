@@ -35,6 +35,14 @@ Prowl posts this as a comment on each PR as soon as it starts reviewing it, so p
 🦉 **PR-Owl** is reviewing this PR for [<ticket>](<ticket link>). Its review lands here when it's done.
 ```
 
+## Review finished
+
+When a review of a ticket ends, Prowl edits its Review started comment on each PR it posted a review on to read this. `<n>` is the review's number for the ticket, `<ticket>` the ticket key and `<ticket link>` its URL. Prowl adds its hand-over notes to the same comment itself, hidden: the next review of the ticket carries on from them, whoever's Prowl runs it.
+
+```markdown
+🦉 **PR-Owl** finished review <n> of this PR for [<ticket>](<ticket link>). <sub>This comment holds PR-Owl's hand-over notes, so the next review carries on from this one, whoever's Prowl runs it. Please don't edit or delete it.</sub>
+```
+
 ## Quick review started
 
 The Review started comment for a quick review, which has no ticket: the PRs someone asked Prowl to review together (`n` in Prowl, or `prowl --review`). `<prs>` is the PRs under review, as links (`[repo#12](…)`), comma-separated.
